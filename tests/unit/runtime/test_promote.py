@@ -3,11 +3,11 @@ from pathlib import Path
 import pytest
 from sqrlly.runtime.promote import (
     PromoteConflictError,
+    PromoteHeadMovedError,
     PromotionPlan,
     apply_changes,
     discover_changes,
     plan_promotions,
-    promote,
     reconcile_promotions,
 )
 from sqrlly.schema.models import OutputContract
@@ -52,29 +52,6 @@ def test_discover_path_with_spaces(tmp_path):
     changes = discover_changes(str(wt))
     assert "has space.md" in changes          # no surrounding quotes
     assert changes["has space.md"] == "added"
-
-
-def test_promote_applies_add_and_edit_to_base(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"a.txt").write_text("changed"); (wt/"new.md").write_text("hi")
-    applied = promote(str(wt), str(tmp_path))
-    assert (tmp_path/"a.txt").read_text() == "changed"
-    assert (tmp_path/"new.md").read_text() == "hi"
-    assert set(applied) == {"a.txt", "new.md"}
-
-
-def test_promote_deletion_propagates(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"a.txt").unlink()
-    promote(str(wt), str(tmp_path))
-    assert not (tmp_path/"a.txt").exists()
-
-
-def test_promote_creates_nested_dirs(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"sub").mkdir(); (wt/"sub"/"deep.md").write_text("z")
-    promote(str(wt), str(tmp_path))
-    assert (tmp_path/"sub"/"deep.md").read_text() == "z"
 
 
 def test_apply_changes_applies_only_the_given_paths(tmp_path):
@@ -200,6 +177,30 @@ def test_reconcile_fail_aborts_before_any_write(tmp_path):
     assert not (tmp_path/"shared.txt").exists()
     assert (tmp_path/"a.txt").read_text() == "orig"
     assert not (tmp_path/"b.txt").exists()
+
+
+def test_reconcile_fails_on_committed_worktree(tmp_path):
+    _repo(tmp_path)
+    committed = _wt(tmp_path, "committed"); dirty = _wt(tmp_path, "dirty")
+    (committed/"c.txt").write_text("c")
+    subprocess.run(["git", "-C", str(committed), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(committed), "commit", "-q", "-m", "work"],
+                   check=True)
+    (dirty/"d.txt").write_text("d")
+    dirty_spec = ("dirty_node", str(dirty), None)
+    with pytest.raises(PromoteHeadMovedError) as exc:
+        reconcile_promotions(
+            [dirty_spec, ("committed_node", str(committed), None)],
+            str(tmp_path), "warn",
+        )
+    assert exc.value.nodes == {"committed_node": str(committed)}
+    assert "committed_node" in str(exc.value)
+    # The raise precedes every copy, including the uncommitted sibling's.
+    assert not (tmp_path/"c.txt").exists()
+    assert not (tmp_path/"d.txt").exists()
+    # A worktree with only uncommitted edits still promotes.
+    reconcile_promotions([dirty_spec], str(tmp_path), "warn")
+    assert (tmp_path/"d.txt").read_text() == "d"
 
 
 def test_reconcile_disjoint_promotes_both(tmp_path):

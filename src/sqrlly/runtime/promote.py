@@ -111,13 +111,6 @@ def apply_changes(worktree: str, base: str, changes: dict[str, str]) -> list[str
     return list(changes)
 
 
-def promote(worktree: str, base: str, globs: list[str] | None = None) -> list[str]:
-    """Apply the worktree's discovered delta onto ``base`` (single-source).
-    Assumes ``base`` has not diverged for these paths (it is the fork
-    point). Returns applied paths."""
-    return apply_changes(worktree, base, discover_changes(worktree, globs))
-
-
 @dataclass
 class PromotionPlan:
     """Reconciliation result for multiple nodes' promote footprints.
@@ -147,6 +140,35 @@ class PromoteConflictError(Exception):
         )
 
 
+class PromoteHeadMovedError(Exception):
+    """Raised by ``reconcile_promotions`` when a worktree's HEAD is not an
+    ancestor of the base HEAD: the node committed inside its worktree, and
+    ``git status`` cannot see committed work. ``nodes`` maps ``node_id`` →
+    worktree path."""
+
+    def __init__(self, nodes: dict[str, str]):
+        self.nodes = nodes
+        detail = "; ".join(f"{nid} ({wt})" for nid, wt in sorted(nodes.items()))
+        super().__init__(
+            f"Promote aborted, nothing written: {len(nodes)} node(s) committed "
+            f"inside their worktree, and promotion copies uncommitted changes "
+            f"only: {detail}. The commits remain in each worktree; run "
+            f"`git reset --soft <base HEAD>` there, or cherry-pick them."
+        )
+
+
+def _head_moved(worktree: str, base_head: str) -> bool:
+    """True when ``worktree``'s HEAD is not an ancestor of ``base_head``."""
+    proc = subprocess.run(
+        ["git", "-C", worktree, "merge-base", "--is-ancestor", "HEAD", base_head],
+        capture_output=True, text=True,
+    )
+    if proc.returncode > 1:  # 0 = ancestor, 1 = not; anything else is a git error
+        raise subprocess.CalledProcessError(
+            proc.returncode, proc.args, proc.stdout, proc.stderr)
+    return proc.returncode == 1
+
+
 def reconcile_promotions(
     specs: list[tuple[str, str, list[str] | None]], base: str, mode: str,
     excludes: list[str] | None = None,
@@ -157,8 +179,20 @@ def reconcile_promotions(
     ``specs`` is ``[(node_id, worktree, globs), ...]`` in promote order.
     ``excludes`` (git ``:(exclude)`` pathspecs) are filtered from EVERY node's
     footprint; ``includes`` are re-added after — the allow-list half of
-    exclude. Returns the ``PromotionPlan``. Raises ``PromoteConflictError``
-    (``mode='fail'``) before any file is written."""
+    exclude. Returns the ``PromotionPlan``. Raises ``PromoteHeadMovedError``
+    (a worktree holds commits) or ``PromoteConflictError`` (``mode='fail'``)
+    before any file is written."""
+    if specs:
+        base_head = subprocess.run(
+            ["git", "-C", base, "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        moved = {
+            node_id: worktree for node_id, worktree, _ in specs
+            if _head_moved(worktree, base_head)
+        }
+        if moved:
+            raise PromoteHeadMovedError(moved)
     footprints = {
         node_id: discover_changes(worktree, globs, excludes=excludes,
                                   includes=includes)
