@@ -3,6 +3,18 @@
 All notable changes to sqrlly are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Removed
+
+- `transport: acp` and the `acp` extra. A preset with `transport: acp` now
+  fails validation; use `transport: cli`.
+
+### Changed
+
+- LangGraph requirement is now `>=1.2,<2` and `langgraph-checkpoint-sqlite`
+  `>=3.1,<4`.
+
 ## [0.9.4] - 2026-08-05
 
 ### Added

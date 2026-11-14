@@ -20,14 +20,11 @@ uvx sqrlly --help               # run once, no install
 As a project dependency:
 
 ```bash
-uv add sqrlly                   # CLI backend    (or: pip install sqrlly)
-uv add "sqrlly[acp]"            # + ACP backend  (or: pip install "sqrlly[acp]")
+uv add sqrlly                   # or: pip install sqrlly
 ```
 
 LLM dispatch uses a local authenticated agent CLI. Codex is the default:
 
-- `transport: acp` — the `claude-code-acp` adapter (warm process,
-  streaming chunks). Requires `npm i -g @zed-industries/claude-code-acp`.
 - `transport: cli`, `provider: openai` — `codex exec` subprocess-per-call
   (no warm process, real `asyncio` parallelism). Requires `codex` on PATH.
 - `transport: cli`, `provider: anthropic` — the opt-in `claude -p`
@@ -128,25 +125,25 @@ installed Codex model catalog currently gives `gpt-5.6-luna` its `medium`
 default effort. sqrlly does not set that effort in workflow YAML. Claude
 remains available as an explicit `provider: anthropic` preset.
 
-Pick a transport by what shape suits the workflow:
+`cli` is the only transport. The provider picks the CLI:
 
-| Transport | Invocation | Best for |
-|---|---|---|
-| `acp` | `claude-code-acp` adapter (warm process, streaming) | Workflows that want streamed chunks or MCP-via-session. |
-| `cli` | `codex exec ... -` for `provider: openai`; `claude -p` for `provider: anthropic` | Fan-out workflows — real `asyncio` parallelism per call, simpler lifecycle. |
+| Provider | Invocation |
+|---|---|
+| `openai` | `codex exec ... -` |
+| `anthropic` | `claude -p` |
+
+Each call is its own subprocess, so fan-out gets real `asyncio` parallelism.
 
 `transport` defaults to `cli` and `provider` defaults to `openai`, so a
 preset needs only `model` for the default Codex CLI. Use
-`provider: anthropic` for Claude; it defaults to the Claude CLI when
-`transport` is omitted. `transport: acp` requires an explicit
-`provider: anthropic`. Multiple presets can coexist in one workflow; only
+`provider: anthropic` for Claude. Multiple presets can coexist in one workflow; only
 one is `default: true`, and nodes select alternatives with `params.preset`.
 
 **Declare presets explicitly.** sqrlly doesn't probe your environment
 or synthesize defaults. Empty `settings.presets` is valid for
 script-only workflows; any LLM-dispatching node will fail at its call
 site with a clear "no prompt backend wired" error. If a backend's
-toolchain is missing at run time (`npx` for acp, or `codex`/`claude` for cli),
+toolchain is missing at run time (`codex` or `claude`),
 the backend surfaces a clear error at the first prompt call — never
 as a pre-flight check (a pre-flight would forbid workflows that
 install the toolchain in an earlier script node).
@@ -173,7 +170,7 @@ Full reference (including `CommandPreset` for custom script interpreters): [SCHE
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
 - `--log <path>` — write a JSONL event log.
 - `--quiet / -q` — suppress the live terminal renderer (use in CI / piped runs).
-- `--safe-mode / --no-safe-mode` — run Anthropic's CLI provider with Claude operator customizations (output styles, CLAUDE.md, skills, MCP, hooks) disabled. It has no effect on Codex or ACP. Overrides `settings.safe_mode`; absent, the setting applies.
+- `--safe-mode / --no-safe-mode` — run Anthropic's CLI provider with Claude operator customizations (output styles, CLAUDE.md, skills, MCP, hooks) disabled. It has no effect on Codex. Overrides `settings.safe_mode`; absent, the setting applies.
 
 `run` shows a live per-node status grid + a clock-driven aliveness spinner when stdout is a TTY. Non-TTY runs (piped, redirected, CI) fall through to the plain summary output automatically. Workflow events only — no LLM-token streaming. On completion `run` prints a `where to find things` summary — the produced output files, the log path (or how to capture one with `--log`), and run artifacts (checkpoint DB + worktree pool); `--quiet` suppresses it.
 
@@ -203,8 +200,8 @@ Render any example's interactive view with `sqrlly view <workflow.yaml>`; `examp
 - **Layer rules** — `tests/architecture/test_layers.py` enforces the import boundaries; `CLAUDE.md` has the architecture sketch + contributor reading order.
 
 ```bash
-uv run pytest tests/ --ignore=tests/acp     # ~1k tests
-uv run pytest tests/acp                     # ACP integration (needs the npm adapter)
+uv run pytest tests/ --ignore=tests/cli     # ~1k tests
+uv run pytest tests/cli                     # CLI backend integration (needs `codex` and `claude` on PATH)
 ```
 
 ## License

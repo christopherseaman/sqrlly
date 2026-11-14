@@ -9,9 +9,8 @@ single warm session.
 Lifecycle: zero. ``close()`` is a no-op. There is no in-process state
 to tear down, and each subprocess inherits / exits on its own.
 
-Overload mapping uses the same substring set as the ACP backend
-(``ACP_OVERLOAD_SUBSTRINGS = {"529", "overload"}``). The historical
-constant name is retained, but the set is shared by all CLI providers.
+Overload mapping uses ``OVERLOAD_SUBSTRINGS = {"529", "overload"}``,
+shared by all CLI providers.
 """
 from __future__ import annotations
 
@@ -21,7 +20,7 @@ import signal
 from typing import Any
 
 from sqrlly.runtime.executor.backends._overload import (
-    ACP_OVERLOAD_SUBSTRINGS,
+    OVERLOAD_SUBSTRINGS,
     maybe_raise_overload,
 )
 from sqrlly.runtime.result import ExecutionResult
@@ -36,12 +35,9 @@ async def _kill_process_group(proc: Any) -> None:
     test runners, headless browsers). ``proc.kill()`` would signal only the
     direct child and leak that tree; ``os.killpg`` reaches the whole group.
 
-    No ``/proc`` walk is needed (unlike ``backends/acp.py``): the ACP path
-    kills AFTER the adapter's graceful ``__aexit__``, by which point its
-    grandchildren have reparented to PID 1 and escaped the spawn group. Here
-    the parent is still alive (it is the group leader) when we signal, so the
-    descendants have not reparented and a single group signal reaches them
-    all. We reap the parent with ``proc.wait()`` afterward so the OS does not
+    No ``/proc`` walk is needed: the parent is still alive (it is the group
+    leader) when we signal, so the descendants have not reparented to PID 1
+    and a single group signal reaches them all. We reap the parent with ``proc.wait()`` afterward so the OS does not
     accumulate a zombie.
     """
     try:
@@ -169,7 +165,7 @@ class CLIBackend:
             combined = "\n".join(t for t in (stderr_text, stdout_text) if t)
             maybe_raise_overload(
                 RuntimeError(combined),
-                message_substrings=ACP_OVERLOAD_SUBSTRINGS,
+                message_substrings=OVERLOAD_SUBSTRINGS,
             )
             detail = combined or "(no output on stdout or stderr)"
             raise RuntimeError(

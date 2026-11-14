@@ -149,7 +149,7 @@ class TestCLIBackendStdin:
 class TestCLIBackendSuccess:
     @pytest.mark.asyncio
     async def test_returns_stdout_stripped(self, tmp_path):
-        """Trailing whitespace from the fake is stripped (matches ACP shape)."""
+        """Trailing whitespace from the fake is stripped."""
         fake = _write_fake(
             tmp_path, "claude-fake",
             '#!/bin/sh\necho "  hello  "\n',
@@ -168,8 +168,7 @@ class TestCLIBackendOverload:
         """exit 1 + stderr containing 'overload' → OverloadError.
 
         The downgrade chain in execute_with_downgrade relies on this mapping;
-        the substring set comes from _overload.ACP_OVERLOAD_SUBSTRINGS
-        (shared with the ACP path).
+        the substring set comes from _overload.OVERLOAD_SUBSTRINGS.
         """
         fake = _write_fake(
             tmp_path, "claude-fake",

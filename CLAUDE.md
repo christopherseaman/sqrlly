@@ -1,7 +1,7 @@
 # sqrlly — Operator Notes for Claude
 
 Workflow orchestrator using LangGraph for graph topology and local agent
-CLIs (Codex by default, Claude via ACP/CLI) / scripts for execution.
+CLIs (Codex by default, Claude opt-in) / scripts for execution.
 
 This file is operational guidance for Claude Code working inside this
 repo. Narrative documentation lives elsewhere:
@@ -48,12 +48,10 @@ enforced by `tests/architecture/test_layers.py`.
 
 ```bash
 uv sync                                      # core deps
-npm i -g @zed-industries/claude-code-acp     # for ACP backend / acp tests
-# `codex` CLI on PATH                        # for cli backend / cli tests
+# `codex` and `claude` CLIs on PATH          # for cli tests
 
-uv run pytest tests/ --ignore=tests/acp --ignore=tests/cli -v   # ~1k tests, ~50s
-uv run pytest tests/acp -v                   # ACP tests, ~2 min, requires npm package above
-uv run pytest tests/cli -v                   # CLI tests, ~15s, requires `codex` on PATH
+uv run pytest tests/ --ignore=tests/cli -v   # ~1k tests, ~50s
+uv run pytest tests/cli -v                   # CLI tests, requires `codex` and `claude` on PATH
 uv run pytest -m live -v                     # restored live-roundtrip (cli-only)
 uv run pytest tests/architecture/test_layers.py  # layer rule enforcement
 
@@ -62,7 +60,7 @@ uv run sqrlly run config.yaml             # uses settings.presets (required)
 uv run sqrlly run config.yaml -p <name>   # force a named preset from settings.presets
 uv run sqrlly run config.yaml --resume    # resume from checkpoint
 uv run sqrlly run config.yaml --entry <node>  # cold-start: run <node> + downstream, no checkpoint
-uv run sqrlly run config.yaml --safe-mode  # Claude-only clean mode; no effect on Codex/ACP
+uv run sqrlly run config.yaml --safe-mode  # Claude-only clean mode; no effect on Codex
 uv run sqrlly run config.yaml --log out.jsonl
 uv run sqrlly graph config.yaml           # Mermaid topology
 uv run sqrlly view config.yaml            # self-contained HTML viewer
@@ -169,17 +167,13 @@ langgraph-free).
   downgrade); flattened from the former `PromptExecutor` class.
 - `executor/preset.py` — `resolve_preset_name` / `build_preset_registry`
   (named-preset → backend registry; CLI `--preset` override).
-- `executor/backends/{acp,cli,factory}.py`. Two LLM backends
-  coexist: ACP (warm `claude-code-acp` adapter) and CLI
-  (subprocess-per-call Codex or Claude).
-  `factory.create_backend_from_preset` is a lookup table
-  keyed on `(transport, provider)`.
+- `executor/backends/{cli,factory}.py` — the CLI backend
+  (subprocess-per-call Codex or Claude) and
+  `factory.create_backend_from_preset`, which builds it from an
+  `LlmPreset`.
 - `executor/backends/_overload.py` — `maybe_raise_overload` +
-  `ACP_OVERLOAD_SUBSTRINGS`. Both ACP and CLI backends share the
-  same substring set because both ultimately hit the same upstream
-  Claude API; the historical name "ACP" is retained.
-- `executor/backends/_acp_policy.py` — pure ACP tool-permission policy
-  (`permission_mode` + tool lists → allow/deny by tool kind+title).
+  `OVERLOAD_SUBSTRINGS` (transient-error text mapped to
+  `OverloadError`).
 
 **`src/sqrlly/cli/`** — entry point + helpers.
 - `main.py` — Click CLI (`init` / `validate` / `run` / `graph` / `view`);
@@ -198,7 +192,7 @@ langgraph-free).
 These guide all new tests; violations should be flagged in review.
 
 1. **No mocks of external systems.** Tests use real subprocess / real
-   ACP / real validators. `MockExecutor` (`tests/mock_executor.py`) is
+   validators. `MockExecutor` (`tests/mock_executor.py`) is
    a custom test double implementing the `NodeExecutor` Protocol —
    NOT `unittest.mock`.
 2. **Tests validate output, not just absence-of-error.** Every test
@@ -209,14 +203,13 @@ These guide all new tests; violations should be flagged in review.
    Every helper gets a success path AND a failure path. Use
    `@pytest.mark.parametrize` for routing tables.
 4. **Multi-function E2E tests use simple, scenario-scoped workflows.**
-   Linear / diamond / fan-out / resume / ACP each get a fixture
+   Linear / diamond / fan-out / resume each get a fixture
    tailored to the scenario.
 5. **No separate test codepaths in source.** Functions must not have
    `if testing:` branches. If a function can't be tested without
    special-casing, redesign it.
 6. **No skip-around-the-bug.** No `try/except: pytest.skip(...)` to
-   mask missing dependencies. ACP is a hard pre-req at collection
-   time (see `tests/conftest.py`); skip is `--ignore=tests/acp`.
+   mask missing dependencies.
 7. **If testing is impossible** (missing auth, unreliable env): STOP
    and raise the question. Do not paper over.
 8. **Quality > count.** A few tests that pin meaningful output beat
@@ -224,10 +217,7 @@ These guide all new tests; violations should be flagged in review.
 9. **Layer boundary tests** (`tests/architecture/test_layers.py`)
    enforce the three-layer split via AST walking. New source files
    must respect the import rules.
-10. **ACP tests require `@zed-industries/claude-code-acp`** installed
-    globally. Pre-flight in `tests/conftest.py` exits collection with
-    install instructions if missing.
-11. **Live-backend tests use `pytest.mark.live` + `pytest.mark.skipif(
+10. **Live-backend tests use `pytest.mark.live` + `pytest.mark.skipif(
     KEY is None, ...)`.** Self-skipping when the matching API key is
     absent on disk; opt-in for isolation via `pytest -m live`. Never
     fail loudly without a key — silent skip is the contract. The
@@ -236,7 +226,7 @@ These guide all new tests; violations should be flagged in review.
     backend.
 
 The `feedback_no_fake_backends.md` memory expands on (1): no fake
-`PromptBackend` doubles; real ACP / real subprocess only. The one
+`PromptBackend` doubles; real subprocess only. The one
 sanctioned exception is orchestration instrumentation (e.g. patching
 `factory.shutil.which` to choose which environment-shape branch the
 resolver sees) — distinct from faking what an external system returns.
@@ -259,11 +249,9 @@ resolver sees) — distinct from faking what an external system returns.
   spawns the provider CLI with `start_new_session=True` (own process group) and, on
   timeout/cancel, SIGTERM→SIGKILLs the process GROUP
   (`runtime/executor/backends/cli.py::_kill_process_group`), so descendants
-  (MCP servers, test runners, headless browsers) are reaped too. Unlike ACP —
-  which `/proc`-walks because its descendants reparent to PID 1 after the
-  adapter's graceful `__aexit__` — the CLI parent is still alive (the group
-  leader) when we signal, so a single `killpg` reaches the whole tree; no
-  `/proc` walk needed.
+  (MCP servers, test runners, headless browsers) are reaped too. The CLI
+  parent is still alive (the group leader) when we signal, so a single
+  `killpg` reaches the whole tree.
 - **Hyphenated node IDs in Jinja templates** — `{{research-phase}}`
   parses as subtraction; use underscores. `validate`/`run` emit an
   advisory warning (`compile/lint.py`).
@@ -304,9 +292,6 @@ resolver sees) — distinct from faking what an external system returns.
   collision risk; child ids need only be unique within their own subgraph.
 - **Checkpointer migration** — pre-refactor `.sqrlly-state.json` is
   ignored on `--resume`; re-run from scratch.
-- **ACP soak under load** — process-tree cleanup is fixed for the test
-  scenario, but a multi-hour run with `max_parallel_jobs > 1` is
-  unvalidated end-to-end (TODO 49).
 - **`_route_sender` is last-write-wins** — a node reachable by a static
   `depends_on` edge AFTER an inline-route hop elsewhere can see a stale
   `{{sender_id}}`; guard with `{% if sender_id %}` in that rare
@@ -370,9 +355,6 @@ resolver sees) — distinct from faking what an external system returns.
   `langchain_core` is harmless. The system runs on 3.14.2 in this
   env; `python` binary is unavailable — use `sys.executable` for
   subprocess calls in tests.
-- **ACP `aclose()` warning** on Python 3.14 — async-generator cleanup
-  warning from the SDK. Harmless; the new `close()` reaps the
-  process tree explicitly via `/proc` walk.
 - **`tests/__init__.py` must NOT exist** — its presence breaks
   `from helpers import ...` and `from mock_executor import ...` in
   tests. Removing it is the supported state.
@@ -380,8 +362,6 @@ resolver sees) — distinct from faking what an external system returns.
   `.env` discovery/parsing only (never machine-global keystores),
   consumed by `url.py::_expand_vars` (header `${VAR}` expansion:
   process env first, then `.env` walking up from CWD).
-- **`pyproject.toml`** marker for ACP tests: `acp` (used in
-  `pytest -m`).
 
 ## Quick references
 
@@ -395,7 +375,7 @@ resolver sees) — distinct from faking what an external system returns.
 | New WorkflowState field | `src/sqrlly/runtime/state.py` (TypedDict + REDUCERS) — beware of parity invariant in `compile/dynamic.py::_merge_updates` |
 | Inline routing (route block, sender bindings, include_eval preamble) | `src/sqrlly/schema/models.py::Route`, `src/sqrlly/compile/graph.py::_make_inline_route_node`, `src/sqrlly/runtime/gates.py::build_eval_preamble` |
 | Layer rule violation | `tests/architecture/test_layers.py` errors point to the offending file |
-| Transient-error → `OverloadError` mapping | `src/sqrlly/runtime/executor/backends/_overload.py::maybe_raise_overload` (status-code set + `ACP_OVERLOAD_SUBSTRINGS`) |
+| Transient-error → `OverloadError` mapping | `src/sqrlly/runtime/executor/backends/_overload.py::maybe_raise_overload` (`OVERLOAD_SUBSTRINGS`) |
 
 When in doubt before changing compile or runtime layer code, re-read the
 "Known limitations" section above and the `tests/architecture/test_layers.py`

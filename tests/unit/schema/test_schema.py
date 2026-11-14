@@ -226,7 +226,7 @@ class TestPresetReferenceValidation:
         return {
             "presets": {
                 "default": {
-                    "transport": "acp", "provider": "anthropic",
+                    "transport": "cli", "provider": "anthropic",
                     "model": "sonnet", "default": True,
                 },
             },
@@ -298,9 +298,8 @@ class TestPresetReferenceValidation:
 class TestLlmPresetTransport:
     """Schema-level coverage of ``LlmPreset.transport``.
 
-    Both ``acp`` and ``cli`` are valid; ``api`` (and any other value)
-    is rejected — the second assertion is a regression guard for the
-    0.2.x api-transport strip.
+    Only ``cli`` is valid; ``acp``, ``api`` and any other value are
+    rejected.
     """
 
     def test_cli_transport_validates(self):
@@ -311,13 +310,12 @@ class TestLlmPresetTransport:
         assert p.transport == "cli"
         assert p.provider == "anthropic"
 
-    def test_acp_transport_still_validates(self):
-        """Coexistence regression — adding ``cli`` did not break ``acp``."""
-        p = LlmPreset(
-            transport="acp", provider="anthropic",
-            model="sonnet", default=True,
-        )
-        assert p.transport == "acp"
+    def test_acp_transport_rejected(self):
+        with pytest.raises(ValidationError, match="transport"):
+            LlmPreset(
+                transport="acp", provider="anthropic",
+                model="sonnet", default=True,
+            )
 
     def test_codex_cli_provider_validates(self):
         p = LlmPreset(
@@ -335,17 +333,6 @@ class TestLlmPresetTransport:
         p = LlmPreset(provider="anthropic", model="sonnet", default=True)
         assert p.transport == "cli"
 
-    def test_acp_without_provider_is_rejected(self):
-        with pytest.raises(ValidationError, match="requires provider: anthropic"):
-            LlmPreset(transport="acp", model="sonnet", default=True)
-
-    def test_codex_provider_rejected_for_acp(self):
-        with pytest.raises(ValidationError, match="requires provider: anthropic"):
-            LlmPreset(
-                transport="acp", provider="openai",
-                model="gpt-5.6-luna", default=True,
-            )
-
     def test_codex_rejects_claude_tool_flags(self):
         with pytest.raises(ValidationError, match="only supported"):
             LlmPreset(
@@ -353,9 +340,7 @@ class TestLlmPresetTransport:
                 permission_mode="plan",
             )
 
-    def test_api_transport_still_rejected(self):
-        """The 0.2.x strip removed ``api``; cli's restoration must not
-        leak a regression that re-accepts it."""
+    def test_api_transport_rejected(self):
         with pytest.raises(ValidationError):
             LlmPreset(
                 transport="api", provider="anthropic",
@@ -369,8 +354,8 @@ class TestLlmPresetTransport:
                 model="sonnet", default=True,
             )
 
-    def test_workflow_with_both_acp_and_cli_presets_validates(self):
-        """A single workflow may declare both transports side-by-side;
+    def test_workflow_with_both_cli_providers_validates(self):
+        """A single workflow may declare both providers side-by-side;
         the schema-level constraint is only that exactly one
         ``LlmPreset`` is ``default: true``.
         """
@@ -379,8 +364,8 @@ class TestLlmPresetTransport:
             "settings": {
                 "presets": {
                     "warm": {
-                        "transport": "acp", "provider": "anthropic",
-                        "model": "sonnet", "default": True,
+                        "transport": "cli", "provider": "openai",
+                        "model": "gpt-5.6-luna", "default": True,
                     },
                     "cold": {
                         "transport": "cli", "provider": "anthropic",
@@ -397,8 +382,8 @@ class TestLlmPresetTransport:
                 },
             ],
         })
-        assert graph.settings.presets["warm"].transport == "acp"
-        assert graph.settings.presets["cold"].transport == "cli"
+        assert graph.settings.presets["warm"].provider == "openai"
+        assert graph.settings.presets["cold"].provider == "anthropic"
 
 
 class TestSettingsMemoryGates:

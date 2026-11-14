@@ -1,15 +1,9 @@
 name: "Joke Generator"
 version: "0.1.0"
 
-# Demonstrates `transport: cli` and `transport: acp` coexisting in
-# one workflow. `cli` is the default; switch with:
+# One `transport: cli` preset (Codex):
 #
-#   sqrlly run examples/jokes/workflow.yaml --preset acp
-#   sqrlly run examples/jokes/workflow.yaml --preset cli      # explicit
-#
-# Env-var driven (defaults to cli when unset):
-#
-#   sqrlly run examples/jokes/workflow.yaml --preset ${SQRLLY_PRESET:-cli}
+#   sqrlly run examples/jokes/workflow.yaml
 
 nodes:
   - id: generate
@@ -35,7 +29,3 @@ settings:
       provider: openai
       model: "gpt-5.6-luna"
       default: true
-    acp:
-      transport: acp
-      provider: anthropic
-      model: "sonnet"

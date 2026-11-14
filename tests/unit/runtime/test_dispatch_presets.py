@@ -4,15 +4,14 @@ Tests focus on _resolve_prompt_backend + the registry-shape construction:
 given a registry of preset-keyed backends, the dispatcher picks
 the right one for a node based on params.preset vs the default flag.
 
-No actual network calls — ACPBackend defers process spawn until the
-first ``send_prompt``; construction is offline-safe. The tests inspect
+No actual network calls — CLIBackend spawns only on ``send_prompt``;
+construction is offline-safe. The tests inspect
 the returned backend's identity and per-call model resolution.
 """
 from __future__ import annotations
 
 import pytest
 
-from sqrlly.runtime.executor.backends.acp import ACPBackend
 from sqrlly.runtime.executor.backends.cli import CLIBackend
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.schema.models import Execute, Node, LlmPreset, Settings
@@ -28,10 +27,10 @@ def _node(id_="n1", params=None):
 def _settings_with_presets():
     return Settings(presets={
         "cheap": LlmPreset(
-            transport="acp", provider="anthropic", model="haiku",
+            transport="cli", provider="anthropic", model="haiku",
         ),
         "smart": LlmPreset(
-            transport="acp", provider="anthropic", model="opus",
+            transport="cli", provider="anthropic", model="opus",
             default=True,
         ),
     })
@@ -41,10 +40,10 @@ class TestResolvePromptBackend:
     def test_single_preset_via_registry(self):
         """One-entry registry: node resolves to that backend via default preset."""
         from sqrlly.schema.models import LlmPreset
-        backend = ACPBackend()
+        backend = CLIBackend()
         settings = Settings(presets={
             "default": LlmPreset(
-                transport="acp", provider="anthropic",
+                transport="cli", provider="anthropic",
                 model="sonnet", default=True,
             ),
         })
@@ -57,8 +56,8 @@ class TestResolvePromptBackend:
 
     def test_multi_preset_uses_default(self):
         settings = _settings_with_presets()
-        cheap_be = ACPBackend()
-        smart_be = ACPBackend()
+        cheap_be = CLIBackend()
+        smart_be = CLIBackend()
         dispatcher = DispatchExecutor(
             prompt_backends={"cheap": cheap_be, "smart": smart_be},
             settings=settings,
@@ -70,8 +69,8 @@ class TestResolvePromptBackend:
 
     def test_multi_preset_params_override(self):
         settings = _settings_with_presets()
-        cheap_be = ACPBackend()
-        smart_be = ACPBackend()
+        cheap_be = CLIBackend()
+        smart_be = CLIBackend()
         dispatcher = DispatchExecutor(
             prompt_backends={"cheap": cheap_be, "smart": smart_be},
             settings=settings,
@@ -90,7 +89,7 @@ class TestResolvePromptBackend:
         settings = _settings_with_presets()
         # Registry missing the 'smart' backend that settings declares as default.
         dispatcher = DispatchExecutor(
-            prompt_backends={"cheap": ACPBackend()},
+            prompt_backends={"cheap": CLIBackend()},
             settings=settings,
         )
         with pytest.raises(RuntimeError, match="no backend is registered"):
@@ -102,10 +101,10 @@ class TestGetBackend:
     def test_single_preset_returns_the_only_backend(self):
         """One-entry registry: get_backend() returns it."""
         from sqrlly.schema.models import LlmPreset
-        backend = ACPBackend()
+        backend = CLIBackend()
         settings = Settings(presets={
             "default": LlmPreset(
-                transport="acp", provider="anthropic",
+                transport="cli", provider="anthropic",
                 model="sonnet", default=True,
             ),
         })
@@ -116,8 +115,8 @@ class TestGetBackend:
 
     def test_multi_preset_returns_default(self):
         settings = _settings_with_presets()
-        cheap_be = ACPBackend()
-        smart_be = ACPBackend()
+        cheap_be = CLIBackend()
+        smart_be = CLIBackend()
         dispatcher = DispatchExecutor(
             prompt_backends={"cheap": cheap_be, "smart": smart_be},
             settings=settings,
@@ -163,8 +162,8 @@ class TestGetBackend:
 class TestSafeMode:
     """`create_backend_from_preset(preset, safe_mode=True)` appends
     ``--safe-mode`` to a cli backend's argv (isolating the run from the
-    operator's Claude customizations) and leaves acp untouched — it's a
-    `claude` CLI flag with no acp equivalent."""
+    operator's Claude customizations) — it's a `claude` CLI flag, so
+    Codex presets are left untouched."""
 
     def test_safe_mode_appends_flag_to_cli_backend(self):
         from sqrlly.runtime.executor.backends.factory import (
@@ -200,17 +199,6 @@ class TestSafeMode:
         assert be._cli_args.count("--safe-mode") == 1
         assert "--verbose" in be._cli_args
 
-    def test_safe_mode_does_not_affect_acp_backend(self):
-        from sqrlly.runtime.executor.backends.factory import (
-            create_backend_from_preset,
-        )
-        be = create_backend_from_preset(
-            LlmPreset(transport="acp", provider="anthropic", model="sonnet"),
-            safe_mode=True,
-        )
-        # acp built fine; --safe-mode is cli-only, never injected.
-        assert isinstance(be, ACPBackend)
-
     def test_safe_mode_does_not_add_claude_flag_to_codex(self):
         from sqrlly.runtime.executor.backends.factory import (
             create_backend_from_preset,
@@ -224,51 +212,23 @@ class TestSafeMode:
         assert "--safe-mode" not in (be._cli_args or [])
 
 
-class TestFactoryThreadsAcpEnv:
-    """ACPBackend construction is offline-safe (spawn deferred to first
-    send_prompt), so we can assert env wiring without launching the adapter."""
-
-    def test_build_acp_threads_env(self):
-        from sqrlly.runtime.executor.backends.factory import (
-            create_backend_from_preset,
-        )
-        backend = create_backend_from_preset(LlmPreset(
-            transport="acp", provider="anthropic", model="opus",
-            env={"CLAUDE_CODE_EFFORT_LEVEL": "max"},
-        ))
-        assert backend._env == {"CLAUDE_CODE_EFFORT_LEVEL": "max"}
-
-    def test_build_acp_default_env_is_empty(self):
-        from sqrlly.runtime.executor.backends.factory import (
-            create_backend_from_preset,
-        )
-        backend = create_backend_from_preset(LlmPreset(
-            transport="acp", provider="anthropic", model="opus",
-        ))
-        # Default empty env is stored as {} (threaded through unchanged).
-        assert backend._env == {}
-
-
 def _two_preset_settings():
-    """cli (default) + acp (declared but referenced by no node)."""
+    """cli (default) + unused (declared but referenced by no node)."""
     return Settings(presets={
         "cli": LlmPreset(
             transport="cli", provider="anthropic",
             model="sonnet", default=True,
         ),
-        "acp": LlmPreset(
-            transport="acp", provider="anthropic", model="sonnet",
+        "unused": LlmPreset(
+            transport="cli", provider="anthropic", model="haiku",
         ),
     })
 
 
 class TestLazyBackendBuild:
     """Backends are materialized lazily — a declared-but-unused preset
-    never constructs its backend, so an optional dependency (e.g. the
-    ``acp`` package) is only imported when a node actually dispatches to
-    that preset. Regression for the `uv tool install sqrlly` crash where
-    an unused `acp` preset's backend was built eagerly at startup,
-    raising ModuleNotFoundError for the absent `acp` package."""
+    never constructs its backend; it is built only when a node actually
+    dispatches to that preset."""
 
     def test_unused_preset_builder_not_invoked(self):
         built: list[str] = []
@@ -277,19 +237,19 @@ class TestLazyBackendBuild:
             built.append("cli")
             return CLIBackend()
 
-        def acp_builder():
-            built.append("acp")
+        def unused_builder():
+            built.append("unused")
             raise AssertionError("unused preset backend must not be built")
 
         s = _two_preset_settings()
         d = DispatchExecutor(
-            prompt_backend_builders={"cli": cli_builder, "acp": acp_builder},
+            prompt_backend_builders={"cli": cli_builder, "unused": unused_builder},
             settings=s,
         )
         # A node with no params.preset resolves to the default (cli).
         resolved = d._resolve_prompt_backend(_node(), s)
         assert resolved is not None
-        assert built == ["cli"]  # acp_builder never called
+        assert built == ["cli"]  # unused_builder never called
 
     def test_builder_invoked_once_then_cached(self):
         calls: list[int] = []
@@ -302,7 +262,7 @@ class TestLazyBackendBuild:
         d = DispatchExecutor(
             prompt_backend_builders={
                 "cli": cli_builder,
-                "acp": lambda: ACPBackend(),
+                "unused": lambda: CLIBackend(),
             },
             settings=s,
         )
@@ -318,13 +278,13 @@ class TestLazyBackendBuild:
             built.append("cli")
             return CLIBackend()
 
-        def acp_builder():
-            built.append("acp")
+        def unused_builder():
+            built.append("unused")
             raise AssertionError("non-default preset must not be built")
 
         s = _two_preset_settings()
         d = DispatchExecutor(
-            prompt_backend_builders={"cli": cli_builder, "acp": acp_builder},
+            prompt_backend_builders={"cli": cli_builder, "unused": unused_builder},
             settings=s,
         )
         backend = d.get_backend()
@@ -333,51 +293,30 @@ class TestLazyBackendBuild:
 
     @pytest.mark.asyncio
     async def test_close_skips_unbuilt_backends(self):
-        def acp_builder():
+        def unused_builder():
             raise AssertionError("unbuilt preset must not be built by close()")
 
         s = _two_preset_settings()
         d = DispatchExecutor(
             prompt_backend_builders={
                 "cli": lambda: CLIBackend(),
-                "acp": acp_builder,
+                "unused": unused_builder,
             },
             settings=s,
         )
         d._resolve_prompt_backend(_node(), s)  # builds cli only
-        await d.close()  # must not touch the unbuilt acp builder
+        await d.close()  # must not touch the unbuilt builder
 
     def test_prebuilt_backends_still_supported(self):
         """Embedders/tests passing already-built backends keep working;
         identity is preserved (wrapped as a constant builder)."""
-        backend = ACPBackend()
+        backend = CLIBackend()
         s = Settings(presets={
             "default": LlmPreset(
-                transport="acp", provider="anthropic",
+                transport="cli", provider="anthropic",
                 model="sonnet", default=True,
             ),
         })
         d = DispatchExecutor(prompt_backends={"default": backend}, settings=s)
         assert d.get_backend() is backend
 
-
-class TestAcpMissingDepError:
-    """When the `acp` optional dependency is absent, building an acp
-    backend must raise an actionable error, not a bare ModuleNotFoundError."""
-
-    def test_build_acp_missing_dep_raises_clear_error(self, monkeypatch):
-        import sys
-        from sqrlly.runtime.executor.backends import factory
-
-        # Environment-shape instrumentation (sanctioned, like patching
-        # shutil.which): simulate the `acp` package being absent. Evict the
-        # backend module so its top-level `from acp import ...` re-runs, and
-        # block `acp` so that import fails. Not faking what acp returns —
-        # simulating its absence.
-        monkeypatch.delitem(
-            sys.modules, "sqrlly.runtime.executor.backends.acp", raising=False,
-        )
-        monkeypatch.setitem(sys.modules, "acp", None)
-        preset = LlmPreset(transport="acp", provider="anthropic", model="opus")
-        with pytest.raises(RuntimeError, match=r"pip install sqrlly\[acp\]"):
-            factory.create_backend_from_preset(preset)

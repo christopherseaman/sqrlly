@@ -15,7 +15,7 @@ from sqrlly.runtime.executor.preset import (
 from sqrlly.schema.models import Execute, Node, LlmPreset, Settings
 
 
-def _preset(transport="acp", provider="anthropic", model="sonnet", default=False):
+def _preset(transport="cli", provider="anthropic", model="sonnet", default=False):
     return LlmPreset(
         transport=transport, provider=provider, model=model, default=default,
     )
@@ -129,12 +129,6 @@ class TestBuildPresetRegistry:
 
 
 class TestCreateBackendFromPreset:
-    def test_acp_returns_acp_backend(self):
-        from sqrlly.runtime.executor.backends.acp import ACPBackend
-        preset = _preset(transport="acp", provider="anthropic", model="sonnet")
-        backend = create_backend_from_preset(preset)
-        assert isinstance(backend, ACPBackend)
-
     def test_cli_returns_cli_backend(self):
         from sqrlly.runtime.executor.backends.cli import CLIBackend
         preset = _preset(transport="cli", provider="anthropic", model="sonnet")
@@ -174,16 +168,6 @@ class TestCreateBackendFromPreset:
             "--allowedTools", "Edit",
             "--add-dir", ".",
         ]
-
-    def test_acp_threads_tool_permissions(self):
-        """Factory passes the policy into the acp backend's callbacks."""
-        preset = LlmPreset(
-            transport="acp", provider="anthropic", model="sonnet",
-            permission_mode="default", disallowed_tools=["Bash"],
-        )
-        backend = create_backend_from_preset(preset)
-        assert backend._callbacks._permission_mode == "default"
-        assert backend._callbacks._disallowed_tools == ["Bash"]
 
     def test_rejects_unknown_permission_mode(self):
         with pytest.raises(Exception):

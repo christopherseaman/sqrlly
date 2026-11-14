@@ -9,34 +9,6 @@ if TYPE_CHECKING:
     from sqrlly.schema.models import LlmPreset
 
 
-def _build_acp(preset: "LlmPreset") -> PromptBackend:
-    # Lazy import — the `acp` Python package is the `[acp]` optional
-    # extra. Keeping this import inside the builder means
-    # `pip install sqrlly` (cli-only) loads the factory without
-    # needing the `acp` package present, and (since backends are built
-    # lazily on first dispatch) a declared-but-unused acp preset never
-    # reaches here. A genuinely missing dependency surfaces at the
-    # dispatching node as an actionable error, not a bare ImportError.
-    try:
-        from sqrlly.runtime.executor.backends.acp import ACPBackend
-    except ImportError as e:
-        raise RuntimeError(
-            "transport: acp requires the optional 'acp' dependency, which "
-            "is not installed. Install it with 'pip install sqrlly[acp]' "
-            "(or 'uv tool install sqrlly --with agent-client-protocol'), or "
-            "switch the preset to transport: cli."
-        ) from e
-
-    return ACPBackend(
-        program="npx",
-        args=("@zed-industries/claude-code-acp",),
-        permission_mode=preset.permission_mode,
-        allowed_tools=preset.allowed_tools,
-        disallowed_tools=preset.disallowed_tools,
-        env=preset.env,
-    )
-
-
 def _build_claude_cli(preset: "LlmPreset") -> PromptBackend:
     return CLIBackend(
         argv_prefix=("claude", "-p"),
@@ -57,11 +29,10 @@ def _build_codex_cli(preset: "LlmPreset") -> PromptBackend:
     )
 
 
-# (transport, provider) → builder. Restoring or adding a transport means
+# (transport, provider) → builder. Adding a transport means
 # a new row + builder; the schema literal in ``LlmPreset.transport`` must
 # also list it so YAML validation accepts the value.
 _BACKEND_BUILDERS: dict[tuple[str, str], Callable[["LlmPreset"], PromptBackend]] = {
-    ("acp", "anthropic"): _build_acp,
     ("cli", "anthropic"): _build_claude_cli,
     ("cli", "openai"): _build_codex_cli,
 }
@@ -82,8 +53,8 @@ def create_backend_from_preset(
     invocation ignores the operator's Claude customizations (output styles,
     CLAUDE.md, skills, MCP, hooks) — keeping workflow generation reproducible
     and free of e.g. an "explanatory" output style leaking commentary into
-    node output. It is a ``claude`` CLI flag with no acp equivalent, so it
-    only applies to ``transport: cli, provider: anthropic`` presets.
+    node output. It is a ``claude`` CLI flag, so it only applies to
+    ``transport: cli, provider: anthropic`` presets.
     """
     if (
         safe_mode

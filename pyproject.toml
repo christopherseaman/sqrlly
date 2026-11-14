@@ -26,9 +26,9 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "click>=8.0",
-    "langgraph>=1.0",
+    "langgraph>=1.2,<2",
     "jinja2>=3.0",
-    "langgraph-checkpoint-sqlite>=3.0.3",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
     "simpleeval>=0.9.13",
     "psutil>=5.9",
 ]
@@ -41,9 +41,6 @@ Changelog = "https://github.com/christopherseaman/sqrlly/blob/main/CHANGELOG.md"
 
 [project.scripts]
 sqrlly = "sqrlly.cli.main:cli"
-
-[project.optional-dependencies]
-acp = ["agent-client-protocol>=0.5"]
 
 [build-system]
 requires = ["hatchling"]
@@ -122,8 +119,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["tests"]
 markers = [
-    "acp: tests requiring a live ACP adapter + Claude API (may be slow/flaky)",
-    "cli: tests requiring the `codex` CLI on PATH (transport: cli; may be slow/flaky)",
+    "cli: tests requiring the `codex` and `claude` CLIs on PATH (transport: cli; may be slow/flaky)",
     "live: tests requiring live network access (consumed by tests/e2e/test_live_backend_roundtrip.py — cli-only after the api-transport strip)",
 ]
 
@@ -131,5 +127,4 @@ markers = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "agent-client-protocol>=0.5",
 ]

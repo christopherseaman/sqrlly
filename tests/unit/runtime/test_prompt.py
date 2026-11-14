@@ -564,9 +564,9 @@ class TestDispatchPromptFlow:
         prompt = tmp_path / "p.md"
         prompt.write_text("body")
         settings = Settings(presets={
-            "default": LlmPreset(transport="acp", provider="anthropic",
+            "default": LlmPreset(transport="cli", provider="anthropic",
                                  model="sonnet", default=True),
-            "smart": LlmPreset(transport="acp", provider="anthropic",
+            "smart": LlmPreset(transport="cli", provider="anthropic",
                                model="opus"),
         })
         # Resolves to "smart" (a valid preset) but only "default" is wired.
@@ -596,10 +596,10 @@ class TestDispatchPromptFlow:
         backend_cheap = MemoryBackend()
         settings = Settings(presets={
             "cheap": LlmPreset(
-                transport="acp", provider="anthropic", model="haiku",
+                transport="cli", provider="anthropic", model="haiku",
             ),
             "smart": LlmPreset(
-                transport="acp", provider="anthropic",
+                transport="cli", provider="anthropic",
                 model="opus", default=True,
             ),
         })

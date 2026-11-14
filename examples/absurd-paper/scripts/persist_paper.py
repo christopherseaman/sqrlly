@@ -2,7 +2,7 @@
 """Persist a node's text output to disk.
 
 Invoked as a command node with Jinja-templated args — upstream node
-output flows through argv rather than any ACP Write tool. Avoids the
+output flows through argv rather than any agent Write tool. Avoids the
 Write/Bash path-traversal hang documented in TODO while still
 demonstrating the "text-to-file" reconciliation pattern.
 

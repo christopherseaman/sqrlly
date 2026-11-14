@@ -72,7 +72,7 @@ def build_preset_registry(
     An empty ``settings.presets`` returns an empty registry — valid
     for script-only workflows; LLM-dispatching nodes will fail at the
     call site with a clear "no prompt backend wired" message. A
-    missing CLI (e.g., ``npx`` for an ACP preset) surfaces at the
+    missing CLI (e.g., ``codex``) surfaces at the
     call site as a backend error with actionable remediation, not as
     a pre-flight check; this keeps sqrlly out of the business of
     probing the local toolchain and lets earlier workflow steps

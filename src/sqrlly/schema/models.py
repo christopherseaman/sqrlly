@@ -307,38 +307,29 @@ class LlmPreset(BaseModel):
     The ``--preset`` CLI flag overrides at run time. Resolution order:
     CLI flag > ``params.preset:`` > the preset marked ``default: true``.
 
-    Two transports are supported today:
-
-    - ``transport: acp`` — the ``claude-code-acp`` adapter (warm
-      process, streaming chunks, MCP-capable).
-    - ``transport: cli`` — subprocess-per-call Codex/OpenAI (the default) or
-      Claude (no warm state, real ``asyncio`` parallelism per call).
-
-    Both fields have Codex-friendly defaults: omitted ``transport`` means
-    ``cli`` and omitted ``provider`` means ``openai``. ACP therefore requires
-    an explicit ``provider: anthropic``; ``provider: anthropic`` without a
-    transport selects the Claude CLI. The api transport was removed in 0.2.x.
+    One transport is supported: ``transport: cli`` — subprocess-per-call
+    Codex/OpenAI (the default provider) or Claude (no warm state, real
+    ``asyncio`` parallelism per call). Omitted ``provider`` means ``openai``;
+    ``provider: anthropic`` selects the Claude CLI.
     """
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["llm"] = "llm"
-    transport: Literal["acp", "cli"] = "cli"
+    transport: Literal["cli"] = "cli"
     provider: Literal["anthropic", "openai"] = "openai"
     model: str
     default: bool = False
 
-    # Tool-use permissions. Claude CLI maps these fields to its exact flags;
-    # ACP gates by tool *kind* (read/edit/execute/…) in its permission
-    # callback. Codex currently accepts its own options through cli_args,
-    # so Claude-only fields are rejected for provider: openai. All unset →
-    # today's behavior (cli: no tools; acp: allow-all).
+    # Tool-use permissions. Claude CLI maps these fields to its exact flags.
+    # Codex accepts its own options through cli_args, so these Claude-only
+    # fields are rejected for provider: openai. All unset → no tools.
     permission_mode: Literal[
         "default", "acceptEdits", "bypassPermissions", "plan"
     ] | None = None
     allowed_tools: list[str] | None = None
     disallowed_tools: list[str] | None = None
     # Escape hatch: extra args appended verbatim to the selected CLI's argv
-    # (cli only) for anything the provider-specific fields don't cover.
+    # for anything the provider-specific fields don't cover.
     cli_args: list[str] | None = None
     # Per-preset environment overlay for the spawned backend process
     # (e.g. CLAUDE_CODE_EFFORT_LEVEL). Overlaid on os.environ at spawn —
@@ -346,9 +337,7 @@ class LlmPreset(BaseModel):
     env: dict[str, str] = {}
 
     @model_validator(mode="after")
-    def _provider_matches_transport(self) -> Self:
-        if self.transport == "acp" and self.provider != "anthropic":
-            raise ValueError("transport: acp requires provider: anthropic")
+    def _tool_fields_require_anthropic(self) -> Self:
         if self.provider == "openai" and any(
             (self.permission_mode, self.allowed_tools, self.disallowed_tools)
         ):

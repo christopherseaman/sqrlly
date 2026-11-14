@@ -1,12 +1,10 @@
-"""Bundled examples must not default to the optional ``acp`` transport.
+"""Bundled examples must default to the Codex CLI.
 
 A default ``sqrlly run <example>`` has to work on the headline
-``uv tool install sqrlly`` / ``pipx install sqrlly`` install, which omits the
-``acp`` extra. So no preset SELECTED by a default run — the ``default``
-preset, or any preset named via ``preset:`` on a node / fan-out template /
-final node — may use ``transport: acp``. A declared-but-unselected ``acp``
-alternate (opt-in via ``--preset acp``, as in examples/jokes) is allowed:
-lazy backends never instantiate it, so it cannot crash a default run.
+``uv tool install sqrlly`` / ``pipx install sqrlly`` install with only
+``codex`` on PATH. So every LLM preset SELECTED by a default run — the
+``default`` preset, or any preset named via ``preset:`` on a node / fan-out
+template / final node — must be ``transport: cli, provider: openai``.
 """
 from __future__ import annotations
 
@@ -34,23 +32,6 @@ def _selected_presets(path: Path) -> tuple[set[str], dict]:
     referenced = set(re.findall(r"\bpreset:\s*['\"]?([A-Za-z0-9_]+)", raw_text))
     selected |= referenced & set(presets)
     return selected, presets
-
-
-@pytest.mark.parametrize(
-    "path", EXAMPLE_YAMLS, ids=lambda p: str(p.relative_to(EXAMPLES_DIR))
-)
-def test_example_default_run_avoids_acp_transport(path):
-    selected, presets = _selected_presets(path)
-    acp_selected = sorted(
-        name
-        for name in selected
-        if isinstance(presets.get(name), LlmPreset) and presets[name].transport == "acp"
-    )
-    assert not acp_selected, (
-        f"{path.relative_to(EXAMPLES_DIR)} selects acp preset(s) {acp_selected} on a "
-        f"default run; examples must default to transport: cli so they run without "
-        f"the optional `acp` extra (declare acp only as an opt-in --preset alternate)."
-    )
 
 
 @pytest.mark.parametrize(

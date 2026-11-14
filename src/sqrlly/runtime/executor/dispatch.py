@@ -102,10 +102,8 @@ class DispatchExecutor:
         tests / embedders that construct backends directly).
         ``prompt_backend_builders`` registers zero-arg builders that are
         invoked lazily on first dispatch to a preset: a declared-but-unused
-        preset never builds its backend, so an optional dependency (e.g.
-        the ``acp`` package) is only imported when a node actually
-        dispatches to that preset, and a missing dependency surfaces at the
-        dispatching node rather than at startup. The CLI passes builders.
+        preset never builds its backend, and a backend construction error
+        surfaces at the dispatching node rather than at startup. The CLI passes builders.
         """
         self._workdir = workdir
         self._settings = settings or Settings()

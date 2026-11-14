@@ -290,11 +290,6 @@ class TestGateNodePassFail:
 
 
 # ---------------------------------------------------------------------------
-# Integration: multi-step joke workflow with ACP + deterministic gate
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # JS validator and environment variable tests
 # ---------------------------------------------------------------------------
 
@@ -416,11 +411,6 @@ class TestGateEnvironment:
         gate = Evaluation(validator=str(script), threshold=0.8)
         with pytest.raises(EvaluationError, match="exited with code 1"):
             await run_evaluation(gate, "p1", workdir=str(tmp_path))
-
-
-# ---------------------------------------------------------------------------
-# Integration: multi-step joke workflow with ACP + deterministic gate
-# ---------------------------------------------------------------------------
 
 
 class TestRetryBackoff:
@@ -576,8 +566,8 @@ class TestScriptGateStructuredFeedback:
 class TestGateOutputParser:
     """_parse_evaluation_output is pure: string in, EvaluationResult out.
 
-    No backend needed. Integration with a real backend (ACP) is covered
-    separately in tests/acp/.
+    No backend needed. Integration with a real backend is covered
+    separately in tests/cli/.
     """
 
     def test_full_schema_parsed(self):

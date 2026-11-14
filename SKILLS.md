@@ -14,8 +14,6 @@ parallelism.
 ## Prerequisites
 
 Install the CLI: `pipx install sqrlly` (or `uv tool install sqrlly`).
-Use the `[acp]` extra (`pipx install "sqrlly[acp]"`) only for
-`transport: acp`.
 
 LLM nodes drive a local agent CLI, so the chosen backend must be installed
 and authenticated — auth is per-CLI, not sqrlly's job:
@@ -24,8 +22,6 @@ and authenticated — auth is per-CLI, not sqrlly's job:
   authenticated `codex` binary on PATH. No extra Python deps.
 - `transport: cli`, `provider: anthropic` — the authenticated `claude`
   binary on PATH. No extra Python deps.
-- `transport: acp` — `npm i -g @zed-industries/claude-code-acp`, plus
-  the same `claude` login.
 
 Script, binary, and subgraph nodes need no backend.
 
@@ -51,7 +47,7 @@ write a YAML file with `name`, `version`, `nodes`, and `settings`.
    Jinja2 — `{% if %}`, `{% for %}`, filters all work).
 4. **Pick a backend** under `settings.presets` — one named `LlmPreset`
    marked `default: true`. The default is subprocess-per-call Codex;
-   Claude remains available through CLI or its warm ACP adapter.
+   Claude remains available through `provider: anthropic`.
    ```yaml
    settings:
      presets:
@@ -70,20 +66,16 @@ write a YAML file with `name`, `version`, `nodes`, and `settings`.
    explicit `provider: anthropic` preset.
    `transport` defaults to `cli` and `provider` defaults to `openai`, so a
    preset needs only `model` for Codex. `provider: anthropic` selects Claude
-   and defaults to its CLI; `transport: acp` requires that provider explicitly.
+   through its CLI.
    There is no environment auto-detect. A workflow whose nodes are all
    script / binary / subgraph can omit `settings.presets` (or set it to
    `{}`); any **LLM (prompt) node** needs at least one preset with
    `default: true`, or dispatch fails at run time.
 
    **Tool use.** Claude CLI presets may use `permission_mode`,
-   `allowed_tools`, and `disallowed_tools`; ACP gates by tool *kind*
-   (`bypassPermissions` = all, `acceptEdits` = edits+reads not execute,
-   `default`/`plan` = read-only). `allowed_tools` / `disallowed_tools`
-   are exact claude tool names on `cli` and best-effort (kind/title
-   match) on `acp`. `cli_args` is a cli-only escape hatch. Defaults
-   (all unset): `cli` runs with no tools; `acp` allows all (its
-   historical behavior).
+   `allowed_tools`, and `disallowed_tools` (exact claude tool names).
+   `cli_args` is an escape hatch for extra provider flags. Defaults
+   (all unset): the CLI runs with no extra tool flags.
 
    **Supervised cooperating agents (managed teams).** sqrlly has no
    first-class managed-team or oversight-coordinator node. The

@@ -632,10 +632,8 @@ async def _execute_workflow(
     # Only LLM presets become PromptBackends — command presets describe
     # script interpreters, not LLM transports, and are consulted at
     # script-dispatch time, not wired as backends. Register builders, not
-    # built backends: a declared-but-unused preset (a common case — e.g.
-    # the jokes example ships both `cli` and `acp`) never constructs its
-    # backend, so its optional dependency (the `acp` package) is only
-    # imported if a node actually dispatches to it.
+    # built backends: a declared-but-unused preset never constructs its
+    # backend.
     # `--safe-mode`/`--no-safe-mode` overrides `settings.safe_mode`; the
     # resolved value is threaded into every CLI builder. The factory applies
     # the Claude-only flag only to Anthropic CLI presets, including presets
@@ -744,7 +742,7 @@ async def _execute_workflow(
     "--safe-mode/--no-safe-mode", "safe_mode", default=None,
     help="Run Anthropic's CLI provider with Claude operator customizations "
          "(output styles, CLAUDE.md, skills, MCP, hooks) disabled. Has no "
-         "effect on Codex or ACP. Overrides settings.safe_mode; absent flag "
+         "effect on Codex. Overrides settings.safe_mode; absent flag "
          "uses the setting.",
 )
 def run(

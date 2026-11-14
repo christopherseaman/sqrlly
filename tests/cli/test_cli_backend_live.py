@@ -2,12 +2,11 @@
 validates JSON schema -> CLI transport selects best joke. Exercises
 the entire pipeline with real ``codex exec`` subprocess execution.
 
-Lives under ``tests/cli/`` because it requires ``codex`` on PATH;
+A second case sends one prompt through the ``claude -p`` provider.
+
+Lives under ``tests/cli/`` because it requires ``codex`` and ``claude`` on PATH;
 the collection-time pre-flight in ``tests/conftest.py`` and the
 ``--ignore=tests/cli`` exclusion both apply.
-
-Mirrors ``tests/acp/test_joke_workflow.py`` so a contributor can
-side-by-side the two transports' shapes.
 """
 from __future__ import annotations
 
@@ -19,6 +18,7 @@ from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.runtime.executor.backends.factory import create_backend_from_preset
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.state import make_initial_state
+from sqrlly.schema.models import LlmPreset
 
 from helpers import make_config
 
@@ -104,3 +104,20 @@ class TestJokeWorkflowCLIIntegration:
             assert len(result["node_outputs"]["select"]) > 0
         finally:
             await executor.close()
+
+
+@pytest.mark.cli
+class TestClaudeProviderLive:
+    @pytest.mark.asyncio
+    async def test_anthropic_preset_round_trip(self, tmp_path):
+        """An anthropic preset dispatches through a real ``claude -p`` subprocess."""
+        backend = create_backend_from_preset(
+            LlmPreset(provider="anthropic", model="haiku")
+        )
+        try:
+            result = await backend.send_prompt(
+                "Reply with exactly the single word: pong", "haiku", str(tmp_path)
+            )
+            assert result.output.strip().strip(".").lower() == "pong"
+        finally:
+            await backend.close()

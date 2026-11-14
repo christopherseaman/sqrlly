@@ -148,7 +148,7 @@ class TestCommandPresetDispatch:
         script.write_text("print('x')")
         settings = Settings(presets={
             "smart": LlmPreset(
-                transport="acp", provider="anthropic",
+                transport="cli", provider="anthropic",
                 model="sonnet", default=True,
             ),
         })

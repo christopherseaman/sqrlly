@@ -73,7 +73,7 @@ does not re-flag them.
   was NAMED `broken-overload-feature` (the name contains "overload"). sqrlly
   ALREADY knows the real kind internally
   (`runtime/executor/backends/_overload.py::maybe_raise_overload` →
-  `OverloadError` for transient SDK errors, distinct from a gate/eval failure,
+  `OverloadError` for transient provider errors, distinct from a gate/eval failure,
   timeout, or generic backend error) but THROWS IT AWAY at the event boundary:
   `node_failed` emits only `{event, node, error:<free-text>}`
   (`runtime/logging.py`), `workflow_end` only counts (`cli/main.py`). **Ask
@@ -213,19 +213,6 @@ the construct is unambiguously broken.
 
 ## Transport / backend design
 
-- [~] **(35) ACP retirement decision** — `transport: cli` landed 0.3.0;
-  both transports coexist (jokes example defaults to cli, acp via
-  `--preset acp`). ACP retirement is **deferred** pending real workflow
-  soak. ACP earns its weight today only if (a) we surface mid-flight
-  `session_update` events to the JSONL log (not consumed today — we keep
-  only final text) or (b) another vendor ships an ACP server (only
-  `claude-code-acp` exists as of 2026-05). Until either, retiring
-  `transport: acp` would delete the backend + conftest pre-flight + npm
-  dep note + soak concerns (~400 lines). Open sub-question for the soak:
-  does ACP's `new_session()` reset context in-process (cheap) or fork a
-  fresh process (collapses the warmth advantage over CLI)? Settle by
-  measurement before committing either way.
-
 - [~] **(36) `transport: cli` provider expansion** — Codex support shipped;
   Gemini and custom CLI providers remain open. The initial Codex mapping is
   `provider: openai` → `codex exec`.
@@ -311,7 +298,7 @@ the construct is unambiguously broken.
 
 ## Simplification candidates (surfaced by 2026-04-17 refactor-done review)
 
-- [ ] **Collapse `runtime/executor/backends/` → `runtime/backends/`** — 4-level nesting (`runtime/executor/backends/acp.py`) for 4 small files. Semantic loss: current nesting signals that only the prompt executor uses backends. If we land the anthropic/openai backends (below), the signal still holds but less strongly — multiple executor types might route through one backends/ module. Low value, low risk; defer until a second executor family justifies the flattening.
+- [ ] **Collapse `runtime/executor/backends/` → `runtime/backends/`** — 4-level nesting (`runtime/executor/backends/cli.py`) for a few small files. Semantic loss: current nesting signals that only the prompt executor uses backends. If we land the anthropic/openai backends (below), the signal still holds but less strongly — multiple executor types might route through one backends/ module. Low value, low risk; defer until a second executor family justifies the flattening.
 
 - [ ] **Fold `compile/dynamic.py` into `compile/nodes.py`** — currently dynamic.py is 369 LOC and nodes.py is 945 LOC. The split is defensive today: `_make_fan_out_node` has legitimately divergent semantics (no dep check, no output contract, no retry routing). **Worth revisiting after** the gate-eval unification above — if the gate block is gone and the final remaining divergence is "Send-triggered vs. normal-invocation," the split stops earning its keep.
 
@@ -323,16 +310,10 @@ the construct is unambiguously broken.
     - Three options (detailed at `/home/christopher/.claude/plans/memory-backend-policy.md`):
         1. Extend `StubBackend` with `record=True` to produce one sanctioned recording path; migrate all doubles to it.
         2. Amend the policy memo to permit orchestration-testing doubles, making the existing code compliant.
-        3. Move ~14 tests to `tests/acp/` and accept weaker assertions against real Claude.
+        3. Move ~14 tests to `tests/cli/` and accept weaker assertions against real Claude.
     - **Recommended: (1) + (2) together** — one sanctioned recording path, policy clarifies the distinction between Claude-behavior simulation (forbidden) and orchestration instrumentation (permitted, via `StubBackend(record=True)` only).
 
 ## Top priority after simplification refactor
-
-> ACP process-tree cleanup landed (post-Stage-5b `ACPBackend.close()`
-> reaps the descendant tree; flakiness closed 2026-05-15). The **open**
-> residual is the soak-test gate: a multi-hour run with
-> `max_parallel_jobs > 1` against the absurd-paper workflow (also TODO
-> 49 / the ACP-retirement soak in #35).
 
 - [ ] **Worktree garbage collection**
     - Today: `ForemanExecutor` never removes trees under `<workdir>/.sqrlly/` — disk + inodes accumulate indefinitely across runs
@@ -345,20 +326,6 @@ the construct is unambiguously broken.
 
 Building the 13-phase demo surfaced issues not previously cataloged. Kept here as a group so their cross-relationships stay visible.
 
-### ACP reliability
-
-- [ ] **Write tool with `../../`-traversing paths hangs indefinitely**
-    - Symptom: a minimal `persist` phase whose sole job was `Write(path="../../paper/paper.md", content="...")` timed out at 180s with no output, no error, no file written. Same behavior with `Bash` + heredoc.
-    - The worktree contains no partial file; the staging dir (`<workdir>/paper/`, pre-scaffolded) stays empty. Claude is not refusing — no text response is returned at all; the ACP session just stalls.
-    - Repro: any prompt phase asking Claude Code via ACP to Write or Bash-write to a path outside the session's apparent workdir (`cwd` = foreman worktree). Absolute paths may or may not behave differently — untested in this session.
-    - Investigate: whether claude-code-acp enforces a path-allowlist silently; whether there's a permission dialog waiting that our auto-approver doesn't recognize; whether `_send_lock` is hiding a hang in the dispatch path.
-    - Workflow-author workaround today: avoid Write/Bash to non-workdir paths; pass state via text outputs only. This blocks the documented "author-written merge phase" pattern in CLAUDE.md.
-
-- [ ] **`acp.exceptions.RequestError: Internal error` appears under concurrent LLM calls even with `_send_lock` in place**
-    - Stack trace fires from `acp/connection.py:237` via `acp/task/dispatcher.py:81`. Observed under `max_parallel_jobs=2` while the ACP backend serializes `send_prompt` via `_send_lock`.
-    - Phases still complete in these runs — the error is logged but recovery happens somewhere. Suggests the SDK is raising and the dispatcher is retrying or dropping.
-    - Needs root-cause diagnosis. Possibly related to background tasks per the supervisor traceback, or to in-flight session state while a new prompt arrives.
-
 ### Data-flow gaps
 
 - [ ] **Template `env` additions / pipe dep outputs to stdin for command nodes** — command-node `args` are Jinja-rendered today; extend the same to `env` values and add optional stdin piping of dep outputs, which would unlock simple Python-script "aggregator" nodes.
@@ -366,8 +333,8 @@ Building the 13-phase demo surfaced issues not previously cataloged. Kept here a
 ### Observability
 
 - [ ] **LLM gates inherit PromptBackend flakiness with misleading 0.0 fallback**
-    - `runtime/gates.py::evaluate_gate_llm` returns `GateResult(score=0.0, feedback="gate backend error: ...")` when the backend call fails. The backend error rolls up as a gate failure (score=0.0) rather than a phase error. On a bad ACP turn, a phase with a passing output can be retried or failed purely due to gate-dispatch flake.
-    - Observed in `abstract` phase across runs — same content, different LLM gate outputs (0.0 vs 0.92 dim scores) depending on whether the ACP call to the gate model returned parseable JSON.
+    - `runtime/gates.py::evaluate_gate_llm` returns `GateResult(score=0.0, feedback="gate backend error: ...")` when the backend call fails. The backend error rolls up as a gate failure (score=0.0) rather than a phase error. On a bad backend turn, a phase with a passing output can be retried or failed purely due to gate-dispatch flake.
+    - Observed in `abstract` phase across runs — same content, different LLM gate outputs (0.0 vs 0.92 dim scores) depending on whether the backend call to the gate model returned parseable JSON.
     - Fix: distinguish between "gate eval failed" (infrastructure) and "gate scored 0.0" (content judgment). A failed gate eval should retry the GATE call, not fail the phase. Possibly: separate retry budgets for gate-eval-infra failures vs. gate-scored-low.
 
 ## Gate-evaluation extensibility
@@ -584,7 +551,7 @@ genuine gaps:
 
 - [ ] **Workflow cancellation**
     - `asyncio.CancelledError` handling in `runtime/runner.py`
-    - Propagate to executors, persist partial state, clean up ACP subprocesses
+    - Propagate to executors, persist partial state, clean up backend subprocesses
 
 - [ ] **`sqrlly status` / `dump-state`**
     - Pretty-print persisted state: completed/failed nodes, retry counts, gate scores
@@ -622,13 +589,13 @@ genuine gaps:
 
 - [ ] **Interrupts / human-in-the-loop** — `interrupt()` + `Command(resume=...)` from langgraph. Free on the existing checkpointer; enables author/operator approval nodes, manual quality gates, draft review. New execution type (`type: human_review`) or `evaluation.mode: human` schema option.
 
-- [ ] **`add_messages` reducer for in-phase refinement loops** — multi-turn draft → critique → revise within a single phase using LangGraph's native message-list reducer. Phase-local `messages` channel; no ACP round-trip per turn for pure model revision.
+- [ ] **`add_messages` reducer for in-phase refinement loops** — multi-turn draft → critique → revise within a single phase using LangGraph's native message-list reducer. Phase-local `messages` channel; no backend round-trip per turn for pure model revision.
 
 - [ ] **Time-travel replay in CLI** — `sqrlly replay <thread-id> --from <checkpoint>`. Checkpointer already persists every super-step; we just don't expose it. Enables A/B of executor changes against the same past state, bisecting regressions, reproducing flakes.
 
 - [ ] **Static breakpoints** — `compile(interrupt_before=[...], interrupt_after=[...])`. Pairs with `--break-before <node>` / `--break-after <node>` CLI flags for step-through debugging of production workflows.
 
-- [ ] **`ToolNode` as a new execution type** — when a phase should hand the model a tool list and have LangGraph route tool calls natively, rather than running a single prompt through ACP. New `execution: { type: tool, tools: [...] }`.
+- [ ] **`ToolNode` as a new execution type** — when a phase should hand the model a tool list and have LangGraph route tool calls natively, rather than running a single prompt through the CLI backend. New `execution: { type: tool, tools: [...] }`.
 
 - [ ] **Agent definition as an execution shape — and is it still a
   thing in LangGraph?** — _surfaced 2026-06-09._ Two coupled open
@@ -649,7 +616,7 @@ genuine gaps:
 
 - [ ] **`BaseStore` for cross-run memory** — distinct from checkpointer (per-thread). Shared memory across workflow runs — e.g., "last week's gate was lenient, tighten this week." Optional store wired alongside `AsyncSqliteSaver`.
 
-- [ ] **`RetryPolicy` for transport-level retries** — layer `RetryPolicy(max_attempts=N, retry_on=OverloadError)` on executor-invoking nodes. Complements our eval-score-driven semantic retries; separates infrastructure flakes (rate limits, ACP drops) from content judgment. Closely related to "LLM gates inherit PromptBackend flakiness" above — fixes the same class of bug from a different angle.
+- [ ] **`RetryPolicy` for transport-level retries** — layer `RetryPolicy(max_attempts=N, retry_on=OverloadError)` on executor-invoking nodes. Complements our eval-score-driven semantic retries; separates infrastructure flakes (rate limits, backend drops) from content judgment. Closely related to "LLM gates inherit PromptBackend flakiness" above — fixes the same class of bug from a different angle.
 
 ## Stage 5c — inline route (deferred items)
 
@@ -699,7 +666,7 @@ unless flagged otherwise.
   is free-floating. Folding the three modes under one field makes them
   symmetric and pairs with the `schema:` work below.
 
-- [ ] 🚨 **Schema enforcement at backend boundary** — `ACPBackend` and
+- [ ] 🚨 **Schema enforcement at backend boundary** — the CLI backend and
   stub backends populate `ExecutionResult.structured_output` when a
   Node has `schema:` set. The field exists end-to-end already; today
   no backend writes to it. Unblocks Stage 5b-style "route on producer
@@ -750,9 +717,9 @@ file. This is the builder-facing view.
 
 Planning docs claim it "landed," but the repo stripped Anthropic /
 OpenAI / DeepSeek direct-API backends in the 0.2.x transport rework —
-local agent CLIs via `acp` / `cli` remain, with Codex and Claude supported;
+local agent CLIs via `transport: cli` remain, with Codex and Claude supported;
 `transport: api` is roadmap. Fine for the builder today (already
-direct-CLI), but the "use the direct SDK to dodge ACP process leaks" plan
+direct-CLI), but the "use the direct SDK" plan
 is **not currently available**.
 
 ### ✅ B2 — `--resume` skips completed nodes — SHIPPED 0.6.0
@@ -960,8 +927,7 @@ findings this pass:
   its token count exceeds a declarative cap) needs a token-accounting
   foundation the operator has explicitly ruled out building. The other
   half of the original #5 — process-group kill on timeout/cancel — SHIPPED
-  0.7.7 (`cli.py` spawns with `start_new_session=True`, `os.killpg`-escalates,
-  matching the ACP teardown discipline). Nothing open here.
+  0.7.7 (`cli.py` spawns with `start_new_session=True`, `os.killpg`-escalates). Nothing open here.
 - [ ] **#6 — managed-team node with mid-flight oversight (Low; resolved indirectly 0.7.9)** — the supported approach is the authoring pattern (coordinator prompt node granted `allowed_tools: ["Task"]`, members as sub-agents inside one node — see SKILLS.md); what remains open is a FIRST-CLASS coordinator node that
   spawns + supervises fan-out members during execution (check-ins, intervene, aggregate),
   above the fire-and-join `fan_out` primitive. (Folds in the N4 evidence: phase_3_1b auditors
@@ -996,10 +962,9 @@ not drawn). Explore rendering a terminal-friendly diagram, e.g. via
 [beautiful-mermaid](https://github.com/lukilabs/beautiful-mermaid), and
 ideally overlay the route edges the static graph omits. DX nice-to-have.
 
-Package it as an **optional `[viz]` extra**, mirroring `[acp]`: the
+Package it as an **optional `[viz]` extra**: the
 renderer dep stays out of the core install, the `graph`/`view` command
-lazy-imports it (clear "install `sqrlly[viz]`" error if absent), and
-the layer/lazy-import pattern follows `factory._build_acp`.
+lazy-imports it (clear "install `sqrlly[viz]`" error if absent).
 
 ---
 
