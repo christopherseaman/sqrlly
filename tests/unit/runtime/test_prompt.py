@@ -877,19 +877,44 @@ class TestBackendTransientRetry:
         assert [c[1] for c in backend.calls] == ["opus", "sonnet"]
 
     @pytest.mark.asyncio
-    async def test_overload_exhaustion_unchanged_with_backend_budget(self, tmp_path):
-        """Overload at every step still exhausts the model chain and returns
-        the overload failure — the backend-retry budget does NOT re-attempt
-        an exhausted-chain overload."""
+    async def test_overload_exhausted_chain_retries_with_backoff(self, tmp_path):
+        """A model outside the downgrade chain (every Codex model) exhausts
+        the chain on its first overload. The exhausted chain then spends the
+        backend-retry budget: two overloads + success = 3 dispatches of the
+        same model. With budget 0 the first overload is terminal."""
+        backend = OverloadThenSucceedBackend(fail_count=2, response="recovered")
+        result = await execute_with_downgrade(
+            backend, "x", "gpt-5.3-codex", str(tmp_path), timeout=None,
+            settings=Settings(backend_max_retries=2, retry_backoff=[0.01]),
+        )
+        assert result.success is True
+        assert result.output == "recovered"
+        assert [c[1] for c in backend.calls] == ["gpt-5.3-codex"] * 3
+
+        backend = OverloadThenSucceedBackend(fail_count=2, response="recovered")
+        result = await execute_with_downgrade(
+            backend, "x", "gpt-5.3-codex", str(tmp_path), timeout=None,
+            settings=Settings(backend_max_retries=0),
+        )
+        assert result.success is False
+        assert result.error_kind == "overload"
+        assert len(backend.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_overload_exhaustion_rewalks_chain_per_backend_retry(self, tmp_path):
+        """Persistent overload with budget 1: the chain is walked from the
+        original model twice (1 initial + 1 retry), then the failure keeps
+        kind ``overload``."""
         backend = AlwaysOverloadBackend()
         result = await execute_with_downgrade(
             backend, "x", "opus", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=4),
+            settings=Settings(backend_max_retries=1, retry_backoff=[0.01]),
         )
         assert result.success is False
         assert "exhausted model chain" in result.error
-        # Three downgrade calls, no backend-retry re-walk.
-        assert [c[1] for c in backend.calls] == ["opus", "sonnet", "haiku"]
+        assert "haiku" in result.error
+        assert result.error_kind == "overload"
+        assert [c[1] for c in backend.calls] == ["opus", "sonnet", "haiku"] * 2
 
     @pytest.mark.asyncio
     async def test_backend_retry_distinct_from_gate_max_retries(self, tmp_path):

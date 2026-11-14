@@ -306,13 +306,15 @@ resolver sees) — distinct from faking what an external system returns.
 - **Bad-manifest fan-out fails the run (recoverable)** — the `_fan_<id>` dispatcher (`compile/graph.py::_make_fan_dispatcher`) FAILS the parent node with a `make_failure_update` `Command(goto=END)` — NOT a raise — on either (a) a `_read_manifest` `ManifestError` (unreadable / invalid-JSON / mis-shaped `manifest_path`, raised in `_read_manifest`) or (b) a DUPLICATE child id (literal duplicate, or the `::unknown` collapse of ≥2 id-less items; a dict item missing `id` also WARNs in `_normalize_items`). Failing the node (not raising) puts the parent in `failed_nodes` so bare `--resume` dirties it via `prior_failed` and re-fans once the manifest is fixed; a raise would leave the parent completed-but-not-failed (the gate committed one super-step earlier) and bare `--resume` would freeze it and re-fail deterministically. The parent can land in BOTH `completed_nodes` (gate committed) and `failed_nodes` (`_fan_` failed) in that checkpoint — `compile/resume.py::compute_skip_set`'s dirty subtraction handles it. (Note: `_read_manifest` still RAISES `ManifestError` when called directly, e.g. via `cli/main.py`; only the dispatcher converts it.)
 - **JSONL `gate_evaluated` precedes `node_completed`/`node_failed`** — the collapsed gate emits its EvaluationRecord and its outcome (completed / failed) in ONE super-step update, so `runtime/logging.py::_emit_update_events` orders `gate_evaluated` BEFORE both `node_completed` and `node_failed` ("gate ran, then the node settled"). For the pre-collapse split top-level pair the record already landed a super-step earlier, so this preserves that order; it is a VISIBLE JSONL order change for fan-out children and dynamic gated parents (whose single merged update previously emitted `node_completed` first). In-repo consumers (`terminal.py`, `view.py`) are order-insensitive.
 - **Backend transient-error retry is opt-in** — `settings.backend_max_retries`
-  (default `0`) retries the SAME backend dispatch on a non-`OverloadError`
-  exception (a `claude exited 1` blip) up to N times with `retry_backoff`
-  between attempts, wrapped around the `OverloadError`→downgrade loop in
+  (default `0`) retries the SAME backend dispatch on a backend exception
+  (a `claude exited 1` blip) up to N times with `retry_backoff` between
+  attempts, wrapped around the `OverloadError`→downgrade loop in
   `runtime/executor/prompt.py::execute_with_downgrade`. Distinct from the
-  gate/evaluation `max_retries`; overload still flows through the
-  model-downgrade chain (not double-counted). `0` = terminal on first
-  backend error (the historical behavior).
+  gate/evaluation `max_retries`. An overload walks the model-downgrade
+  chain first (no retry consumed); an exhausted chain (immediate for a
+  model outside it, e.g. every Codex model) then consumes a retry and
+  re-dispatches from the original model. `0` = terminal on first backend
+  error or exhausted chain.
 - **`settings:` rejects unknown keys (`extra=forbid`, 0.7.6)** — a typo'd or stale `settings` key now raises a `ValidationError` at load (previously silently ignored). Every other schema model already enforced this; `settings` was the last to adopt it. Run `sqrlly validate` to surface the offending key.
 - **`--resume` re-runs only failed fan-out children** — a fan-out parent
   with a failed child in the prior checkpoint is dirtied in

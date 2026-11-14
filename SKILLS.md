@@ -384,7 +384,8 @@ wave — are absent from both.
   individually skippable.
 
 Set `settings.backend_max_retries: N` to absorb transient backend blips (a
-`claude exited 1` that isn't an overload) by retrying the same node dispatch N
+`claude exited 1`, or an overload once the model-downgrade chain has no lower
+model — at once for Codex models) by retrying the same node dispatch N
 times with `retry_backoff` between attempts — separate from the gate
 `max_retries`. On `--resume`, a fan-out whose child failed re-runs ONLY that
 child: the parent re-fans and completed siblings stay frozen (no re-bill), so a
