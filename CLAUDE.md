@@ -151,8 +151,9 @@ langgraph-free).
 - `memory_gate.py` — `wait_for_memory` (optional, default-off host-memory
   back-pressure; isolates the sole `psutil` dependency).
 - `promote.py` — `discover_changes` / `apply_changes` / `plan_promotions`
-  / `reconcile_promotions` / `PromoteConflictError`: cross-node promote
-  reconciliation under `settings.on_promote_conflict` (discover→plan→apply).
+  / `reconcile_promotions` / `PromoteConflictError` /
+  `PromoteHeadMovedError`: cross-node promote reconciliation under
+  `settings.on_promote_conflict` (HEAD check→discover→plan→apply).
 - `settings_merge.py` — `merge_settings(parent, child)` for
   scope-aware inheritance.
 - `url.py` — `resolve_url`, `fetch_url` (plain dict fetch cache),
@@ -299,6 +300,7 @@ resolver sees) — distinct from faking what an external system returns.
   `{{sender_id}}`; guard with `{% if sender_id %}` in that rare
   topology. Inside a goto-only target the var is always bound.
 - **Fan-out branch promotion is `fan_out.promote`, and external promote needs `worktree_gc: never`** — `fan_out.promote: true` merges each Send branch's worktree delta back to base at end-of-run via the shared `reconcile_promotions` path (before GC, so no race for the in-CLI path). A promote done OUTSIDE the run (a runner script after `sqrlly run` returns) must set `settings.worktree_gc: never`: with `on_success`, `reclaim()` `git worktree remove`s the branch trees before the process exits, so an external promote finds nothing and silently no-ops (silent data loss).
+- **Promote copies UNCOMMITTED changes only, and fails on a committed worktree** — `discover_changes` reads `git status`, which cannot see commits. `reconcile_promotions` therefore runs `git merge-base --is-ancestor <worktree HEAD> <base HEAD>` per spec first and raises `PromoteHeadMovedError` (naming every offending node id + worktree path) before any file is written; the CLI surfaces it as a `ClickException`, which also skips `worktree_gc`, so the commits stay in the worktree. A promoting node must leave its work uncommitted. The ancestor check passes when the base HEAD advanced during the run, and also when a node checked out an OLDER commit (not detected).
 - **`promote_include` re-includes after `promote_exclude`** — `settings.promote_include` (git pathspecs) is a second `discover_changes` pass unioned back into every promoting node's footprint, so you can exclude a directory but keep a subpath (`promote_exclude: ["log/"]` + `promote_include: ["log/phases/**"]`). It overrides `promote_exclude` and ignores a node's `output_contract` globs (footprint-level override).
 - **Worktree dep sharing** — gitignored base deps reach branch worktrees two ways: `settings.worktree_share` (read-only whole-dir symlink — for read-only gates) and `settings.worktree_setup` (per-worktree rehydrate commands; sentinel-gated, fatal-per-branch). Both write the shared paths to the repo's shared `.git/info/exclude` so they stay out of the promote footprint; `settings.promote_exclude` is the promote-layer backstop. Wired in `runtime/foreman.py::_ensure_worktree_ready` via `runtime/worktree_share.py`. Consumer note: a `prisma generate` in `worktree_setup` needs its output path in `worktree_setup_exclude` (a `validate` lint warns otherwise).
   - **Shared `info/exclude`, not per-worktree** — git has no per-worktree exclude file: `git rev-parse --git-path info/exclude` resolves to the common git dir, the same `.git/info/exclude` for the base repo and every linked worktree, so `write_worktree_excludes` mutates that one shared file. Consequence: those entries persist in the base repo after the run and are NOT reclaimed by `worktree_gc`; however `info/exclude` only affects UNTRACKED paths, so it can never mask modifications to tracked files.

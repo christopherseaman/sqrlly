@@ -16,7 +16,8 @@ from sqrlly.compile.lint import collect_warnings
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.foreman import ForemanExecutor
 from sqrlly.runtime.promote import (
-    PromoteConflictError, fanout_branch_specs, reconcile_promotions,
+    PromoteConflictError, PromoteHeadMovedError, fanout_branch_specs,
+    reconcile_promotions,
 )
 from sqrlly.runtime.runner import run_workflow
 from sqrlly.runtime.state import make_initial_state
@@ -544,7 +545,7 @@ async def _promote_and_gc(
                 excludes=config.settings.promote_exclude or None,
                 includes=config.settings.promote_include or None,
             )
-        except PromoteConflictError as e:
+        except (PromoteConflictError, PromoteHeadMovedError) as e:
             raise click.ClickException(str(e)) from e
         if (plan.conflicts
                 and config.settings.on_promote_conflict == "warn"):

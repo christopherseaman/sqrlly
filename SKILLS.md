@@ -227,6 +227,9 @@ node to apply its worktree's git delta (adds/edits/**deletes**) back to
 the base workdir after a clean run — the change set is discovered from
 git, so it works for open-ended edits (bugfixes/refactors) you can't
 enumerate in advance; an `output_contract` (glob paths) narrows it.
+Promotion copies **uncommitted** changes only: tell a promoting node's
+agent not to `git commit`. A worktree holding commits fails the promote
+step (error names the node, nothing is written, the worktree is kept).
 Set `settings.worktree_gc: on_success` to remove worktrees after a clean
 run (default `never` keeps them for inspection / `--resume`). The full
 lifecycle is **fork → produce → read/share → promote → GC**.

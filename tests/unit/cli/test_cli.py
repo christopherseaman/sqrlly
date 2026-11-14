@@ -633,6 +633,29 @@ class TestPromoteConflict:
         assert "Promote conflict" in result.stderr
         assert not (repo / "shared.txt").exists()
 
+    def test_committed_worktree_aborts_and_keeps_worktrees(self, runner, tmp_path):
+        repo = tmp_path / "moved"; repo.mkdir(); self._init_repo(repo)
+        commit = tmp_path / "commit.sh"
+        commit.write_text(
+            "#!/bin/bash\nset -euo pipefail\necho out > out.txt\n"
+            "git add out.txt\ngit commit -q -m work\n")
+        commit.chmod(0o755)
+        dirty = tmp_path / "dirty.sh"
+        dirty.write_text("#!/bin/bash\nset -euo pipefail\necho d > dirty.txt\n")
+        dirty.chmod(0o755)
+        cfg = self._cfg(repo, commit, dirty, "warn")
+        cfg.write_text(cfg.read_text().replace(
+            "settings:\n", "settings:\n  worktree_gc: on_success\n"))
+        result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
+        assert result.exit_code != 0
+        assert "writer_a" in result.stderr
+        assert "writer_b" not in result.stderr
+        assert not (repo / "out.txt").exists()
+        assert not (repo / "dirty.txt").exists()
+        # worktree_gc is skipped: both worktrees still hold their work.
+        kept = sorted(p.name for p in (repo / ".sqrlly").glob("*/*.txt"))
+        assert kept == ["dirty.txt", "out.txt"]
+
     def test_overwrite_silent_last_write_wins(self, runner, tmp_path):
         repo = tmp_path / "ow"; repo.mkdir(); self._init_repo(repo)
         a, b = self._scripts(tmp_path)
