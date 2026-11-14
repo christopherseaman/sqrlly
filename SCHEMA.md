@@ -373,9 +373,9 @@ prompt template as `{{_retry_reason}}`.
 | Field | Type | Default | Effect |
 |---|---|---|---|
 | `base_directory` | `str` | required | Directory checked after the node runs. |
-| `required_files` | `list[str]` | `[]` | Literal paths (no glob) that must exist for the node to succeed, checked under `base_directory` in the node's run dir (its worktree in a git repo). |
+| `required_files` | `list[str]` | `[]` | Paths or globs (`*`/`**`/`?`/`[…]`) checked under `base_directory` in the node's run dir (its worktree in a git repo). Each entry needs at least one match for the node to succeed; a literal path matches itself. `*` stays within one directory, `**` spans directories. |
 
-> `required_files` are interpreted relative to `base_directory` for **both** the existence check and the promote glob filter. A node with `base_directory: reference` and `required_files: [x.json]` validates and promotes `reference/x.json`.
+> `required_files` are interpreted relative to `base_directory` for **both** the existence check and the promote glob filter. A node with `base_directory: reference` and `required_files: [x.json]` validates and promotes `reference/x.json`; `required_files: ["*.json"]` validates when at least one `reference/*.json` exists and promotes every changed match.
 
 ---
 

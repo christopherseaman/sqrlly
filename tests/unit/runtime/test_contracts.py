@@ -74,3 +74,26 @@ class TestRequiredPaths:
     def test_empty_required_files(self):
         contract = OutputContract(base_directory="reference", required_files=[])
         assert contract.required_paths() == []
+
+
+def test_validate_output_contract_glob(tmp_path):
+    contract = OutputContract(base_directory=".", required_files=["out/*.json"])
+    (tmp_path / "out").mkdir()
+    assert validate_output_contract(contract, str(tmp_path)) == ["out/*.json"]
+
+    (tmp_path / "out" / "a.json").write_text("{}")
+    assert validate_output_contract(contract, str(tmp_path)) == []
+
+    literal = OutputContract(base_directory="out", required_files=["a.json"])
+    assert validate_output_contract(literal, str(tmp_path)) == []
+
+    (tmp_path / "out" / "x[1].txt").write_text("x")
+    bracket = OutputContract(base_directory="out", required_files=["x[1].txt"])
+    assert validate_output_contract(bracket, str(tmp_path)) == []
+
+    (tmp_path / "out" / "sub").mkdir()
+    (tmp_path / "out" / "sub" / "b.md").write_text("x")
+    deep = OutputContract(
+        base_directory="out", required_files=["**/b.md", "*.md"],
+    )
+    assert validate_output_contract(deep, str(tmp_path)) == ["out/*.md"]
