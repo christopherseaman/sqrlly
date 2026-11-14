@@ -462,9 +462,13 @@ def validate_output_contract(
     # Follows the promote filter's ``:(glob)`` pathspec: the literal path is
     # tried first (so ``x[1].txt`` matches a file of that name), then ``**``
     # spans directories and ``*`` stays in one segment and matches dotfiles.
+    # Glob matches under ``.git`` or ``.sqrlly`` (other nodes' worktrees) are
+    # ignored: promote never carries them, so they cannot satisfy a contract.
     missing = []
     for rel in contract.required_paths():
-        if not ((Path(workdir) / rel).exists() or glob.glob(
-                rel, root_dir=workdir, recursive=True, include_hidden=True)):
+        if not ((Path(workdir) / rel).exists() or any(
+                not {".git", ".sqrlly"} & set(Path(match).parts)
+                for match in glob.iglob(
+                    rel, root_dir=workdir, recursive=True, include_hidden=True))):
             missing.append(rel)
     return missing

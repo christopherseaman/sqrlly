@@ -97,3 +97,9 @@ def test_validate_output_contract_glob(tmp_path):
         base_directory="out", required_files=["**/b.md", "*.md"],
     )
     assert validate_output_contract(deep, str(tmp_path)) == ["out/*.md"]
+
+    for internal in (".sqrlly/wt-x/out", ".git"):
+        (tmp_path / internal).mkdir(parents=True)
+        (tmp_path / internal / "report.json").write_text("{}")
+    leading = OutputContract(base_directory=".", required_files=["**/report.json"])
+    assert validate_output_contract(leading, str(tmp_path)) == ["**/report.json"]
