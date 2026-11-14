@@ -13,8 +13,10 @@ repo. Narrative documentation lives elsewhere:
   dispatch table, route-predicate namespace.
 - **`SKILLS.md`** — agent skill doc: instructions for an AI coding
   agent authoring and running sqrlly workflows (Codex skill format).
-- **`TODO.md`** — open work (prioritized + non-prioritized) plus the
-  consolidated deferred-defects/cleanups log (each with a diagnosis).
+- **[GitHub issues](https://github.com/christopherseaman/sqrlly/issues)** — all
+  open work. Pick, claim, hand off, ask, park and close issues as
+  **`docs/reference/issues.md`** says; file a new issue for any finding or
+  decision. No backlog lives in a file.
 - **`CHANGELOG.md`** — release history.
 
 Read those when narrative context is needed; this file stays focused on

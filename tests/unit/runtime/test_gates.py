@@ -1095,7 +1095,7 @@ class TestEvalPreamble:
 
 
 # ---------------------------------------------------------------------------
-# Dep-output projection (TODO 216 — gate validators see dep outputs)
+# Dep-output projection (gate validators see dep outputs)
 # ---------------------------------------------------------------------------
 
 
@@ -1210,7 +1210,7 @@ class TestGateScopingByDeps:
     node's declared deps, matching `build_context`'s scoping. A node
     with `depends_on: [a]` does NOT see `b`'s output even though `b`
     is in completed_nodes. Gate-only phases (no execute, no deps)
-    see ALL completed outputs (the TODO bug case)."""
+    see ALL completed outputs."""
 
     def test_scoped_to_declared_deps(self, tmp_path):
         """Direct test of the scoping helper."""

@@ -1,0 +1,38 @@
+# The issue queue's automatic moves (docs/reference/issues.md): a new issue starts untriaged, a
+# closed issue readies what it blocked, a human comment readies an issue that waited for
+# feedback, and a claim with no comment inside the lease returns to ready.
+name: Issue queue
+on:
+  issues:
+    types: [opened, closed]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  issues: write
+  contents: read
+concurrency:
+  group: issue-queue
+jobs:
+  queue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/issue-queue.py
+          sparse-checkout-cone-mode: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}:${{ github.event.action }}
+          ISSUE: ${{ github.event.issue.number }}
+          COMMENT: ${{ github.event.comment.id }}
+        run: |
+          case "$EVENT" in
+            issues:opened) python3 tools/issue-queue.py opened "$ISSUE" ;;
+            issues:closed) python3 tools/issue-queue.py closed "$ISSUE" ;;
+            issue_comment:created) python3 tools/issue-queue.py commented "$ISSUE" "$COMMENT" ;;
+            *) python3 tools/issue-queue.py sweep ;;
+          esac

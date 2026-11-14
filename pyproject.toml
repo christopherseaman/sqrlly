@@ -105,7 +105,7 @@ exclude = [
     "/.env",
     "/CLAUDE.md",
     "/AGENTS.md",
-    "/TODO.md",
+    "/tools",
     # In-flight superpowers plan/spec docs and SDD scratch must never
     # ship to PyPI (the tracked set is deleted after each feature lands).
     "/docs/superpowers",

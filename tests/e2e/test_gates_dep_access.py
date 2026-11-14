@@ -1,9 +1,8 @@
 """Gate-only phase validates upstream content via DEPS_JSON env var.
 
-End-to-end exercise of the TODO 216 bug fix: today a gate-only
-phase (a node with `evaluation:` and no `execute:`) has no useful
-signal because validators only see the node's own stub output. After
-the fix, validators read upstream node outputs from `DEPS_JSON`.
+A gate-only phase (a node with `evaluation:` and no `execute:`) has
+only its own stub output, so validators read upstream node outputs
+from `DEPS_JSON`.
 
 The replacement is for the existing workaround in
 `examples/absurd-paper/gates/submission_check.py` which reads files
