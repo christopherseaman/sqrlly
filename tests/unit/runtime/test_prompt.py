@@ -14,6 +14,8 @@ flow (node → prompt file fetch → render → backend) lives behind
 ``DispatchExecutor`` and is exercised here through that entry point.
 """
 
+import time
+
 import pytest
 
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
@@ -881,12 +883,15 @@ class TestBackendTransientRetry:
         """A model outside the downgrade chain (every Codex model) exhausts
         the chain on its first overload. The exhausted chain then spends the
         backend-retry budget: two overloads + success = 3 dispatches of the
-        same model. With budget 0 the first overload is terminal."""
+        same model, each retry preceded by its ``retry_backoff`` sleep. With
+        budget 0 the first overload is terminal."""
         backend = OverloadThenSucceedBackend(fail_count=2, response="recovered")
+        started = time.monotonic()
         result = await execute_with_downgrade(
             backend, "x", "gpt-5.3-codex", str(tmp_path), timeout=None,
             settings=Settings(backend_max_retries=2, retry_backoff=[0.01]),
         )
+        assert time.monotonic() - started >= 0.02
         assert result.success is True
         assert result.output == "recovered"
         assert [c[1] for c in backend.calls] == ["gpt-5.3-codex"] * 3
