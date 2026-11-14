@@ -15,6 +15,23 @@ All notable changes to sqrlly are documented here. Format follows
 - LangGraph requirement is now `>=1.2,<2` and `langgraph-checkpoint-sqlite`
   `>=3.1,<4`.
 
+### Fixed
+
+- Promotion fails loud, before writing any file, when a worktree HEAD is not
+  an ancestor of the base HEAD. A node that committed inside its worktree
+  previously promoted nothing and the run reported success (#1).
+- An overload that exhausts the model downgrade chain now falls through to
+  `settings.backend_max_retries` with `retry_backoff`. Codex models have no
+  downgrade chain, so they previously failed on the first overload (#2).
+- `output_contract.required_files` entries are validated as globs, matching
+  the promote filter. Matches under `.git/` and `.sqrlly/` are ignored (#3).
+- LLM gates dispatch through the backend retry and downgrade path. A backend
+  failure in a gate fails the node with a failure `kind` (#6).
+
+### Removed
+
+- The unused `promote()` helper in `runtime/promote.py`.
+
 ## [0.9.4] - 2026-08-05
 
 ### Added
