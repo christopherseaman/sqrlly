@@ -144,16 +144,19 @@ class PromoteHeadMovedError(Exception):
     """Raised by ``reconcile_promotions`` when a worktree's HEAD is not an
     ancestor of the base HEAD: the node committed inside its worktree, and
     ``git status`` cannot see committed work. ``nodes`` maps ``node_id`` →
-    worktree path."""
+    worktree path; ``base_head`` is the base sha the recovery command needs."""
 
-    def __init__(self, nodes: dict[str, str]):
+    def __init__(self, nodes: dict[str, str], base_head: str):
         self.nodes = nodes
+        self.base_head = base_head
         detail = "; ".join(f"{nid} ({wt})" for nid, wt in sorted(nodes.items()))
         super().__init__(
             f"Promote aborted, nothing written: {len(nodes)} node(s) committed "
             f"inside their worktree, and promotion copies uncommitted changes "
             f"only: {detail}. The commits remain in each worktree; run "
-            f"`git reset --soft <base HEAD>` there, or cherry-pick them."
+            f"`git reset --soft $(git merge-base HEAD {base_head})` there "
+            f"(the fork commit, so base commits made since stay intact), then "
+            f"re-run with --resume."
         )
 
 
@@ -192,7 +195,7 @@ def reconcile_promotions(
             if _head_moved(worktree, base_head)
         }
         if moved:
-            raise PromoteHeadMovedError(moved)
+            raise PromoteHeadMovedError(moved, base_head)
     footprints = {
         node_id: discover_changes(worktree, globs, excludes=excludes,
                                   includes=includes)

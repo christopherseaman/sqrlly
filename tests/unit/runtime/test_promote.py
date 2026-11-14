@@ -203,6 +203,37 @@ def test_reconcile_fails_on_committed_worktree(tmp_path):
     assert (tmp_path/"d.txt").read_text() == "d"
 
 
+def test_head_moved_advice_keeps_base_commits_made_after_the_fork(tmp_path):
+    _repo(tmp_path); wt = _wt(tmp_path)
+    (tmp_path/"a.txt").write_text("base-new")
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-am", "base"],
+                   check=True)
+    base_sha = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    (wt/"new.txt").write_text("new")
+    subprocess.run(["git", "-C", str(wt), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "work"],
+                   check=True)
+    spec = [("committer", str(wt), None)]
+    with pytest.raises(PromoteHeadMovedError) as exc:
+        reconcile_promotions(spec, str(tmp_path), "warn")
+    advised = f"git reset --soft $(git merge-base HEAD {base_sha})"
+    assert f"`{advised}`" in str(exc.value)
+    assert "--resume" in str(exc.value)
+    subprocess.run(["bash", "-c", advised], cwd=wt, check=True)
+    reconcile_promotions(spec, str(tmp_path), "warn")
+    assert (tmp_path/"new.txt").read_text() == "new"
+    assert (tmp_path/"a.txt").read_text() == "base-new"
+
+
+def test_reconcile_propagates_deletion(tmp_path):
+    _repo(tmp_path); wt = _wt(tmp_path)
+    (wt/"a.txt").unlink()
+    reconcile_promotions([("deleter", str(wt), None)], str(tmp_path), "warn")
+    assert not (tmp_path/"a.txt").exists()
+
+
 def test_reconcile_disjoint_promotes_both(tmp_path):
     _repo(tmp_path)
     wa = _wt(tmp_path, "wa"); wb = _wt(tmp_path, "wb")
