@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import sys
 from dataclasses import dataclass, field
@@ -468,10 +469,19 @@ def validate_output_contract(
     contract: OutputContract,
     workdir: str,
 ) -> list[str]:
-    """Check that all required files exist. Returns list of missing files
+    """Check each required entry as a glob that needs at least one match
+    (a literal path matches itself). Returns the unmatched entries
     (workdir-relative, ``base_directory`` prepended)."""
+    # Follows the promote filter's ``:(glob)`` pathspec: the literal path is
+    # tried first (so ``x[1].txt`` matches a file of that name), then ``**``
+    # spans directories and ``*`` stays in one segment and matches dotfiles.
+    # Glob matches under ``.git`` or ``.sqrlly`` (other nodes' worktrees) are
+    # ignored: promote never carries them, so they cannot satisfy a contract.
     missing = []
     for rel in contract.required_paths():
-        if not (Path(workdir) / rel).exists():
+        if not ((Path(workdir) / rel).exists() or any(
+                not {".git", ".sqrlly"} & set(Path(match).parts)
+                for match in glob.iglob(
+                    rel, root_dir=workdir, recursive=True, include_hidden=True))):
             missing.append(rel)
     return missing

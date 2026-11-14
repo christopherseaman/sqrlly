@@ -132,8 +132,8 @@ write a YAML file with `name`, `version`, `nodes`, and `settings`.
    ```
    In a git repo, files are checked in the node's worktree (where it
    wrote them), so write paths relative to the run, not absolute.
-   `required_files` entries are **literal paths** — globs are not
-   expanded (`out_*.md` is checked verbatim and will report missing).
+   `required_files` entries are paths or globs (`out_*.md`, `**/*.json`);
+   each entry needs at least one match, and a literal path matches itself.
 7. **Branch** with a `route:` block — an unconditional `goto:`, or a
    `cases:` / `else:` ladder of `when:` predicates:
    ```yaml
