@@ -393,11 +393,11 @@ class Settings(BaseModel):
     max_retries: int = 3
     # Transient-backend-error retry budget. DISTINCT from `max_retries`
     # (the evaluation/gate budget, which retries on a low gate score).
-    # This retries the SAME backend dispatch when the backend raises a
-    # non-OverloadError exception (e.g. `claude exited 1` — a transient
-    # blip), up to this many times with `retry_backoff` between attempts.
-    # OverloadError stays on the model-downgrade path and is not counted
-    # here. 0 (default) = today's behavior: one attempt, terminal.
+    # This retries the SAME backend dispatch when the backend raises
+    # (e.g. `claude exited 1` — a transient blip), up to this many times
+    # with `retry_backoff` between attempts. An OverloadError walks the
+    # model-downgrade chain first and counts here only once the chain has
+    # no lower model. 0 (default) = one attempt, terminal.
     backend_max_retries: int = 0
     # Run Claude with `--safe-mode` (cli transport only): operator
     # customizations — output styles, CLAUDE.md, skills, MCP, hooks — are

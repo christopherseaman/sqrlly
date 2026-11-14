@@ -9,7 +9,8 @@ from sqrlly.runtime.gates import (
     _parse_evaluation_output,
     run_evaluation,
 )
-from sqrlly.runtime.result import EvaluationError
+from sqrlly.runtime.executor.backends.cli import CLIBackend
+from sqrlly.runtime.result import EvaluationBackendError, EvaluationError
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.schema.models import Evaluation
@@ -154,6 +155,26 @@ class TestGateEvaluation:
                 gate, "p1", str(tmp_path), "out",
                 backend=None, default_model="sonnet",
             )
+
+    @pytest.mark.asyncio
+    async def test_md_validator_backend_failure_raises_with_kind(self, tmp_path):
+        """A backend that exits non-zero on the LLM-gate dispatch raises
+        EvaluationBackendError carrying kind ``backend_error`` — never a
+        0.0 score."""
+        from sqrlly.runtime.gates import run_evaluation_llm
+
+        (tmp_path / "judge.md").write_text("Judge: {{ output }}")
+        stub = tmp_path / "stub-cli"
+        stub.write_text("#!/bin/sh\ncat >/dev/null\necho boom >&2\nexit 1\n")
+        stub.chmod(0o755)
+        gate = Evaluation(validator="judge.md", threshold=0.8)
+        with pytest.raises(EvaluationBackendError, match="exited 1: boom") as exc:
+            await run_evaluation_llm(
+                gate, "p1", str(tmp_path), "out",
+                backend=CLIBackend(argv_prefix=(str(stub),)),
+                default_model="sonnet",
+            )
+        assert exc.value.kind == "backend_error"
 
     @pytest.mark.asyncio
     async def test_py_validator_score_above_one_is_clamped(self, tmp_path):

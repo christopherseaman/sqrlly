@@ -28,7 +28,7 @@ from sqrlly.runtime.gates import (
 )
 from sqrlly.runtime.executor.prompt import retry_delay
 from sqrlly.runtime.gates import run_evaluation
-from sqrlly.runtime.result import ExecutionResult
+from sqrlly.runtime.result import EvaluationBackendError, ExecutionResult
 from sqrlly.runtime.state import WorkflowState
 from sqrlly.schema.models import Node, Settings, Graph
 
@@ -492,7 +492,8 @@ async def _run_eval_core(
     effective_settings: Settings | None,
 ) -> tuple[EvaluationResult | None, dict[str, Any] | None]:
     """Run the gate validator and return ``(result, None)`` on success
-    or ``(None, failure_update)`` on timeout.
+    or ``(None, failure_update)`` on timeout or an LLM-gate backend
+    failure.
 
     Shared core between ``_make_gate_node`` and
     ``run_evaluation_and_outcome`` — everything between the eligibility
@@ -524,6 +525,7 @@ async def _run_eval_core(
         dep_outputs=dep_outputs,
         dep_structured_outputs=dep_structured,
         dep_worktrees=dep_worktrees,
+        settings=s,
     )
     try:
         if timeout is not None:
@@ -534,6 +536,8 @@ async def _run_eval_core(
         return None, make_failure_update(
             node_id, f"Evaluation timed out after {timeout}s", kind="timeout",
         )
+    except EvaluationBackendError as e:
+        return None, make_failure_update(node_id, str(e), kind=e.kind)
     return eval_result, None
 
 
@@ -774,7 +778,8 @@ def _make_gate_node(
             else None
         )
 
-        # 5. Run the validator. A timeout is an infrastructure failure,
+        # 5. Run the validator. A timeout (or an LLM gate's failed backend
+        #    dispatch) is an infrastructure failure,
         #    distinct from a content evaluation: write failed_nodes with NO
         #    evaluations record (clearer than a synthetic score=0.0) and
         #    route END in one Command (no static out-edge remains).

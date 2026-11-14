@@ -98,13 +98,14 @@ async def execute_with_downgrade(
     ``retry_backoff`` for this scope (subgraph wrappers pass the
     merged settings).
 
-    Bounded transient-retry layer wrapping the overload-downgrade loop:
-    a non-OverloadError backend exception (e.g. the CLI backend's
-    `claude exited 1`) re-enters the downgrade loop from the ORIGINAL
-    model up to `backend_max_retries` times. OverloadError stays inside
-    the inner loop (model downgrade) and never consumes a backend
-    retry — overload exhaustion returns from inside the inner loop, so
-    it never reaches the outer `except Exception`. attempt 0 = first try.
+    Bounded retry layer wrapping the overload-downgrade loop: a backend
+    exception (e.g. the CLI backend's `claude exited 1`) re-enters the
+    downgrade loop from the ORIGINAL model up to `backend_max_retries`
+    times, sleeping `retry_backoff` between attempts. An OverloadError
+    first walks the downgrade chain without consuming a retry; once the
+    chain has no lower model (immediately, for a model outside the chain
+    such as every Codex model) it consumes one like any other error.
+    attempt 0 = first try.
     """
     attempt = 0
     while True:
@@ -121,21 +122,23 @@ async def execute_with_downgrade(
                         current_model, MODEL_DOWNGRADE_CHAIN
                     )
                     if next_model is None:
-                        return ExecutionResult(
-                            success=False,
-                            error=(
-                                f"API overloaded, exhausted model chain "
-                                f"(last: {current_model})"
-                            ),
-                            error_kind="overload",
-                        )
+                        raise
                     current_model = next_model
             break
         except Exception as e:
             if attempt >= settings.backend_max_retries:
-                # A backend-level (params.timeout) deadline is a `timeout`, not
-                # a generic `backend_error` — classified only at exhaustion so
-                # the retry loop is unchanged.
+                # Classified only at exhaustion so the retry loop treats
+                # every error alike. A backend-level (params.timeout)
+                # deadline is a `timeout`, not a generic `backend_error`.
+                if isinstance(e, OverloadError):
+                    return ExecutionResult(
+                        success=False,
+                        error=(
+                            f"API overloaded, exhausted model chain "
+                            f"(last: {current_model})"
+                        ),
+                        error_kind="overload",
+                    )
                 if isinstance(e, asyncio.TimeoutError):
                     return ExecutionResult(
                         success=False, error=f"Backend timed out: {e}",

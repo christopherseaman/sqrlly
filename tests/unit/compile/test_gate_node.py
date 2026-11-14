@@ -32,7 +32,9 @@ import pytest
 from langgraph.graph import END
 from langgraph.types import Command
 
+from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.compile.nodes import _make_gate_node
+from sqrlly.runtime.executor.backends.cli import CLIBackend
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
     DimensionCheck,
@@ -42,6 +44,8 @@ from sqrlly.schema.models import (
     Node,
     Settings,
 )
+
+from mock_executor import MockExecutor
 
 
 def _config_with(node: Node, **settings_kwargs) -> Graph:
@@ -563,3 +567,73 @@ class TestGateInfraFailure:
         assert cmd.goto == END
         assert cmd.update["failed_nodes"] == {"p1"}
         assert "evaluations" not in cmd.update
+
+
+class _StubBackendExecutor(MockExecutor):
+    """MockExecutor for the node body plus a real CLIBackend (aimed at a
+    stub script) for the LLM gate."""
+
+    def __init__(self, stub):
+        super().__init__()
+        self._backend = CLIBackend(argv_prefix=(str(stub),))
+
+    def get_backend(self):
+        return self._backend
+
+
+def _stub_cli(tmp_path, fail_first: int):
+    """Stub provider CLI: exits 1 on its first ``fail_first`` invocations
+    (counted in ``calls``), then prints a 0.9 verdict."""
+    stub = tmp_path / "stub-cli"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "cat >/dev/null\n"
+        f"echo x >> {tmp_path}/calls\n"
+        f"n=$(wc -l < {tmp_path}/calls)\n"
+        f'if [ "$n" -le {fail_first} ]; then echo "stub blip $n" >&2; exit 1; fi\n'
+        "echo '{\"score\": 0.9}'\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+async def _run_llm_gated(tmp_path, fail_first: int):
+    (tmp_path / "judge.md").write_text("Judge: {{ output }}")
+    node = Node(
+        id="p1", name="P1", execute=_exec(),
+        evaluation=Evaluation(validator="judge.md", threshold=0.8),
+    )
+    executor = _StubBackendExecutor(_stub_cli(tmp_path, fail_first))
+    graph = build_workflow_graph(
+        _config_with(node, backend_max_retries=1), executor,
+    )
+    state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+    calls = len((tmp_path / "calls").read_text().splitlines())
+    return state, executor, calls
+
+
+class TestLlmGateBackendError:
+    @pytest.mark.asyncio
+    async def test_llm_gate_backend_error_retries_then_fails_node(self, tmp_path):
+        """The LLM gate dispatch gets ``backend_max_retries``. A stub that
+        fails once is retried and the real score is recorded; a stub that
+        always exits 1 fails the node with kind ``backend_error`` — no
+        record, no node-body re-run, no escaping exception."""
+        ok_dir = tmp_path / "ok"
+        ok_dir.mkdir()
+        state, executor, calls = await _run_llm_gated(ok_dir, fail_first=1)
+        assert calls == 2
+        assert state["completed_nodes"] == {"p1"}
+        assert [r["result"]["score"] for r in state["evaluations"]["p1"]] == [0.9]
+        assert executor.execution_order == ["p1"]
+
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+        state, executor, calls = await _run_llm_gated(bad_dir, fail_first=99)
+        assert calls == 2  # 1 + backend_max_retries
+        assert state["failed_nodes"] == {"p1"}
+        assert state["completed_nodes"] == set()
+        assert [e["kind"] for e in state["errors"]] == ["backend_error"]
+        assert "stub blip 2" in state["errors"][0]["error"]
+        assert "p1" not in state["evaluations"]
+        assert executor.execution_order == ["p1"]
