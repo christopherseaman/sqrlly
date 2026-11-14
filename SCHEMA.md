@@ -39,7 +39,7 @@ Unknown keys in `settings:` are rejected with a `ValidationError` — no silent 
 | Field | Type | Default | Effect |
 |---|---|---|---|
 | `max_retries` | `int` | `3` | Default retry budget when an evaluation fails. |
-| `backend_max_retries` | `int` | `0` | Retries of the SAME backend dispatch on a backend error (e.g. `claude exited 1` — a transient blip), with `retry_backoff` between attempts. Distinct from `max_retries` (the gate/evaluation budget). `0` = one attempt, terminal. An overload first walks the fixed opus→sonnet→haiku downgrade chain without consuming a retry; once the chain has no lower model (at once for a model outside the chain, e.g. every Codex model) each retry re-dispatches from the original model. |
+| `backend_max_retries` | `int` | `0` | Retries of the SAME backend dispatch on a backend error (e.g. `claude exited 1` — a transient blip), with `retry_backoff` between attempts. Distinct from `max_retries` (the gate/evaluation budget). `0` = one attempt, terminal. An overload first walks the fixed opus→sonnet→haiku downgrade chain without consuming a retry; once the chain has no lower model (at once for a model outside the chain, e.g. every Codex model) each retry re-dispatches from the original model. Applies to prompt nodes and to `.md` LLM gate dispatches alike. |
 | `safe_mode` | `bool` | `false` | Run Claude with `--safe-mode` (`transport: cli`, `provider: anthropic` only): operator customizations — output styles, CLAUDE.md, skills, MCP, hooks — are disabled. It has no effect on Codex. The `--safe-mode` / `--no-safe-mode` CLI flag overrides this per run. |
 | `default_timeout` | `float \| None` | `None` | Per-node timeout (seconds); `None` = no timeout. |
 | `preamble_file` | `str \| None` | `None` | Prepended to every prompt before Jinja rendering. A missing file is a hard error. |
@@ -554,7 +554,7 @@ worse, the node name). `workflow_end` also carries a `failed_kinds` map
 | kind | meaning | disposition |
 |---|---|---|
 | `overload` | API 529/overloaded; the opus→sonnet→haiku downgrade chain and `backend_max_retries` were both exhausted before output. | **transient** |
-| `backend_error` | Backend `send_prompt` raised a non-overload exception surviving `backend_max_retries` (e.g. a `claude exited 1` blip). | **transient** |
+| `backend_error` | Backend `send_prompt` raised a non-overload exception surviving `backend_max_retries` (e.g. a `claude exited 1` blip) — in a prompt node or in a `.md` LLM gate dispatch (the gate fails its node; no evaluation record, no node retry). | **transient** |
 | `timeout` | `TimeoutError` on node execution or on a gate/evaluation await. | **transient** |
 | `infra` | A worktree/setup abort during dispatch — `git worktree add`, a `worktree_share` path, or a `worktree_setup` command failed. Caught at the foreman (or, for an isolated subgraph fan-out branch, the fan-out invoker) and returned as this node's failure instead of a raw traceback. | **transient** |
 | `gate_failure` | A **blocking** evaluation scored below threshold after `max_retries` — a real quality verdict on work that ran. | **deterministic** |

@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from sqrlly.runtime._json import extract_json
-from sqrlly.runtime.result import EvaluationError
-from sqrlly.schema.models import Evaluation, OutputContract
+from sqrlly.runtime.result import EvaluationBackendError, EvaluationError
+from sqrlly.schema.models import Evaluation, OutputContract, Settings
 
 
 def build_eval_preamble(
@@ -351,6 +351,7 @@ async def run_evaluation_llm(
     dep_outputs: dict[str, str] | None = None,
     dep_structured_outputs: dict[str, Any] | None = None,
     dep_worktrees: dict[str, str] | None = None,
+    settings: Settings | None = None,
 ) -> EvaluationResult:
     """Evaluate a .md prompt-based evaluation via an LLM backend.
 
@@ -358,8 +359,16 @@ async def run_evaluation_llm(
     node output, node id, and attempt number available as context. The
     backend's response must be JSON matching the feedback schema. See
     ``build_llm_gate_context`` for the dep projection rules.
+
+    The dispatch goes through ``execute_with_downgrade``, so ``settings``
+    supplies ``backend_max_retries`` / ``retry_backoff`` exactly as for a
+    prompt node. A dispatch that still fails raises
+    ``EvaluationBackendError``.
     """
-    from sqrlly.runtime.executor.prompt import render_template
+    from sqrlly.runtime.executor.prompt import (
+        execute_with_downgrade,
+        render_template,
+    )
 
     template_path = Path(workdir) / evaluation.validator
     try:
@@ -379,11 +388,13 @@ async def run_evaluation_llm(
     rendered = render_template(template_text, context)
 
     model = evaluation.model or default_model
-    result = await backend.send_prompt(rendered, model, workdir)
+    result = await execute_with_downgrade(
+        backend, rendered, model, workdir, settings=settings or Settings(),
+    )
     if not result.success:
-        return EvaluationResult(
-            score=0.0,
-            feedback=f"evaluation backend error: {result.error}",
+        raise EvaluationBackendError(
+            f"LLM gate dispatch failed: {result.error}",
+            result.error_kind or "backend_error",
         )
 
     return _parse_evaluation_output(result.output, require_score=require_score)
@@ -401,6 +412,7 @@ async def run_evaluation(
     dep_outputs: dict[str, str] | None = None,
     dep_structured_outputs: dict[str, Any] | None = None,
     dep_worktrees: dict[str, str] | None = None,
+    settings: Settings | None = None,
 ) -> EvaluationResult:
     """Run an evaluation and return an EvaluationResult.
 
@@ -438,6 +450,7 @@ async def run_evaluation(
             dep_outputs=dep_outputs,
             dep_structured_outputs=dep_structured_outputs,
             dep_worktrees=dep_worktrees,
+            settings=settings,
         )
     else:
         raise ValueError(f"Unsupported validator type: {suffix}")

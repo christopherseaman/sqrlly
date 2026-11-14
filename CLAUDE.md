@@ -314,7 +314,11 @@ resolver sees) — distinct from faking what an external system returns.
   chain first (no retry consumed); an exhausted chain (immediate for a
   model outside it, e.g. every Codex model) then consumes a retry and
   re-dispatches from the original model. `0` = terminal on first backend
-  error or exhausted chain.
+  error or exhausted chain. `.md` LLM gates dispatch through the same
+  function (`runtime/gates.py::run_evaluation_llm`); a gate dispatch that
+  still fails raises `EvaluationBackendError`, which
+  `compile/nodes.py::_run_eval_core` turns into a node failure carrying the
+  dispatch's kind (no evaluation record, no node retry).
 - **`settings:` rejects unknown keys (`extra=forbid`, 0.7.6)** — a typo'd or stale `settings` key now raises a `ValidationError` at load (previously silently ignored). Every other schema model already enforced this; `settings` was the last to adopt it. Run `sqrlly validate` to surface the offending key.
 - **`--resume` re-runs only failed fan-out children** — a fan-out parent
   with a failed child in the prior checkpoint is dirtied in

@@ -52,6 +52,17 @@ class EvaluationError(RuntimeError):
     a 0.0 quality result."""
 
 
+class EvaluationBackendError(RuntimeError):
+    """An LLM gate's backend dispatch failed after its downgrade chain and
+    ``backend_max_retries``. ``kind`` is the dispatch's ``error_kind``
+    (``backend_error`` / ``overload`` / ``timeout``); the gate fails the
+    node with it."""
+
+    def __init__(self, error: str, kind: str):
+        super().__init__(error)
+        self.kind = kind
+
+
 class ManifestError(RuntimeError):
     """Raised when fan-out node manifest processing fails: either the
     declared ``manifest_path`` could not be read (file missing or invalid
