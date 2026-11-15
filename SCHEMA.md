@@ -106,7 +106,7 @@ defaults to `llm`, so pre-`CommandPreset` YAML still parses).
 | Field | Type | Default | Effect |
 |---|---|---|---|
 | `kind` | `"llm"` | `"llm"` | Discriminator. |
-| `transport` | `"cli"` | `"cli"` | Invocation shape — a subprocess per call; see the provider table below. |
+| `transport` | `"cli" \| "cloud"` | `"cli"` | Invocation shape. `cli` is a subprocess per call; see the provider table below. `cloud` is a Codex cloud task; see "Cloud transport" below. |
 | `provider` | `"openai" \| "anthropic"` | `"openai"` | CLI implementation/model family. `openai` maps to Codex CLI; `anthropic` maps to Claude. |
 | `model` | `str` | required | Model id. |
 | `default` | `bool` | `false` | Exactly one `LlmPreset` must be `true`. |
@@ -115,6 +115,7 @@ defaults to `llm`, so pre-`CommandPreset` YAML still parses).
 | `disallowed_tools` | `list[str] \| None` | `None` | Claude CLI tools via `--disallowedTools`. Rejected for Codex. |
 | `env` | `dict[str, str]` | `{}` | Environment overlay for the spawned backend process, e.g. `CLAUDE_CODE_EFFORT_LEVEL`. Overlaid on the inherited environment at spawn; never replaces it. Per-node tuning is done by selecting a preset variant via `params.preset`. |
 | `cli_args` | `list[str] \| None` | `None` | Extra args appended verbatim before the stdin prompt marker (escape hatch). |
+| `environment` | `str \| None` | `None` | Codex cloud environment id. Required and non-empty for `transport: cloud`; rejected for `transport: cli`. Not the same field as `env`. |
 
 > Tool-use defaults (all unset): CLI providers receive no extra tool flags.
 > Claude-only
@@ -144,6 +145,34 @@ Claude-specific `permission_mode`, `allowed_tools`, or `disallowed_tools`
 fields; use `cli_args` for documented Codex options. The api transport — direct calls to
 Anthropic / OpenAI / DeepSeek / custom OpenAI-compatible endpoints —
 was removed in 0.2.x; re-introduction remains on the roadmap.
+
+#### Cloud transport
+
+`transport: cloud` describes a Codex cloud task. The preset validates, but
+this version has no cloud backend: a node that dispatches to a cloud preset
+fails with an error naming the preset.
+
+```yaml
+settings:
+  presets:
+    local: { model: gpt-5.6-luna, default: true }
+    remote: { transport: cloud, model: gpt-5.6-luna, environment: env_abc123 }
+```
+
+A cloud preset:
+
+- requires `provider: openai` (the default) and a non-empty `environment`;
+- rejects `permission_mode`, `allowed_tools`, `disallowed_tools`, `env`,
+  and `cli_args`;
+- rejects `default: true`, and `sqrlly run --preset <cloud preset>` fails,
+  so a workflow with a cloud preset also declares a `cli` default. Nodes
+  select the cloud preset with `params.preset`.
+
+`validate` and `run` warn when a node that selects a cloud preset has
+`depends_on`: each dependency binds `{{dep_id_worktree}}` to a local
+worktree path that the cloud workspace does not have. The check does not
+read the prompt file, so it fires whether or not the prompt references the
+variable.
 
 ### CommandPreset (`kind: command`)
 

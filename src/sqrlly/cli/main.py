@@ -643,6 +643,7 @@ async def _execute_workflow(
     prompt_backend_builders = {
         name: functools.partial(
             create_backend_from_preset, preset, safe_mode=run_safe_mode,
+            name=name,
         )
         for name, preset in all_presets.items()
         if isinstance(preset, LlmPreset)

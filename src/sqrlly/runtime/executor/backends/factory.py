@@ -39,7 +39,7 @@ _BACKEND_BUILDERS: dict[tuple[str, str], Callable[["LlmPreset"], PromptBackend]]
 
 
 def create_backend_from_preset(
-    preset: "LlmPreset", *, safe_mode: bool = False,
+    preset: "LlmPreset", *, safe_mode: bool = False, name: str | None = None,
 ) -> PromptBackend:
     """Instantiate a PromptBackend matching the preset's transport+provider.
 
@@ -55,7 +55,15 @@ def create_backend_from_preset(
     and free of e.g. an "explanatory" output style leaking commentary into
     node output. It is a ``claude`` CLI flag, so it only applies to
     ``transport: cli, provider: anthropic`` presets.
+
+    ``transport: cloud`` validates in the schema but has no builder row;
+    it raises ``RuntimeError`` naming the preset (``name``).
     """
+    if preset.transport == "cloud":
+        raise RuntimeError(
+            f"Preset {name!r}: the cloud backend is not available in this "
+            f"version of sqrlly (transport: cloud validates but cannot run)."
+        )
     if (
         safe_mode
         and preset.transport == "cli"

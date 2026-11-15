@@ -386,6 +386,93 @@ class TestLlmPresetTransport:
         assert graph.settings.presets["cold"].provider == "anthropic"
 
 
+class TestLlmPresetCloudTransport:
+    """``transport: cloud`` runs a Codex cloud task: ``provider: openai``
+    plus a Codex cloud ``environment`` id, and none of the local-subprocess
+    fields."""
+
+    def test_cloud_preset_with_environment_validates(self):
+        p = LlmPreset(
+            transport="cloud", model="gpt-5.6-luna", environment="env_abc123",
+        )
+        assert p.transport == "cloud"
+        assert p.provider == "openai"
+        assert p.environment == "env_abc123"
+
+    @pytest.mark.parametrize("environment", [None, "", "   "])
+    def test_cloud_preset_without_environment_rejected(self, environment):
+        with pytest.raises(
+            ValidationError, match="requires a non-empty environment",
+        ):
+            LlmPreset(
+                transport="cloud", model="gpt-5.6-luna",
+                environment=environment,
+            )
+
+    def test_cloud_preset_rejects_anthropic_provider(self):
+        with pytest.raises(ValidationError, match="requires provider: openai"):
+            LlmPreset(
+                transport="cloud", provider="anthropic", model="sonnet",
+                environment="env_abc123",
+            )
+
+    @pytest.mark.parametrize("field,value", [
+        ("permission_mode", "plan"),
+        ("allowed_tools", ["Read"]),
+        ("disallowed_tools", ["Bash"]),
+    ])
+    def test_cloud_preset_rejects_tool_fields(self, field, value):
+        with pytest.raises(ValidationError, match="only supported"):
+            LlmPreset(
+                transport="cloud", model="gpt-5.6-luna",
+                environment="env_abc123", **{field: value},
+            )
+
+    @pytest.mark.parametrize("field,value", [
+        ("env", {"FOO": "bar"}),
+        ("cli_args", ["--search"]),
+        ("default", True),
+    ])
+    def test_cloud_preset_rejects_local_fields(self, field, value):
+        with pytest.raises(
+            ValidationError, match=f"transport: cloud does not accept {field}",
+        ):
+            LlmPreset(
+                transport="cloud", model="gpt-5.6-luna",
+                environment="env_abc123", **{field: value},
+            )
+
+    def test_environment_rejected_on_cli_preset(self):
+        with pytest.raises(
+            ValidationError,
+            match="environment is only supported by transport: cloud",
+        ):
+            LlmPreset(model="gpt-5.6-luna", environment="env_abc123")
+
+    def test_cli_preset_env_overlay_still_validates(self):
+        p = LlmPreset(model="gpt-5.6-luna", env={"FOO": "bar"})
+        assert p.env == {"FOO": "bar"}
+        assert p.environment is None
+
+    def test_workflow_with_cloud_and_default_cli_preset_validates(self):
+        graph = Graph.model_validate({
+            "name": "T", "version": "1.0",
+            "settings": {"presets": {
+                "local": {"model": "gpt-5.6-luna", "default": True},
+                "remote": {
+                    "transport": "cloud", "model": "gpt-5.6-luna",
+                    "environment": "env_abc123",
+                },
+            }},
+            "nodes": [{
+                "id": "n", "name": "n",
+                "execute": {"url": "p.md", "params": {"preset": "remote"}},
+            }],
+        })
+        assert graph.settings.presets["remote"].transport == "cloud"
+        assert graph.settings.presets["local"].default is True
+
+
 class TestSettingsMemoryGates:
     """Memory back-pressure: percent-based gate."""
 

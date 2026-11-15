@@ -307,15 +307,17 @@ class LlmPreset(BaseModel):
     The ``--preset`` CLI flag overrides at run time. Resolution order:
     CLI flag > ``params.preset:`` > the preset marked ``default: true``.
 
-    One transport is supported: ``transport: cli`` — subprocess-per-call
+    Two transports validate. ``transport: cli`` — subprocess-per-call
     Codex/OpenAI (the default provider) or Claude (no warm state, real
     ``asyncio`` parallelism per call). Omitted ``provider`` means ``openai``;
-    ``provider: anthropic`` selects the Claude CLI.
+    ``provider: anthropic`` selects the Claude CLI. ``transport: cloud`` — a
+    Codex cloud task in the ``environment`` it names; ``provider: openai``
+    only, never the default preset, and it has no backend in this version.
     """
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["llm"] = "llm"
-    transport: Literal["cli"] = "cli"
+    transport: Literal["cli", "cloud"] = "cli"
     provider: Literal["anthropic", "openai"] = "openai"
     model: str
     default: bool = False
@@ -335,6 +337,9 @@ class LlmPreset(BaseModel):
     # (e.g. CLAUDE_CODE_EFFORT_LEVEL). Overlaid on os.environ at spawn —
     # never replaces it. Mirrors SubprocessParams.env for script nodes.
     env: dict[str, str] = {}
+    # Codex cloud environment id (transport: cloud only). Distinct from
+    # ``env``, the environment-variable overlay.
+    environment: str | None = None
 
     @model_validator(mode="after")
     def _tool_fields_require_anthropic(self) -> Self:
@@ -345,6 +350,29 @@ class LlmPreset(BaseModel):
                 "permission_mode and tool allow/deny lists are only supported "
                 "by provider: anthropic"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _cloud_transport_rules(self) -> Self:
+        if self.transport != "cloud":
+            if self.environment is not None:
+                raise ValueError(
+                    "environment is only supported by transport: cloud "
+                    "(env is the environment-variable overlay)"
+                )
+            return self
+        if self.provider != "openai":
+            raise ValueError("transport: cloud requires provider: openai")
+        if not (self.environment or "").strip():
+            raise ValueError(
+                "transport: cloud requires a non-empty environment "
+                "(the Codex cloud environment id)"
+            )
+        # A cloud task runs in a remote workspace: no local subprocess to
+        # take argv or an env overlay, and no local default-preset role.
+        for field in ("env", "cli_args", "default"):
+            if getattr(self, field):
+                raise ValueError(f"transport: cloud does not accept {field}")
         return self
 
 

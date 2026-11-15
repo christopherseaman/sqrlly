@@ -122,6 +122,31 @@ class TestBuildPresetRegistry:
         assert settings.presets["smart"].default == original_default
         assert settings.presets["cheap"].default is False
 
+    def test_cli_override_to_cloud_preset_raises(self):
+        """The schema rejects ``default: true`` on a cloud preset; the
+        ``--preset`` flip runs after validation, so the registry rejects
+        it too."""
+        settings = Settings(presets={
+            "local": _preset(default=True),
+            "remote": LlmPreset(
+                transport="cloud", model="gpt-5.6-luna",
+                environment="env_abc123",
+            ),
+        })
+        with pytest.raises(ValueError, match="'remote' names a cloud preset"):
+            build_preset_registry(settings, cli_override="remote")
+
+    def test_cloud_preset_passes_through_without_override(self):
+        cloud = LlmPreset(
+            transport="cloud", model="gpt-5.6-luna", environment="env_abc123",
+        )
+        settings = Settings(presets={
+            "local": _preset(default=True), "remote": cloud,
+        })
+        registry = build_preset_registry(settings)
+        assert registry["remote"] == cloud
+        assert registry["local"].default is True
+
 
 # ---------------------------------------------------------------------------
 # create_backend_from_preset (factory dispatch — no real network)
@@ -175,3 +200,14 @@ class TestCreateBackendFromPreset:
                 transport="cli", provider="anthropic", model="x",
                 permission_mode="bogus",
             )
+
+    def test_cloud_preset_has_no_backend(self):
+        preset = LlmPreset(
+            transport="cloud", model="gpt-5.6-luna", environment="env_abc123",
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="Preset 'remote': the cloud backend is not available "
+                  "in this version of sqrlly",
+        ):
+            create_backend_from_preset(preset, name="remote")

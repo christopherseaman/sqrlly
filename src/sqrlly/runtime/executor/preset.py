@@ -88,7 +88,8 @@ def build_preset_registry(
       - ``settings.presets`` non-empty + ``cli_override`` set → flip
         ``default`` to the named ``LlmPreset``, clear it on the prior
         default. Raises ``ValueError`` if the named preset doesn't
-        exist or names a ``CommandPreset``.
+        exist, names a ``CommandPreset``, or names a
+        ``transport: cloud`` preset.
     """
     if not settings.presets:
         if cli_override is not None:
@@ -118,6 +119,12 @@ def build_preset_registry(
             f"--preset {cli_override!r} names a command preset; the "
             f"flag selects the default LLM preset and only applies to "
             f"kind=llm presets."
+        )
+    if settings.presets[cli_override].transport == "cloud":
+        raise ValueError(
+            f"--preset {cli_override!r} names a cloud preset; a "
+            f"transport: cloud preset cannot be the default. Select it "
+            f"per node with params.preset."
         )
 
     # Flip the `default` flag so cli_override wins. Only LlmPresets carry

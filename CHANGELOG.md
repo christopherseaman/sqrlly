@@ -5,6 +5,12 @@ All notable changes to sqrlly are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- `transport: cloud` on an LLM preset, with a required `environment` (the
+  Codex cloud environment id). It validates but has no backend yet: a node
+  that dispatches to a cloud preset fails with an error naming it (#26).
+
 ### Removed
 
 - `transport: acp` and the `acp` extra. A preset with `transport: acp` now

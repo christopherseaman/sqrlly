@@ -232,3 +232,38 @@ class TestRemoteUrlWarning:
             Node(id="a", name="A", execute=Execute(url="prompts/p.md")),
         ])
         assert not any("REMOTE" in w for w in collect_warnings(g))
+
+
+class TestCloudWorktreeVarWarning:
+    """A cloud-preset node with dependencies has ``{{<dep>_worktree}}``
+    bound to a local path the cloud workspace does not have."""
+
+    _PRESETS = {
+        "local": {"model": "gpt-5.6-luna", "default": True},
+        "remote": {
+            "transport": "cloud", "model": "gpt-5.6-luna",
+            "environment": "env_abc123",
+        },
+    }
+
+    def _config(self, preset: str, depends_on: list[str]):
+        consumer = {
+            "id": "consume", "name": "consume", "depends_on": depends_on,
+            "execute": {"url": "t.md", "params": {"preset": preset}},
+        }
+        return make_config(
+            [_node("build"), _node("plan"), consumer], presets=self._PRESETS,
+        )
+
+    def test_cloud_node_with_deps_warns_naming_each_variable(self):
+        warnings = collect_warnings(self._config("remote", ["build", "plan"]))
+        assert len(warnings) == 1
+        assert "node 'consume'" in warnings[0]
+        assert "cloud preset 'remote'" in warnings[0]
+        assert "{{build_worktree}}, {{plan_worktree}}" in warnings[0]
+
+    def test_cloud_node_without_deps_is_silent(self):
+        assert collect_warnings(self._config("remote", [])) == []
+
+    def test_cli_node_with_deps_is_silent(self):
+        assert collect_warnings(self._config("local", ["build"])) == []

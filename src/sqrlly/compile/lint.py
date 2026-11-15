@@ -22,7 +22,36 @@ def collect_warnings(config: Graph) -> list[str]:
         + _fanout_parent_promote_warnings(config)
         + _fanout_resume_drift_warnings(config)
         + _remote_url_warnings(config)
+        + _cloud_worktree_var_warnings(config)
     )
+
+
+def _cloud_worktree_var_warnings(config: Graph) -> list[str]:
+    """Flag a cloud-preset node that has dependencies.
+
+    Each dependency binds ``{{<dep>_worktree}}`` to a LOCAL worktree path,
+    which the Codex cloud workspace does not have. Lint does no I/O and a
+    prompt resolves against the run-time workdir, so the prompt text is not
+    inspected: the warning fires on the bound variables, whether or not the
+    prompt references them.
+    """
+    presets = config.settings.presets
+    out: list[str] = []
+    for node in config.nodes:
+        if node.execute is None or not node.depends_on:
+            continue
+        name = node.execute.params.get("preset")
+        if getattr(presets.get(name), "transport", None) != "cloud":
+            continue
+        variables = ", ".join(
+            "{{" + dep + "_worktree}}" for dep in node.depends_on
+        )
+        out.append(
+            f"node '{node.id}': uses cloud preset '{name}' — {variables} "
+            f"would be a local worktree path the cloud workspace does not "
+            f"have; do not reference a '_worktree' variable in its prompt."
+        )
+    return out
 
 
 def _fanout_resume_drift_warnings(config: Graph) -> list[str]:
