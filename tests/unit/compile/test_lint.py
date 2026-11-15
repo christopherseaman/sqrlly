@@ -267,3 +267,63 @@ class TestCloudWorktreeVarWarning:
 
     def test_cli_node_with_deps_is_silent(self):
         assert collect_warnings(self._config("local", ["build"])) == []
+
+    def _remote(self) -> dict:
+        return {"url": "t.md", "params": {"preset": "remote"}}
+
+    def test_cloud_route_target_warns_naming_sender_worktree(self):
+        router = {**_node("build"), "route": {"goto": "consume"}}
+        target = {"id": "consume", "name": "consume", "execute": self._remote()}
+        warnings = collect_warnings(
+            make_config([router, target], presets=self._PRESETS)
+        )
+        assert len(warnings) == 1
+        assert "node 'consume'" in warnings[0]
+        assert "{{sender_worktree}}" in warnings[0]
+
+    def test_cli_route_target_is_silent(self):
+        router = {**_node("build"), "route": {"goto": "consume"}}
+        config = make_config([router, _node("consume")], presets=self._PRESETS)
+        assert collect_warnings(config) == []
+
+    def _fan_parent(self, fan_out: dict, depends_on: list[str]) -> dict:
+        return {
+            **_node("split"), "depends_on": depends_on,
+            "fan_out": {"manifest_path": "m.json", **fan_out},
+        }
+
+    def test_cloud_fan_out_template_warns_naming_parent_dep_variable(self):
+        parent = self._fan_parent(
+            {"template": {"execute": self._remote()}}, ["build"],
+        )
+        warnings = collect_warnings(
+            make_config([_node("build"), parent], presets=self._PRESETS)
+        )
+        assert len(warnings) == 1
+        assert "node 'split' fan_out.template" in warnings[0]
+        assert "{{build_worktree}}" in warnings[0]
+
+    def test_cloud_fan_out_template_without_parent_deps_is_silent(self):
+        parent = self._fan_parent({"template": {"execute": self._remote()}}, [])
+        config = make_config([parent], presets=self._PRESETS)
+        assert collect_warnings(config) == []
+
+    def _final(self, execute: dict) -> dict:
+        return {
+            "template": {"execute": {"url": "t.md"}},
+            "final_nodes": [{"id": "join", "name": "join", "execute": execute}],
+        }
+
+    def test_cloud_fan_out_final_node_warns_naming_parent_worktree(self):
+        parent = self._fan_parent(self._final(self._remote()), [])
+        warnings = collect_warnings(
+            make_config([parent], presets=self._PRESETS)
+        )
+        assert len(warnings) == 1
+        assert "node 'split' fan_out.final_nodes 'join'" in warnings[0]
+        assert "{{split_worktree}}" in warnings[0]
+
+    def test_cli_fan_out_final_node_is_silent(self):
+        parent = self._fan_parent(self._final({"url": "t.md"}), [])
+        config = make_config([parent], presets=self._PRESETS)
+        assert collect_warnings(config) == []

@@ -10,6 +10,7 @@ run as its own top-level workflow).
 """
 from __future__ import annotations
 
+from sqrlly.compile.resume import _route_targets
 from sqrlly.schema.models import Graph
 
 
@@ -27,30 +28,53 @@ def collect_warnings(config: Graph) -> list[str]:
 
 
 def _cloud_worktree_var_warnings(config: Graph) -> list[str]:
-    """Flag a cloud-preset node that has dependencies.
+    """Flag a cloud-preset prompt that has a ``_worktree`` variable bound.
 
-    Each dependency binds ``{{<dep>_worktree}}`` to a LOCAL worktree path,
-    which the Codex cloud workspace does not have. Lint does no I/O and a
-    prompt resolves against the run-time workdir, so the prompt text is not
-    inspected: the warning fires on the bound variables, whether or not the
-    prompt references them.
+    Each such variable is a LOCAL worktree path, which the Codex cloud
+    workspace does not have. Four bindings are checked:
+
+    - a node's dependencies bind ``{{<dep>_worktree}}``;
+    - a node named by a ``route`` goto binds ``{{sender_worktree}}``;
+    - a ``fan_out.template`` child inherits both of its parent's bindings;
+    - a ``fan_out.final_nodes`` entry binds ``{{<parent>_worktree}}``.
+
+    Lint does no I/O and a prompt resolves against the run-time workdir, so
+    the prompt text is not inspected: the warning fires on the bound
+    variables, whether or not the prompt references them.
     """
     presets = config.settings.presets
+    route_targets = {t for n in config.nodes for t in _route_targets(n)}
     out: list[str] = []
-    for node in config.nodes:
-        if node.execute is None or not node.depends_on:
-            continue
-        name = node.execute.params.get("preset")
+
+    def check(label: str, execute, variables: list[str]) -> None:
+        if execute is None or not variables:
+            return
+        name = execute.params.get("preset")
         if getattr(presets.get(name), "transport", None) != "cloud":
-            continue
-        variables = ", ".join(
-            "{{" + dep + "_worktree}}" for dep in node.depends_on
-        )
+            return
         out.append(
-            f"node '{node.id}': uses cloud preset '{name}' — {variables} "
+            f"{label}: uses cloud preset '{name}' — {', '.join(variables)} "
             f"would be a local worktree path the cloud workspace does not "
             f"have; do not reference a '_worktree' variable in its prompt."
         )
+
+    for node in config.nodes:
+        bound = ["{{" + dep + "_worktree}}" for dep in node.depends_on]
+        if node.id in route_targets:
+            bound.append("{{sender_worktree}}")
+        check(f"node '{node.id}'", node.execute, bound)
+        if node.fan_out is None:
+            continue
+        if node.fan_out.template is not None:
+            check(
+                f"node '{node.id}' fan_out.template",
+                node.fan_out.template.execute, bound,
+            )
+        for final in node.fan_out.final_nodes:
+            check(
+                f"node '{node.id}' fan_out.final_nodes '{final.id}'",
+                final.execute, ["{{" + node.id + "_worktree}}"],
+            )
     return out
 
 

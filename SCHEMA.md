@@ -168,11 +168,18 @@ A cloud preset:
   so a workflow with a cloud preset also declares a `cli` default. Nodes
   select the cloud preset with `params.preset`.
 
-`validate` and `run` warn when a node that selects a cloud preset has
-`depends_on`: each dependency binds `{{dep_id_worktree}}` to a local
-worktree path that the cloud workspace does not have. The check does not
-read the prompt file, so it fires whether or not the prompt references the
-variable.
+`validate` and `run` warn when a prompt on a cloud preset has a
+`_worktree` variable bound, because the cloud workspace does not have that
+local path. Four bindings are checked:
+
+- a node with `depends_on`: `{{dep_id_worktree}}` per dependency;
+- a node named by a `route` goto (`goto`, `cases[].goto`, `else`):
+  `{{sender_worktree}}`;
+- a `fan_out.template`: the parent node's two bindings above;
+- a `fan_out.final_nodes` entry: `{{<parent_id>_worktree}}`.
+
+The check does not read the prompt file, so it fires whether or not the
+prompt references the variable.
 
 ### CommandPreset (`kind: command`)
 
