@@ -183,6 +183,28 @@ class TestRunCommand:
         assert result.exit_code == 0
         assert "Completed: 1 nodes" in result.output
 
+    def test_run_cloud_preset_node_fails_naming_the_preset(self, runner, tmp_path):
+        """A cloud prompt node fails at dispatch with the preset's name."""
+        import shutil
+        echo_bin = shutil.which("echo") or "/bin/echo"
+        (tmp_path / "p.md").write_text("say hi\n")
+        config = tmp_path / "cloud.yaml"
+        config.write_text(
+            "name: Cloud\nversion: '1.0'\n"
+            "settings:\n  presets:\n"
+            "    local:\n      model: gpt-5.6-luna\n      default: true\n"
+            "    remote:\n      transport: cloud\n      model: gpt-5.6-luna\n"
+            "      environment: env_abc123\n"
+            "nodes:\n"
+            "  - id: echo\n    name: Echo\n"
+            f"    execute:\n      url: {echo_bin}\n      params:\n        args: ['hello']\n"
+            "  - id: ask\n    name: Ask\n"
+            "    execute:\n      url: p.md\n      params:\n        preset: remote\n"
+        )
+        result = runner.invoke(cli, ["run", str(config), "--workdir", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "Preset 'remote': the cloud backend is not available" in result.output
+
     def test_run_warns_on_hyphenated_id(self, runner, tmp_path):
         """`run` surfaces the same advisory warning as `validate` — the
         node still executes; the warning is non-fatal."""
