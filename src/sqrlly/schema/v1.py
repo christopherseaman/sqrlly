@@ -153,7 +153,14 @@ class Eval(Record):
     agent: Agent | None = None
     model: Name | None = None
     timeout: PositiveFloat | None = None
-    outputs: SchemaOutput | None = None
+    outputs: Outputs | None = None
+
+    @field_validator("outputs")
+    @classmethod
+    def _schema_only(cls, value):
+        if value and "files" in value.model_fields_set:
+            raise ValueError("eval cannot declare outputs.files")
+        return value
 
     @model_validator(mode="after")
     def _kind(self) -> Self:
@@ -170,6 +177,12 @@ class Case(Record):
     otherwise: Destination | None = Field(None, alias="else")
     max_attempts: PositiveInt | None = None
     context: str = "last"
+
+    @property
+    def targets(self) -> list[str]:
+        target = self.then if self.then is not None else self.otherwise
+        assert target is not None
+        return [target] if isinstance(target, str) else target
 
     @model_validator(mode="after")
     def _destination(self) -> Self:
@@ -322,7 +335,9 @@ class Graph(Record):
                     require_reference(root, directory / self.settings.prompts / prompt.prompt,
                             f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
                 if step.outputs and step.outputs.schema_file:
-                    require_reference(root, directory / step.outputs.schema_file, f"{node.id}.outputs.schema")
+                    schema_path = directory / step.outputs.schema_file
+                    require_reference(root, schema_path, f"{node.id}.outputs.schema")
+                    step.outputs.load_schema(schema_path, root or directory)
             if node.workflow:
                 require_reference(root, directory / node.workflow.file, f"{node.id}.workflow",
                         ' ({text: "..."} is for inline agent or llm prompts)')

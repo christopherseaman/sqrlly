@@ -3,7 +3,7 @@
 The deterministic discovery rule for this example: when wave 1
 completes (the two seeded questions are both 'done' and no follow-up
 exists yet), add a single sub-question. Wave 2 finds nothing new and
-emits 'reconcile_clean' — the gate then routes to __end__.
+emits 'reconcile_clean' — the route node then finishes.
 
 Real workflows would run an LLM here to inspect partial results
 and propose follow-ups. The deterministic stub keeps the e2e test

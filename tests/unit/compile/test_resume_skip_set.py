@@ -46,7 +46,7 @@ def test_route_target_of_failure_is_dirty():
     # no depends_on edge (route targets have no static depends_on).
     g = _g([
         {"id": "a", "name": "a", "agent": {"text": "test"},
-         "route": {"goto": "b"}},
+         "route": [{"then": "b"}]},
         _exec("b"),
     ])
     assert compute_skip_set(g, {"a", "b"}, {"a"}, set()) == set()
@@ -88,8 +88,8 @@ def test_group_sibling_dependent_is_transitively_dirty():
 def test_cyclic_route_terminates():
     # a <-> b goto loop; b failed. Closure must terminate via the visited-guard.
     g = _g([
-        {"id": "a", "name": "a", "agent": {"text": "test"}, "route": {"goto": "b"}},
-        {"id": "b", "name": "b", "agent": {"text": "test"}, "route": {"goto": "a"}},
+        {"id": "a", "name": "a", "agent": {"text": "test"}, "route": [{"then": "b"}]},
+        {"id": "b", "name": "b", "agent": {"text": "test"}, "route": [{"then": "a"}]},
     ])
     assert compute_skip_set(g, {"a", "b"}, {"b"}, set()) == set()
 

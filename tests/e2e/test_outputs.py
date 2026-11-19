@@ -21,7 +21,7 @@ def workflow(directory, nodes):
     ([{"id": "a", "run": ["echo", "{{b}}"]}, {"id": "b", "run": "true"}], "not an ancestor"),
     ([{"id": "a", "run": "true"}, {"id": "b", "run": ["echo", "{{a.title}}"], "depends_on": ["a"]}], "requires outputs.schema"),
     ([{"id": "a", "llm": {"text": "category"}}, {"id": "b", "depends_on": ["a"],
-       "route": {"cases": [{"when": "a == 'ok'", "goto": "__end__"}], "else": "__end__"}}], "comparing a text"),
+       "route": [{"when": "a == 'ok'", "then": "fail"}]}], "comparing a text"),
 ])
 def test_invalid_references_fail_validate(tmp_path, nodes, message):
     result = CliRunner().invoke(cli, ["validate", str(workflow(tmp_path, nodes))])
@@ -135,3 +135,33 @@ def test_native_array_envelope_preserves_references_into_the_root(tmp_path):
     validate({"value": [1, 2]}, native)
     with pytest.raises(ValidationError):
         validate({"value": [1, "wrong"]}, native)
+
+
+@pytest.mark.parametrize(("step", "message"), [
+    ({"eval": {"run": ["echo", "{{later}}"]}}, "later is not an ancestor"),
+    ({"route": [{"then": "fail", "context": "{{later}}"}]}, "later is not an ancestor"),
+    ({"eval": {"run": ["echo", "{{writer.title}}"]}}, "field access requires outputs.schema"),
+    ({"route": [{"when": "writer == 'ok'", "then": "fail"}]}, "comparing writer text"),
+])
+def test_measurement_and_context_references_fail_at_load(tmp_path, step, message):
+    path = workflow(tmp_path, [
+        {"id": "writer", "agent": {"text": "work"}, **step},
+        {"id": "later", "run": "echo later"},
+    ])
+    with pytest.raises(ValueError, match=message):
+        load_workflow(path)
+
+
+def test_eval_can_read_current_output_and_load_local_schema(tmp_path):
+    (tmp_path / "field.json").write_text('{"type":"integer"}')
+    (tmp_path / "result.json").write_text('{"type":"object","properties":{"count":{"$ref":"field.json"}}}')
+    path = workflow(tmp_path, [{
+        "id": "report", "run": ["echo", '{"count": 2}'], "outputs": {"schema": "result.json"},
+        "eval": {"llm": {"text": "{{node_id}} {{attempt}} {{report.count}}"},
+                 "outputs": {"schema": "result.json"}},
+        "route": [{"when": "eval.count == report.count", "then": "fail",
+                   "context": "{{report.count}} {{eval.count}} {{history | length}}"}],
+    }])
+    node = load_workflow(path).nodes[0]
+    assert node.eval.outputs.schema_document == node.outputs.schema_document
+    assert "$defs" in node.eval.outputs.schema_document

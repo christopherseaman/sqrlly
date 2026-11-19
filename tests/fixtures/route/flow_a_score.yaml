@@ -8,24 +8,12 @@ nodes:
   - id: judge
     name: judge
     depends_on: [produce]
-    evaluation:
-      validator: "score_high.py"
-      threshold: 0.5
-      blocking: false
-      max_retries: 0
-
-  - id: decide
-    name: decide
-    depends_on: [judge]
+    eval:
+      run: [python3, "{{workflow_dir}}/score_high.py"]
     route:
-      cases:
-        - when: "history['judge'][-1]['result']['score'] >= 0.5"
-          goto: ship
-      else: {goto: __end__}
+      - when: eval.score >= 0.5
+        then: ship
 
   - id: ship
     name: ship
     run: [echo, "-n", "shipped"]
-
-settings:
-  max_retries: 0

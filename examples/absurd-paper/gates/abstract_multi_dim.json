@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "rigor": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "humor": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "buzzwords": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "feedback": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "rigor",
+    "humor",
+    "buzzwords",
+    "feedback"
+  ],
+  "additionalProperties": false
+}

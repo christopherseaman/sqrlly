@@ -2,6 +2,8 @@ import asyncio
 import shutil
 import time
 
+import sys
+
 import pytest
 
 from sqrlly.compile.graph import build_workflow_graph
@@ -95,12 +97,7 @@ class TestTimeoutGateValidator:
                     "id": "gated",
                     "name": "Gated",
                     "run": [_ECHO, "-n", "ok"],
-                    "evaluation": {
-                        "validator": str(slow_validator),
-                        "threshold": 0.8,
-                        "blocking": True,
-                        "max_retries": 0,
-                    },
+                    "eval": {"run": [sys.executable, str(slow_validator)], "timeout": 0.3},
                     "timeout": 0.5,
                 },
             ]
@@ -112,7 +109,7 @@ class TestTimeoutGateValidator:
         elapsed = time.monotonic() - t0
 
         assert "gated" in result["failed_nodes"]
-        assert any("evaluation timed out" in e["error"].lower() for e in result["errors"])
+        assert any("timed out" in e["error"].lower() for e in result["errors"])
         assert elapsed < 5.0, f"gate timeout should fire at 0.5s, not wait {elapsed:.1f}s"
 
 

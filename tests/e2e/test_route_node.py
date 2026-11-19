@@ -1,26 +1,6 @@
-"""End-to-end: route node primitive.
-
-Three multi-function flows verify Command(goto=) dispatch end-to-end:
-
-    Flow A — score-based routing on evaluation history. A judge node's
-    score determines whether ship runs or the workflow halts.
-
-    Flow B — route reads accumulated evaluation history. The existing
-    evaluation: max_retries machinery loops produce→judge until either
-    the gate passes or runs out of attempts; then route halts via
-    __end__ on history length.
-
-    Flow C — route on structured_output produced by an upstream
-    executor (forward-compat for Stage 5b's schema work). Uses
-    MockExecutor (the protocol-conforming test double) to populate
-    structured_output deterministically.
-
-All three flows use the real DispatchExecutor (or MockExecutor for C);
-gates are real subprocess scripts under tests/fixtures/route/.
-"""
-
 from __future__ import annotations
 
+import sys
 import shutil
 from pathlib import Path
 
@@ -39,136 +19,24 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "route"
 _ECHO = shutil.which("echo") or "/bin/echo"
 
 
-def _route_node(id, depends_on, cases, else_target):
-    """Stage 5c: standalone inline route (no execute body)."""
-    return {
-        "id": id, "name": id, "depends_on": depends_on,
-        "route": {
-            "cases": cases,
-            "else": else_target,
-        },
-    }
-
-
-def _gated_node(id, validator_path, depends_on=None, max_retries=0):
-    """Gate-only-by-elision: omit `execute`, supply `evaluation`."""
-    return {
-        "id": id, "name": id,
-        "depends_on": depends_on or [],
-        "evaluation": {
-            "validator": str(validator_path),
-            "threshold": 0.5,
-            "blocking": False,
-            "max_retries": max_retries,
-        },
-    }
-
-
-class TestFlowAScoreRouting:
-    """produce → judge → route → ship | __end__"""
-
-    @pytest.mark.asyncio
-    async def test_high_score_routes_to_ship(self, tmp_path):
-        config = make_config([
-            cmd_phase("produce", output="draft"),
-            _gated_node("judge", FIXTURES / "score_high.py", depends_on=["produce"]),
-            _route_node(
-                "decide",
-                depends_on=["judge"],
-                cases=[{
-                    "when": "history['judge'][-1]['result']['score'] >= 0.5",
-                    "goto": "ship",
-                }],
-                else_target="__end__",
-            ),
-            cmd_phase("ship", output="shipped"),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "produce" in result["completed_nodes"]
-        assert "judge" in result["completed_nodes"]
-        assert "ship" in result["completed_nodes"]
-        assert result["node_outputs"]["ship"] == "shipped"
-
-    @pytest.mark.asyncio
-    async def test_low_score_routes_to_end(self, tmp_path):
-        config = make_config([
-            cmd_phase("produce", output="draft"),
-            _gated_node("judge", FIXTURES / "score_low.py", depends_on=["produce"]),
-            _route_node(
-                "decide",
-                depends_on=["judge"],
-                cases=[{
-                    "when": "history['judge'][-1]['result']['score'] >= 0.5",
-                    "goto": "ship",
-                }],
-                else_target="__end__",
-            ),
-            cmd_phase("ship", output="shipped"),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "produce" in result["completed_nodes"]
-        assert "judge" in result["completed_nodes"]
-        assert "ship" not in result["completed_nodes"]
-
-
-class TestFlowBHistoryDrivenHalt:
-    """produce → judge (max_retries=3, all fail) → route halts on history length.
-
-    The existing evaluation:max_retries machinery drives the produce-
-    judge loop. Route makes the terminal topology decision based on
-    accumulated history.
-    """
-
-    @pytest.mark.asyncio
-    async def test_route_halts_after_max_retries(self, tmp_path):
-        config = make_config([
-            cmd_phase("produce", output="draft"),
-            _gated_node(
-                "judge", FIXTURES / "score_by_attempt.py",
-                depends_on=["produce"], max_retries=3,
-            ),
-            _route_node(
-                "decide",
-                depends_on=["judge"],
-                cases=[{
-                    "when": "history['judge'][-1]['result']['score'] >= 0.5",
-                    "goto": "ship",
-                }],
-                else_target="__end__",
-            ),
-            cmd_phase("ship", output="shipped"),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        # judge attempted multiple times (max_retries=3 means up to 4 total
-        # attempts); each writes a record to evaluations history. All scored
-        # 0.3 (below threshold), so route gotos __end__ — ship never runs.
-        history = result["evaluations"]["judge"]
-        assert len(history) >= 2, (
-            f"Expected accumulated history; got {len(history)} entries"
-        )
-        for record in history:
-            assert record["result"]["score"] == 0.3
-        assert "ship" not in result["completed_nodes"]
+@pytest.mark.parametrize("filename,ships", [("score_high.py", True), ("score_low.py", False)])
+@pytest.mark.asyncio
+async def test_measurement_routes_to_ship(tmp_path, filename, ships):
+    config = make_config([
+        cmd_phase("produce", output="draft"),
+        {"id": "judge", "depends_on": ["produce"],
+         "eval": {"run": [sys.executable, str(FIXTURES / filename)]},
+         "route": [{"when": "history[-1]['result']['score'] >= 0.5", "then": "ship"}]},
+        cmd_phase("ship", output="shipped"),
+    ])
+    graph = build_workflow_graph(config, DispatchExecutor(str(tmp_path)))
+    state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+    assert "judge" in state["completed_nodes"]
+    assert ("ship" in state["completed_nodes"]) == ships
 
 
 class TestFlowCStructuredOutputRouting:
-    """Route on a structured_output dict from upstream executor.
-
-    Forward-compat for Stage 5b: when backends populate structured_output,
-    route can dispatch on producer output dict fields directly without
-    going through an evaluate gate. Today this requires a custom executor
-    since neither stub nor command writes structured_output, but the
-    namespace path is exercised end-to-end.
-    """
+    """Branch on structured upstream output supplied by the node executor."""
 
     @pytest.mark.asyncio
     async def test_urgent_category_routes_to_escalate(self, tmp_path):
@@ -177,15 +45,10 @@ class TestFlowCStructuredOutputRouting:
                 "id": "produce", "name": "produce", "depends_on": [],
                 "run": [_ECHO, "produced"],
             },
-            _route_node(
-                "decide",
-                depends_on=["produce"],
-                cases=[
-                    {"when": "produce['category'] == 'urgent'", "goto": "escalate"},
-                    {"when": "produce['category'] == 'normal'", "goto": "ship"},
-                ],
-                else_target="__end__",
-            ),
+            {"id": "decide", "depends_on": ["produce"], "route": [
+                    {"when": "produce['category'] == 'urgent'", "then": "escalate"},
+                    {"when": "produce['category'] == 'normal'", "then": "ship"},
+                ]},
             cmd_phase("escalate", output="escalated"),
             cmd_phase("ship", output="shipped"),
         ])
@@ -213,15 +76,10 @@ class TestFlowCStructuredOutputRouting:
                 "id": "produce", "name": "produce", "depends_on": [],
                 "run": [_ECHO, "produced"],
             },
-            _route_node(
-                "decide",
-                depends_on=["produce"],
-                cases=[
-                    {"when": "produce['category'] == 'urgent'", "goto": "escalate"},
-                    {"when": "produce['category'] == 'normal'", "goto": "ship"},
-                ],
-                else_target="__end__",
-            ),
+            {"id": "decide", "depends_on": ["produce"], "route": [
+                    {"when": "produce['category'] == 'urgent'", "then": "escalate"},
+                    {"when": "produce['category'] == 'normal'", "then": "ship"},
+                ]},
             cmd_phase("escalate", output="escalated"),
             cmd_phase("ship", output="shipped"),
         ])

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.compile._manifest import find_terminal_nodes
 from sqrlly.compile.nodes import (
+    count_attempts,
+    run_with_timeout,
     all_deps_completed,
     build_context,
     check_dep_failed,
@@ -197,25 +199,22 @@ def make_subgraph_node(
         ):
             return {}
 
-        try:
-            async with asyncio.timeout(timeout):
-                result = await execute_with_outputs(
-                    lambda ctx: run_child(parent_state, ctx),
-                    build_context(parent_node, parent_state),
-                    None if parent_state.get("dry_run") else parent_node.outputs,
-                    parent_state.get("workdir", "."),
-                )
-                update = {"node_outputs": {parent_id: result.output}}
-                if result.success:
-                    update["completed_nodes"] = {parent_id}
-                else:
-                    update.update(make_failure_update(parent_id, result.error, result.error_kind))
-                return update
-        except TimeoutError:
-            return make_failure_update(parent_id, f"Node timed out after {timeout}s", kind="timeout")
+        result, executions = await execute_with_outputs(
+            lambda ctx: run_with_timeout(run_child(parent_state, ctx), timeout),
+            build_context(parent_node, parent_state),
+            None if parent_state.get("dry_run") else parent_node.outputs,
+            parent_state.get("workdir", "."),
+        )
+        update = {"node_outputs": {parent_id: result.output},
+                  "attempts": {parent_id: parent_state.get("attempts", {}).get(parent_id, 0) + executions}}
+        if not result.success:
+            update.update(make_failure_update(parent_id, result.error, result.error_kind))
+        elif not (parent_node.eval or parent_node.route):
+            update["completed_nodes"] = {parent_id}
+        return update
 
     wrapper.__name__ = f"subgraph_{parent_id}"
-    return wrapper
+    return count_attempts(parent_node, wrapper)
 
 
 def make_fan_out_subgraph_invoker(

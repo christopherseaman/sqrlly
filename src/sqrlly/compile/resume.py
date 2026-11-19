@@ -9,25 +9,11 @@ content hash neither sufficient nor safe; see the design spec)."""
 from __future__ import annotations
 
 from sqrlly.schema.models import Graph, Node
-
-
-def _flatten_goto(goto: "str | list[str] | None") -> list[str]:
-    if goto is None:
-        return []
-    return [goto] if isinstance(goto, str) else list(goto)
+from sqrlly.schema.v1 import RESERVED
 
 
 def _route_targets(node: Node) -> list[str]:
-    """Every static goto target declared on a node's route (goto/cases/else)."""
-    r = node.route
-    if r is None:
-        return []
-    out: list[str] = _flatten_goto(r.goto)
-    for case in r.cases:
-        out += _flatten_goto(case.goto)
-    if r.else_ is not None:
-        out += _flatten_goto(r.else_.goto)
-    return out
+    return [target for case in node.route or [] for target in case.targets if target not in RESERVED]
 
 
 def compute_skip_set(

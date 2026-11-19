@@ -1,162 +1,72 @@
-"""End-to-end: inline route with include_eval drives auto-prepended preamble.
-
-Exercises the full Stage 5c lifecycle without instrumenting a
-``PromptBackend`` (per the no-fakes rule):
-
-  execute → eval (with retries exhausted under blocking:false)
-    → route picks escalation case (include_eval=True)
-    → synthetic ``_route_<id>`` writes a non-empty
-      ``state["_route_eval_preamble"]`` carrying the neutral
-      eval-result preamble (per-dim scores + ``<dim>_reason`` reasons).
-    → goto target's ``build_context`` surfaces the preamble; the
-      auto-prepend itself is a pure helper covered by
-      ``tests/unit/runtime/test_prompt.py::TestPrependEvalPreamble``.
-
-The asymmetric tests:
-  - include_eval=True: state carries the preamble; sender bindings
-    resolve.
-  - include_eval=False: state carries an empty preamble (or none);
-    sender bindings still resolve.
-
-Real subprocess executor for the source node + real script gate for
-evaluation. No mocks of the LLM/backend boundary.
-"""
-from __future__ import annotations
+"""Command measurements, ordered cases and checkpointed attempts through the public CLI."""
 
 import sys
-from pathlib import Path
 
 import pytest
+import yaml
+from click.testing import CliRunner
 
+from helpers import init_git_repo
+from sqrlly.cli.main import cli
 from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
+from sqrlly.runtime.executor.prompt import prepend_eval_preamble
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import (
-    DimensionCheck,
-    Evaluation,
-    Graph,
-    Node,
-    Route,
-    RouteCase,
-    RouteElse,
-)
+from sqrlly.schema.models import Graph
 
 
-_PYTHON = sys.executable
-
-
-def _make_low_scoring_validator(tmp_path: Path) -> Path:
-    """Validator that always returns a multi-dim low score with reasons."""
-    p = tmp_path / "judge.py"
-    p.write_text(
-        """\
-import sys, json
-_ = sys.stdin.read()
-print(json.dumps({
-    "score": 0.30,
-    "coverage": 0.40,
-    "coverage_reason": "missing definitions for X and Y",
-    "quality": 0.20,
-    "quality_reason": "shallow analysis with no examples",
-    "feedback": "see per-dimension reasons",
-}))
-"""
-    )
-    return p
-
-
+@pytest.mark.parametrize("context", ["last", "all", "none"])
 @pytest.mark.asyncio
-class TestInlineRouteIncludeEval:
-    """End-to-end state assertions for the inline-route → goto path.
+async def test_exhausted_retry_escalates_with_context(tmp_path, context):
+    predicate = "eval.exit_code != 0"
+    config = Graph(nodes=[
+        {"id": "draft", "run": ["echo", "draft"],
+         "eval": {"run": [sys.executable, "-c", "print('review {{attempt}}'); raise SystemExit(1)"]},
+         "route": [{"when": predicate, "then": "retry", "max_attempts": 3},
+                   {"when": predicate, "then": "escalate", "context": context}]},
+        {"id": "escalate", "run": ["echo", "-n", "{{_route_eval_preamble}}"]},
+    ])
+    graph = build_workflow_graph(config, DispatchExecutor(str(tmp_path)))
+    state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+    assert [r["attempt"] for r in state["evaluations"]["draft"]] == [1, 2, 3]
+    feedback = state["node_outputs"]["escalate"]
+    prompt = prepend_eval_preamble("Diagnose draft", {"_route_eval_preamble": feedback})
+    if context == "none":
+        assert prompt == "Diagnose draft"
+    else:
+        assert "Attempt 3" in prompt and "review 3" in prompt
+        assert ("review 1" in prompt) == (context == "all")
 
-    The render-pipeline auto-prepend is covered by
-    ``tests/unit/runtime/test_prompt.py::TestPrependEvalPreamble``.
-    Here we confirm the synthetic ``_route_<id>`` writes the right
-    state so the dispatcher can read it.
-    """
 
-    async def _run(self, tmp_path: Path, include_eval: bool) -> dict:
-        validator = _make_low_scoring_validator(tmp_path)
+def test_exhausted_case_names_limit_and_resume_continues_attempts(tmp_path):
+    workflow = tmp_path / "workflow.yaml"
+    trace = tmp_path / "attempts.txt"
+    workflow.write_text(yaml.safe_dump({"nodes": [{
+        "id": "draft", "run": ["echo", "draft"],
+        "eval": {"run": [sys.executable, "-c",
+                         "import sys; print(sys.argv[1], file=open(sys.argv[2], 'a')); sys.exit(1)",
+                         "{{attempt}}", str(trace)]},
+        "route": [{"when": "eval.exit_code != 0", "then": "retry", "max_attempts": 3}],
+    }]}))
+    args = ["run", str(workflow), "--workdir", str(tmp_path)]
+    first = CliRunner().invoke(cli, args)
+    assert first.exit_code != 0
+    assert "max_attempts" in first.output and "attempt 3" in first.output
+    assert trace.read_text().splitlines() == ["1", "2", "3"]
+    resumed = CliRunner().invoke(cli, [*args, "--resume"])
+    assert resumed.exit_code != 0
+    assert trace.read_text().splitlines() == ["1", "2", "3", "4"]
 
-        # Goto target is a script that just succeeds — no prompt body
-        # to render. We're asserting on state.evaluations and
-        # state["_route_eval_preamble"], not on what a backend received.
-        config = Graph(
-            name="inline-route-eval",
-            nodes=[
-                Node(
-                    id="classify",
-                    name="C",
-                    run=[_PYTHON, "-c", "print('initial draft')"],
-                    evaluation=Evaluation(
-                        validator=str(validator),
-                        threshold=0.8,
-                        max_retries=0,  # immediate settle
-                        blocking=False,  # pass-with-warning
-                        dimensions=[
-                            DimensionCheck(field="coverage", min=0.6),
-                            DimensionCheck(field="quality", min=0.6),
-                        ],
-                    ),
-                    route=Route(
-                        cases=[
-                            RouteCase(
-                                when="True",
-                                goto="rewrite",
-                                include_eval=include_eval,
-                            ),
-                        ],
-                        **{"else": RouteElse(goto="__end__")},
-                    ),
-                ),
-                Node(
-                    id="rewrite",
-                    name="R",
-                    run=[_PYTHON, "-c", "print('rewrite ran')"],
-                ),
-            ],
-        )
 
-        executor = DispatchExecutor(
-            workdir=str(tmp_path), settings=config.settings,
-        )
-        compiled = build_workflow_graph(config, executor=executor)
-        return await compiled.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-    async def test_include_eval_true_writes_preamble_to_state(self, tmp_path):
-        result = await self._run(tmp_path, include_eval=True)
-
-        # Both nodes ran (rewrite reached via inline route's Command).
-        assert "classify" in result["node_outputs"]
-        assert "rewrite" in result["node_outputs"]
-
-        # Sender threading: the synthetic _route_classify wrote the
-        # source node id and the pre-built preamble into state.
-        assert result.get("_route_sender") == "classify"
-        preamble = result.get("_route_eval_preamble") or ""
-
-        # Neutral wording — no "failed" framing.
-        assert "failed" not in preamble.lower()
-        # Per-dimension scores AND reasons are present (the parser fix).
-        assert "coverage=0.40" in preamble
-        assert "missing definitions for X and Y" in preamble
-        assert "quality=0.20" in preamble
-        assert "shallow analysis with no examples" in preamble
-        # Top-level feedback also surfaced.
-        assert "see per-dimension reasons" in preamble
-        # No retry-context "Attempt N of M" — this is a goto, not a retry.
-        assert "Attempt" not in preamble
-
-    async def test_include_eval_false_no_preamble_in_state(self, tmp_path):
-        result = await self._run(tmp_path, include_eval=False)
-
-        assert "classify" in result["node_outputs"]
-        assert "rewrite" in result["node_outputs"]
-
-        # Sender id is still recorded — that's the always-on identity
-        # binding for goto targets.
-        assert result.get("_route_sender") == "classify"
-
-        # Preamble is empty (the synthetic dispatcher writes "" when
-        # include_eval is false, overwriting any stale value).
-        assert (result.get("_route_eval_preamble") or "") == ""
+def test_command_eval_reads_file_only_in_node_worktree(tmp_path):
+    init_git_repo(tmp_path)
+    workflow = tmp_path / "workflow.yaml"
+    workflow.write_text(yaml.safe_dump({"nodes": [{
+        "id": "build", "worktree": "isolated", "promote": False,
+        "run": [sys.executable, "-c", "from pathlib import Path; Path('private.txt').write_text('built')"],
+        "eval": {"run": [sys.executable, "-c",
+                         "from pathlib import Path; assert Path('private.txt').read_text() == 'built'"]},
+    }]}))
+    result = CliRunner().invoke(cli, ["run", str(workflow), "--workdir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "private.txt").exists()

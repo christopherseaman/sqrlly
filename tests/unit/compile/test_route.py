@@ -1,24 +1,12 @@
-"""Unit tests for compile/route.py: sandboxed expression evaluator.
-
-Function-level tests (known-good and known-bad pairs):
-    - build_route_namespace: structured > raw, missing deps, history, state
-    - evaluate_case: truthy expressions, sandbox blocks, parse errors
-    - _make_inline_route_node: Stage-5c inline-route dispatcher behavior
-"""
-
 from __future__ import annotations
 
 import pytest
 
-from langgraph.graph import END
-from langgraph.types import Command
 
-from sqrlly.compile.graph import _make_inline_route_node, _resolve_goto
 from sqrlly.compile.route import (
     build_route_namespace,
     evaluate_case,
 )
-from sqrlly.schema.models import Node, Route, RouteCase, RouteElse
 
 
 def _state(**overrides) -> dict:
@@ -116,118 +104,3 @@ def test_evaluate_case_blocks_dunder_import():
 def test_evaluate_case_unknown_name_raises():
     with pytest.raises(Exception):
         evaluate_case("ghost_var > 0", {})
-
-
-def _route_node(cases: list[tuple[str, str]], else_target: str, deps: list[str] = None) -> Node:
-    """Build a standalone inline-route Node (no execute body)."""
-    return Node(
-        id="r", name="R", depends_on=deps or [],
-        route=Route(
-            cases=[RouteCase(when=w, goto=g) for w, g in cases],
-            else_=RouteElse(goto=else_target),
-        ),
-    )
-
-
-def test_resolve_goto_end_sentinel():
-    assert _resolve_goto("__end__") == END
-    assert _resolve_goto("ship") == "ship"
-
-
-async def test_route_node_first_match_wins():
-    fn = _make_inline_route_node(_route_node([("True", "X")], else_target="Y"))
-    cmd = await fn({})
-    assert isinstance(cmd, Command)
-    assert cmd.goto == "X"
-
-
-async def test_route_node_falls_through_to_else():
-    fn = _make_inline_route_node(_route_node([("False", "X")], else_target="Y"))
-    cmd = await fn({})
-    assert cmd.goto == "Y"
-
-
-async def test_route_node_unconditional_goto_shorthand():
-    """Stage 5c: ``Route(goto=...)`` is the unconditional shorthand."""
-    node = Node(id="r", name="R", route=Route(goto="always_here"))
-    fn = _make_inline_route_node(node)
-    cmd = await fn({})
-    assert cmd.goto == "always_here"
-
-
-async def test_route_node_unconditional_goto_shorthand():
-    """The unconditional-dispatch shape is `goto:` shorthand. (`cases: []`
-    + `else:` is rejected at the schema layer — see
-    ``test_route_empty_cases_with_else_rejected``.)"""
-    node = Node(
-        id="r", name="R", depends_on=[],
-        route=Route(goto="always_here"),
-    )
-    fn = _make_inline_route_node(node)
-    cmd = await fn({})
-    assert cmd.goto == "always_here"
-
-
-async def test_route_node_end_sentinel_resolves():
-    fn = _make_inline_route_node(_route_node([("True", "__end__")], else_target="x"))
-    cmd = await fn({})
-    assert cmd.goto == END
-
-
-async def test_route_node_evaluates_against_dep_state():
-    fn = _make_inline_route_node(
-        _route_node(
-            [("judge['score'] >= 0.8", "ship")],
-            else_target="produce",
-            deps=["judge"],
-        )
-    )
-    state = {
-        "node_outputs": {},
-        "node_structured_outputs": {"judge": {"score": 0.95}},
-        "evaluations": {},
-    }
-    cmd = await fn(state)
-    assert cmd.goto == "ship"
-
-
-async def test_route_node_broken_when_raises_with_context():
-    fn = _make_inline_route_node(_route_node([("score >=", "X")], else_target="Y"))
-    with pytest.raises(ValueError) as ei:
-        await fn({})
-    msg = str(ei.value)
-    assert "Route 'r'" in msg
-    assert "score >=" in msg
-
-
-async def test_route_node_unknown_name_raises_with_context():
-    fn = _make_inline_route_node(
-        _route_node([("ghost > 0", "X")], else_target="Y")
-    )
-    with pytest.raises(ValueError) as ei:
-        await fn({})
-    assert "Route 'r'" in str(ei.value)
-
-
-async def test_route_node_history_length_drives_halt():
-    fn = _make_inline_route_node(
-        _route_node(
-            [("len(history.get('judge', [])) >= 3", "__end__")],
-            else_target="produce",
-        )
-    )
-    state_with_3 = {
-        "node_outputs": {},
-        "node_structured_outputs": {},
-        "evaluations": {"judge": [{"score": 0.3}, {"score": 0.4}, {"score": 0.5}]},
-    }
-    cmd = await fn(state_with_3)
-    assert cmd.goto == END
-
-    state_with_1 = {
-        "node_outputs": {},
-        "node_structured_outputs": {},
-        "evaluations": {"judge": [{"score": 0.3}]},
-    }
-    cmd = await fn(state_with_1)
-    assert cmd.goto == "produce"

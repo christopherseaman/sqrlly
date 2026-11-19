@@ -49,7 +49,9 @@ EXAMPLES: dict[str, dict] = {
         "description": "Full showcase: prompts + multi-dim gates + subgraph → rendered PDF (needs authed `codex` CLI + `uv`).",
         "files": {
             "gates/abstract_multi_dim.md": "examples/absurd-paper/gates/abstract_multi_dim.md",
+            "gates/abstract_multi_dim.json": "examples/absurd-paper/gates/abstract_multi_dim.json",
             "gates/choose_topic_eval.md": "examples/absurd-paper/gates/choose_topic_eval.md",
+            "gates/choose_topic_eval.json": "examples/absurd-paper/gates/choose_topic_eval.json",
             "gates/outline_json.py": "examples/absurd-paper/gates/outline_json.py",
             "gates/submission_check.py": "examples/absurd-paper/gates/submission_check.py",
             "preamble.md": "examples/absurd-paper/preamble.md",

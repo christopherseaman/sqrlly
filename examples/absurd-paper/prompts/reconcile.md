@@ -1,5 +1,3 @@
-{{_retry_reason}}
-
 ## Context
 
 All four body sections are complete. Compose the final paper as a single markdown document.

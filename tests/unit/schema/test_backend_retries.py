@@ -11,14 +11,13 @@ def test_backend_retry_budgets_are_per_kind():
     assert defaults.run.backend_max_retries == 0
 
 
-def test_backend_retries_are_independent_of_gate_retries():
-    settings = Settings(max_retries=3, defaults={"llm": {"backend_max_retries": 5}})
+def test_backend_retries_are_independent_across_kinds():
+    settings = Settings(defaults={"llm": {"backend_max_retries": 5}})
     assert settings.defaults.llm.backend_max_retries == 5
     assert settings.defaults.agent.backend_max_retries == 2
-    assert settings.max_retries == 3
 
 
-@pytest.mark.parametrize("key", ["backend_max_retries", "backend_max_retry"])
+@pytest.mark.parametrize("key", ["backend_max_retries", "backend_max_retry", "max_retries"])
 def test_top_level_backend_retry_budget_rejected(key):
     with pytest.raises(ValidationError, match=key):
         Settings.model_validate({key: 5})

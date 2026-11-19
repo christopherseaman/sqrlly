@@ -8,14 +8,13 @@ nodes:
     name: Route by category
     depends_on: [triage]
     route:
-      cases:
       - when: triage == 'spam'
-        goto: drop_spam
+        then: drop_spam
       - when: triage == 'urgent'
-        goto: page_oncall
+        then: page_oncall
       - when: triage == 'escalate'
-        goto: escalate
-      else: standard_queue
+        then: escalate
+      - else: standard_queue
 
   - id: drop_spam
     name: Drop spam

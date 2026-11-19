@@ -401,6 +401,7 @@ async def _seed_state(
             "_fan_prior_children": fan_prior,
         }
         if rerun_all:
+            state.pop("_cold_entry", None)
             source = "all nodes (rerun-all)"
         elif resume_from:
             source = ", ".join(sorted(resume_from))
@@ -434,6 +435,7 @@ async def _seed_state(
         )
         state["completed_nodes"] = set(skip)
         state["_resume_skip"] = set(skip)
+        state["_cold_entry"] = entry
         click.echo(
             f"Cold start at {entry!r}: running "
             f"{len(all_ids - skip)} node(s) ({entry} + downstream); "
@@ -514,10 +516,15 @@ async def _execute_workflow(
     safe_mode: bool | None = None,
 ) -> dict:
     if dry_run:
-        compiled = build_workflow_graph(config, None, logger=logger)
+        compiled = build_workflow_graph(config, None, logger=logger, entry=entry)
         state = make_initial_state(
             workflow_name=config.name, workdir=workdir, dry_run=True,
         )
+        if entry is not None:
+            from sqrlly.compile.resume import compute_skip_set
+            state["_cold_entry"] = entry
+            skip = compute_skip_set(config, {node.id for node in config.nodes}, set(), {entry})
+            state.update(completed_nodes=skip, _resume_skip=skip)
         return await run_workflow(compiled, state, config, logger=logger)
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -557,7 +564,7 @@ async def _execute_workflow(
             executor_obj = dispatch
 
         compiled = build_workflow_graph(
-            config, executor_obj, checkpointer=cp, logger=logger,
+            config, executor_obj, checkpointer=cp, logger=logger, entry=entry or state.get("_cold_entry"),
         )
         try:
             result = await run_workflow(

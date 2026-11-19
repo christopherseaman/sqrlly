@@ -44,19 +44,7 @@ def render_template(template: str, context: dict[str, Any]) -> str:
 
 
 def prepend_eval_preamble(rendered: str, context: dict[str, Any]) -> str:
-    """Stage 5c: auto-prepend the eval preamble for inline-route goto
-    targets that opted in via ``include_eval: true``.
-
-    The synthetic ``_route_<id>`` writes the preamble string into state
-    when the matched case sets ``include_eval=True``; ``build_context``
-    surfaces it as ``_route_eval_preamble``. Concatenation happens
-    AFTER Jinja render so author-template content is preserved verbatim
-    — preamble appears as a system-style block before the body. No-op
-    when the key is absent or empty.
-
-    Pure helper — extracted so the auto-prepend behavior is unit-
-    testable without instrumenting the PromptBackend boundary.
-    """
+    """Prepend the selected route context after rendering the destination prompt."""
     eval_preamble = context.get("_route_eval_preamble")
     if not eval_preamble:
         return rendered

@@ -17,6 +17,26 @@ from sqrlly.runtime.result import ExecutionResult, PromptBackend
 from sqrlly.schema.models import Node, Settings
 
 
+async def run_command(argv: list[str], env: dict[str, str], cwd: str,
+               timeout: float | None) -> ExecutionResult:
+    proc = await asyncio.create_subprocess_exec(
+        *argv, cwd=cwd, env={**os.environ, **env} if env else None,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        await _kill_process_group(proc)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return ExecutionResult(success=False, error=f"Command timed out after {timeout}s", error_kind="timeout")
+    return ExecutionResult(
+        success=proc.returncode == 0, exit_code=proc.returncode, output=stdout.decode(errors="replace"),
+        error=f"Exit code {proc.returncode}: {stderr.decode(errors='replace')}" if proc.returncode else None,
+    )
+
+
 class DispatchExecutor:
     def __init__(self, workdir: str = ".", settings: Settings | None = None,
                  *, safe_mode: bool = False):
@@ -85,7 +105,7 @@ class DispatchExecutor:
         retries = settings.defaults.run.backend_max_retries
         for attempt in range(retries + 1):
             try:
-                result = await self._run(argv, env, cwd, timeout)
+                result = await run_command(argv, env, cwd, timeout)
             except FileNotFoundError as exc:
                 return ExecutionResult(success=False, error=f"Command not found on PATH: {exc.filename!r}")
             except OSError as exc:
@@ -95,25 +115,6 @@ class DispatchExecutor:
                 if result.success or result.error_kind == "timeout" or attempt == retries:
                     return result
             await asyncio.sleep(retry_delay(attempt + 1, settings.retry_backoff))
-
-    async def _run(self, argv: list[str], env: dict[str, str], cwd: str,
-                   timeout: float | None) -> ExecutionResult:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, env={**os.environ, **env} if env else None,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-        except (TimeoutError, asyncio.CancelledError) as exc:
-            await _kill_process_group(proc)
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            return ExecutionResult(success=False, error=f"Command timed out after {timeout}s", error_kind="timeout")
-        return ExecutionResult(
-            success=proc.returncode == 0, output=stdout.decode(errors="replace"),
-            error=f"Exit code {proc.returncode}: {stderr.decode(errors='replace')}" if proc.returncode else None,
-        )
 
     def get_backend(self, settings: Settings | None = None) -> PromptBackend:
         return create_backend((settings or self._settings).defaults.llm.provider,

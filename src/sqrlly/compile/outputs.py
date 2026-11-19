@@ -17,16 +17,17 @@ async def execute_with_outputs(
     context: dict[str, Any],
     outputs: Outputs | None,
     workdir: str,
-) -> ExecutionResult:
+) -> tuple[ExecutionResult, int]:
+    """Return the final result and number of node bodies executed."""
     if outputs and outputs.schema_file and outputs.schema_document is None:
         try:
             outputs.load_schema(Path(workdir) / outputs.schema_file)
         except ValueError as exc:
-            return ExecutionResult(success=False, error=str(exc), error_kind="node_error")
+            return ExecutionResult(success=False, error=str(exc), error_kind="node_error"), 0
     for attempt in range(1, 4):
         result = await execute(context)
         if not result.success or outputs is None:
-            return result
+            return result, attempt
         missing = validate_output_contract(outputs, result.worktree or workdir)
         errors = ["missing files: " + ", ".join(missing)] if missing else []
         if outputs.schema_file:
@@ -41,11 +42,11 @@ async def execute_with_outputs(
             except ValueError as exc:
                 errors.append(f"outputs.schema: {exc}")
         if not errors:
-            return result
+            return result, attempt
         reason = "Output contract violated: " + "; ".join(errors)
         if attempt == 3:
             result.success = False
             result.error = reason
             result.error_kind = "node_error"
-            return result
+            return result, attempt
         context = {**context, "_output_retry_reason": reason, "_retry_reason": reason}

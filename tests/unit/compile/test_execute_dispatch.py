@@ -8,7 +8,6 @@ import shutil
 import pytest
 
 from sqrlly.compile.graph import (
-    _is_route,
     build_workflow_graph,
 )
 from sqrlly.compile.subgraph import SubgraphCycleError, node_subgraph_path
@@ -17,9 +16,6 @@ from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
     Graph,
     Node,
-    Route,
-    RouteCase,
-    RouteElse,
 )
 
 _ECHO = shutil.which("echo") or "/bin/echo"
@@ -43,28 +39,6 @@ class TestSubgraphRefDetection:
     def test_no_execute_not_subgraph(self):
         n = Node(id="a", name="A")
         assert (node_subgraph_path(n) is not None) is False
-
-
-class TestRouteDetection:
-    def test_inline_route_recognized(self):
-        n = Node(
-            id="r", name="R",
-            route=Route(
-                cases=[RouteCase(when="x > 0", goto="ship")],
-                else_=RouteElse(goto="produce"),
-            ),
-        )
-        assert _is_route(n) is True
-        assert n.route.cases[0].when == "x > 0"
-        assert n.route.else_.goto == "produce"
-
-    def test_url_node_not_route(self):
-        n = Node(id="a", name="A", agent={"text": "test"})
-        assert _is_route(n) is False
-
-    def test_no_execute_not_route(self):
-        n = Node(id="a", name="A")
-        assert _is_route(n) is False
 
 
 class TestWorkflowCalls:
@@ -179,10 +153,7 @@ class TestRouteCompileViaInlineRoute:
                 ),
                 Node(
                     id="decide", name="decide", depends_on=["produce"],
-                    route=Route(
-                        cases=[RouteCase(when="True", goto="ship")],
-                        else_=RouteElse(goto="__end__"),
-                    ),
+                    route=[{"when": "True", "then": "ship"}],
                 ),
                 Node(
                     id="ship", name="ship",

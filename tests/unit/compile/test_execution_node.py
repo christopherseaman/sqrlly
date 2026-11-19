@@ -1,11 +1,4 @@
-"""Unit tests for _make_execution_node from compile/nodes.py.
-
-These call the returned closure directly with a MockExecutor and fake
-state dict. Gated nodes only exercise the execution half here — the
-Evaluation node body lives in test_evaluation_node.py and the
-Decision node body in test_decision_node.py.
-"""
-
+"""Execution node status and output updates."""
 import asyncio
 import time
 
@@ -17,7 +10,6 @@ from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
     Outputs,
     Node,
-    Evaluation,
     Settings,
     Graph,
 )
@@ -77,7 +69,7 @@ class TestExecutionNodeClosure:
         NOT write completed_nodes — the downstream Evaluation node handles that."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            evaluation=Evaluation(validator="v.py", threshold=0.8),
+            eval={"run": ["true"]},
         )
         node = _make_execution_node(node, _config_with(node), executor=None)
         update = await node(make_initial_state())
@@ -177,7 +169,7 @@ class TestExecutionNodeClosure:
         completed_nodes / retries / failed_nodes separately."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            evaluation=Evaluation(validator="v.py", threshold=0.8),
+            eval={"run": ["true"]},
         )
         node = _make_execution_node(node, _config_with(node), MockExecutor())
         state = make_initial_state(workdir=str(tmp_path))

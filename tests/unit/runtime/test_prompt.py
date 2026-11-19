@@ -629,16 +629,3 @@ class TestBackendTransientRetry:
         assert "haiku" in result.error
         assert result.error_kind == "overload"
         assert [c[1] for c in backend.calls] == ["opus", "sonnet", "haiku"] * 2
-
-    @pytest.mark.asyncio
-    async def test_backend_retry_distinct_from_gate_max_retries(self, tmp_path):
-        """The backend-retry budget is read from backend_max_retries, NOT
-        max_retries. A high gate max_retries with defaults={"llm": {"backend_max_retries": 0}} does
-        NOT retry a transient backend error."""
-        backend = AlwaysTransientErrorBackend()
-        result = await execute_with_downgrade(
-            backend, "x", "sonnet", str(tmp_path), timeout=None,
-            settings=Settings(max_retries=9, defaults={"llm": {"backend_max_retries": 0}}),
-        )
-        assert result.success is False
-        assert len(backend.calls) == 1  # gate budget irrelevant here

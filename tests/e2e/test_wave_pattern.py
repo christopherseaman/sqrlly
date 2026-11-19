@@ -143,15 +143,11 @@ def _build_wave_config(scripts: dict[str, Path]) -> Graph:
                 "id": "gate",
                 "name": "gate",
                 "depends_on": ["reconcile"],
-                "route": {
-                    "cases": [
-                        {
-                            "when": "'reconcile_added' in reconcile",
-                            "goto": "dispatcher",
-                        },
-                    ],
-                    "else": "__end__",
-                },
+                "route": [{
+                    "when": "'reconcile_added' in reconcile",
+                    "then": "dispatcher",
+                    "max_attempts": 3,
+                }],
             },
         ],
     )

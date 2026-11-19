@@ -3,25 +3,15 @@
 import json
 import sys
 
-raw = sys.stdin.read().strip()
-
 try:
-    data = json.loads(raw)
-except json.JSONDecodeError:
-    print("0.0")
-    sys.exit(0)
+    data = json.loads(sys.argv[1])
+except json.JSONDecodeError as error:
+    print(f"Invalid JSON: {error}")
+    sys.exit(1)
 
-if not isinstance(data, dict) or "jokes" not in data:
-    print("0.0")
-    sys.exit(0)
+jokes = data.get("jokes") if isinstance(data, dict) else None
+if not isinstance(jokes, list) or len(jokes) != 5 or not all(isinstance(j, str) and j for j in jokes):
+    print("Expected a JSON object with five nonempty joke strings")
+    sys.exit(1)
 
-jokes = data["jokes"]
-if not isinstance(jokes, list) or len(jokes) != 5:
-    print("0.0")
-    sys.exit(0)
-
-if not all(isinstance(j, str) and len(j) > 0 for j in jokes):
-    print("0.0")
-    sys.exit(0)
-
-print("1.0")
+print("Found five joke strings")

@@ -1,462 +1,83 @@
 from __future__ import annotations
 
-import asyncio
-from fnmatch import fnmatchcase
 import json
-import sys
-from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
 
-from sqrlly.runtime._json import extract_json
+from jsonschema import ValidationError
+
+from sqrlly.runtime.executor.prompt import render_template
 from sqrlly.runtime.result import EvaluationBackendError, EvaluationError
-from sqrlly.schema.models import Evaluation, Outputs, Settings
+from sqrlly.schema.models import Node, Outputs
 
 
-def build_eval_preamble(
-    last_result: dict[str, Any],
-    evaluation: Any,
-    *,
-    attempt: int | None = None,
-    total_attempts: int | None = None,
-) -> str:
-    """Format an evaluation record as a neutral preamble block.
+def build_eval_preamble(context, history, attempt, variables):
+    if context == "none":
+        return ""
+    if context in ("all", "last"):
+        records = history if context == "all" else history[-1:]
+        return "\n".join(
+            f"Attempt {r['attempt']}: {json.dumps(r['result'], ensure_ascii=False)}"
+            for r in records
+        )
+    return render_template(context, {**variables, "attempt": attempt, "history": history,
+                                     "eval": history[-1]["result"] if history else {}})
 
-    Same builder serves two callers:
-    1. Same-node retry — `compile/nodes.py::inject_retry_reason` passes
-       ``attempt`` and ``total_attempts`` populated from
-       ``state.retries``; the preamble carries an "Attempt N of M."
-       footer line so the model knows how many tries remain.
-    2. Goto target with ``include_eval=True`` — the synthetic
-       ``_route_<id>`` writes the preamble into state under
-       ``_route_eval_preamble``; ``_dispatch_prompt`` auto-prepends it
-       to the rendered template body. Caller passes both arguments as
-       ``None``; the footer is omitted.
 
-    Lives in ``runtime/gates.py`` (alongside ``EvaluationResult``)
-    rather than ``compile/nodes.py`` so the compile-layer route
-    dispatcher can import it without violating the layer split
-    (compile → runtime imports are allowed; the reverse is not).
+async def run_evaluation(node, context, workdir, settings, executor):
+    from sqrlly.runtime.executor.dispatch import DispatchExecutor, run_command
 
-    Neutral wording — no "failed" / "fail" / "failure" framing.
-    A ``blocking: false`` settled score below threshold is not a
-    failure, and goto targets opting in via ``include_eval: true``
-    may receive contextual non-failure information (e.g., a passing
-    score with feedback worth carrying forward).
-    """
-    lines: list[str] = []
-
-    threshold = getattr(evaluation, "threshold", None) if evaluation else None
-    dimensions = getattr(evaluation, "dimensions", None) if evaluation else None
-
-    if dimensions:
-        dim_scores = last_result.get("scores", {}) or {}
-        dim_reasons = last_result.get("reasons", {}) or {}
-        head_lines = ["Previous evaluation:"]
-        for d in dimensions:
-            score = dim_scores.get(d.field, 0.0)
-            reason = dim_reasons.get(d.field)
-            if reason:
-                head_lines.append(
-                    f"- {d.field}={score:.2f} (min={d.threshold}): {reason}"
-                )
-            else:
-                head_lines.append(
-                    f"- {d.field}={score:.2f} (min={d.threshold})"
-                )
-        # Surface any extra dimensions the gate reported beyond what
-        # was declared, so unexpected coverage is visible.
-        declared = {d.field for d in dimensions}
-        for k, v in dim_scores.items():
-            if k in declared:
-                continue
-            reason = dim_reasons.get(k)
-            if reason:
-                head_lines.append(f"- {k}={v:.2f}: {reason}")
-            else:
-                head_lines.append(f"- {k}={v:.2f}")
-        lines.append("\n".join(head_lines))
-    else:
-        prev_score = last_result.get("score", 0.0) or 0.0
-        if threshold is not None:
-            lines.append(
-                f"Previous evaluation: score={prev_score:.2f}, "
-                f"threshold={threshold}."
-            )
+    measurement = node.eval
+    directory = settings.workflow_dir or Path(workdir)
+    context = {"workflow_dir": str(directory.resolve()), **context}
+    outputs = measurement.outputs
+    if outputs and outputs.schema_file and outputs.schema_document is None:
+        outputs.load_schema(directory / outputs.schema_file)
+    if measurement.run:
+        run = measurement.run
+        argv = [render_template(arg, context) for arg in run.cmd]
+        env = {k: render_template(v, context) for k, v in run.env.items()}
+        timeout = measurement.timeout or settings.defaults.run.timeout or settings.default_timeout
+        result = await run_command(argv, env, workdir, timeout)
+        if result.exit_code is None:
+            raise EvaluationBackendError(result.error, result.error_kind or "node_error")
+        if outputs and outputs.schema_file:
+            data = _validated_eval_output(outputs, result)
         else:
-            lines.append(f"Previous evaluation: score={prev_score:.2f}.")
+            try:
+                data = json.loads(result.output)
+            except ValueError:
+                data = {}
+        return {**(data if isinstance(data, dict) else {}), "text": result.output,
+                "exit_code": result.exit_code}
 
-    if last_result.get("feedback"):
-        lines.append(f"Feedback: {last_result['feedback']}")
-    unmet = last_result.get("pass_criteria_unmet") or []
-    if unmet:
-        lines.append(
-            "Unmet criteria:\n" + "\n".join(f"- {c}" for c in unmet)
-        )
-    met = last_result.get("pass_criteria_met") or []
-    if met:
-        lines.append(
-            "Met criteria:\n" + "\n".join(f"- {c}" for c in met)
-        )
-
-    if attempt is not None and total_attempts is not None:
-        lines.append(f"Attempt {attempt} of {total_attempts}.")
-
-    return "\n\n".join(lines)
-
-
-def _clamp01(x: float) -> float:
-    return 0.0 if x < 0.0 else 1.0 if x > 1.0 else x
-
-
-@dataclass
-class EvaluationResult:
-    score: float
-    scores: dict[str, float] = field(default_factory=dict)
-    reasons: dict[str, str] = field(default_factory=dict)
-    feedback: str | None = None
-    pass_criteria_met: list[str] = field(default_factory=list)
-    pass_criteria_unmet: list[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        # The overall score is contractually in [0, 1]; clamp so a
-        # mis-scaled gate (e.g. printing 5.0 or -1) can't skip threshold
-        # checks or skew `{{evals.x.score}}` / score(id) route predicates.
-        # `scores` (per-dimension) is left as-is — it can hold arbitrary
-        # numeric fields the gate emits, not only [0, 1] quality scores.
-        self.score = _clamp01(self.score)
-
-
-_NON_SCORE_KEYS = frozenset(
-    {"feedback", "pass_criteria_met", "pass_criteria_unmet", "score"}
-)
-_REASON_SUFFIX = "_reason"
-
-
-def _parse_evaluation_output(
-    raw: str, *, allow_bare_float: bool = False, require_score: bool = True,
-) -> EvaluationResult:
-    """Parse evaluation output into an EvaluationResult.
-
-    Accepts: bare float (script gates only), JSON with "score", full
-    feedback JSON, or multi-dimension JSON (numeric fields extracted as
-    dimension scores). JSON wrapped in a ``` code fence or embedded in
-    a reasoning preamble is unwrapped first (LLM gates emit this by
-    default). Output that yields **no parseable score**
-    (unparseable, not an object, non-numeric/missing "score") raises
-    `EvaluationError` — a validator that can't produce a verdict halts
-    the run loudly rather than masquerading as a 0.0 quality result.
-    A valid score (including 0.0) is a real verdict and is returned,
-    clamped to [0, 1].
-    """
-    stripped = raw.strip()
-    if allow_bare_float:
-        try:
-            return EvaluationResult(score=float(stripped))
-        except ValueError:
-            pass
-
-    # Tolerate the common LLM wrappings (```json fences, reasoning
-    # preamble) before declaring the output unparseable — otherwise a
-    # legitimate verdict would trip the loud-halt path.
-    try:
-        data = json.loads(extract_json(stripped, objects_only=True))
-    except (json.JSONDecodeError, TypeError):
-        raise EvaluationError(
-            f"gate returned unparseable response (no numeric score): "
-            f"{stripped[:200]!r}"
-        )
-
-    if not isinstance(data, dict):
-        raise EvaluationError(
-            f"gate response must be a bare score or JSON object with a "
-            f"'score' field, got {type(data).__name__}: {stripped[:200]!r}"
-        )
-
-    dim_scores: dict[str, float] = {}
-    dim_reasons: dict[str, str] = {}
-    for k, v in data.items():
-        if k in _NON_SCORE_KEYS:
-            continue
-        # `<dim>_reason` is reserved for per-dimension string rationale.
-        # If a key carries the suffix, capture string values into
-        # `reasons[<dim>]`; non-string values are dropped silently
-        # (likely author error, never a numeric dim score).
-        if k.endswith(_REASON_SUFFIX) and len(k) > len(_REASON_SUFFIX):
-            if isinstance(v, str):
-                dim_reasons[k[: -len(_REASON_SUFFIX)]] = v
-            continue
-        if isinstance(v, (int, float)):
-            dim_scores[k] = float(v)
-
-    if "score" in data:
-        try:
-            score = float(data["score"])
-        except (TypeError, ValueError):
-            raise EvaluationError(
-                f"gate response has a non-numeric 'score': {data['score']!r}"
-            )
-    elif require_score:
-        # A single-score gate (no `dimensions` declared → require_score
-        # True) MUST emit a top-level `score`. Stray numeric fields are
-        # NOT a verdict — halt loudly rather than silently deriving a
-        # passing score from e.g. {"rating": 8}. (Multi-dim gates pass
-        # require_score=False and take the min-derivation below.)
-        raise EvaluationError(
-            f"gate response is missing a 'score' field: {stripped[:200]!r}"
-        )
-    elif dim_scores:
-        # Multi-dim gate without an explicit top-level `score`: the
-        # routing decision uses per-dim `result.scores.<field> >=
-        # min` clauses (`compile/evaluation.py::evaluation_to_routes`)
-        # and never reads `result.score`, but the headline value
-        # surfaces in JSONL events. Derive `min(dim_scores)` so the
-        # operator sees the weakest-link value — matches the
-        # weakest-link semantics already encoded in `dimensions[].threshold`.
-        score = min(dim_scores.values())
-    else:
-        score = 0.0
-
-    met = data.get("pass_criteria_met", []) or []
-    unmet = data.get("pass_criteria_unmet", []) or []
-    return EvaluationResult(
-        score=score,
-        scores=dim_scores,
-        reasons=dim_reasons,
-        feedback=data.get("feedback"),
-        pass_criteria_met=list(met) if isinstance(met, list) else [],
-        pass_criteria_unmet=list(unmet) if isinstance(unmet, list) else [],
-    )
-
-
-async def run_evaluation_script(
-    validator_path: str,
-    node_id: str,
-    workdir: str,
-    node_output: str = "",
-    workflow_name: str = "",
-    attempt_number: int = 1,
-    require_score: bool = True,
-    dep_outputs: dict[str, str] | None = None,
-    dep_structured_outputs: dict[str, Any] | None = None,
-    dep_worktrees: dict[str, str] | None = None,
-) -> EvaluationResult:
-    """Run a .py or .js validator script and parse its response.
-
-    The node output is passed via stdin so validators can inspect it.
-    Returns an EvaluationResult; bare-float output is wrapped with feedback=None.
-
-    ``dep_outputs`` / ``dep_structured_outputs`` / ``dep_worktrees``
-    are projected to the validator's environment as ``DEPS_JSON`` /
-    ``DEPS_STRUCTURED_JSON`` / ``DEPS_WORKTREES_JSON`` (each is a
-    JSON-serialized dict of node-id → value). Validators read them
-    via ``json.loads(os.environ["DEPS_JSON"])``. Stdin shape stays
-    the node's own output — no breaking change for existing scripts.
-    """
-    path = Path(validator_path)
-    suffix = path.suffix.lower()
-
-    if suffix == ".py":
-        cmd = [sys.executable, str(path)]
-    elif suffix == ".js":
-        cmd = ["node", str(path)]
-    else:
-        raise ValueError(f"Unsupported validator type: {suffix}")
-
-    import os
-
-    env = {
-        **os.environ,
-        "NODE_ID": node_id,
-        "WORKFLOW_NAME": workflow_name,
-        "ATTEMPT_NUMBER": str(attempt_number),
-        "WORKDIR": workdir,
-        "DEPS_JSON": json.dumps(dep_outputs or {}),
-        "DEPS_STRUCTURED_JSON": json.dumps(dep_structured_outputs or {}),
-        "DEPS_WORKTREES_JSON": json.dumps(dep_worktrees or {}),
-    }
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=workdir,
-            env=env,
-        )
-        stdout, stderr = await proc.communicate(input=node_output.encode())
-    except (FileNotFoundError, OSError) as e:
-        raise EvaluationError(
-            f"validator script not found or unexecutable: {validator_path} ({e})"
-        )
-
-    if proc.returncode != 0:
-        snippet = stderr.decode(errors="replace").strip()[:200]
-        raise EvaluationError(
-            f"validator '{validator_path}' exited with code "
-            f"{proc.returncode}: {snippet}"
-        )
-
-    return _parse_evaluation_output(
-        stdout.decode(), allow_bare_float=True, require_score=require_score,
-    )
-
-
-def build_llm_gate_context(
-    node_id: str,
-    node_output: str,
-    attempt_number: int,
-    dep_outputs: dict[str, str] | None = None,
-    dep_structured_outputs: dict[str, Any] | None = None,
-    dep_worktrees: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    """Jinja context for LLM gate templates.
-
-    Each dep's output is bound under its node id directly
-    (``{{ research }}`` resolves to research's stdout) — same shape
-    as ``compile/nodes.py::build_context`` uses for executor-node
-    templates, so authors carry one mental model. Aggregate forms
-    ``{{ _deps }}`` (JSON dict of dep outputs) and
-    ``{{ _dep_structured }}`` (JSON dict of structured outputs)
-    surface for multi-dep gates that want to iterate generically.
-    """
-    context: dict[str, Any] = {
-        "output": node_output,
-        "node_id": node_id,
-        "attempt": attempt_number,
-    }
-    if dep_outputs:
-        for dep_id, dep_value in dep_outputs.items():
-            context[dep_id] = dep_value
-        context["_deps"] = json.dumps(dep_outputs)
-    if dep_structured_outputs:
-        for dep_id, struct in dep_structured_outputs.items():
-            context[f"{dep_id}_structured"] = struct
-        context["_dep_structured"] = json.dumps(dep_structured_outputs)
-    if dep_worktrees:
-        for dep_id, wt_path in dep_worktrees.items():
-            context[f"{dep_id}_worktree"] = wt_path
-    return context
-
-
-async def run_evaluation_llm(
-    evaluation: Evaluation,
-    node_id: str,
-    workdir: str,
-    node_output: str,
-    backend: Any,
-    default_model: str,
-    attempt_number: int = 1,
-    require_score: bool = True,
-    dep_outputs: dict[str, str] | None = None,
-    dep_structured_outputs: dict[str, Any] | None = None,
-    dep_worktrees: dict[str, str] | None = None,
-    settings: Settings | None = None,
-) -> EvaluationResult:
-    """Evaluate a .md prompt-based evaluation via an LLM backend.
-
-    The evaluation's .md file is rendered as a Jinja2 template with the
-    node output, node id, and attempt number available as context. The
-    backend's response must be JSON matching the feedback schema. See
-    ``build_llm_gate_context`` for the dep projection rules.
-
-    The dispatch goes through ``execute_with_downgrade``, so ``settings``
-    supplies ``backend_max_retries`` / ``retry_backoff`` exactly as for a
-    prompt node. A dispatch that still fails raises
-    ``EvaluationBackendError``.
-    """
-    from sqrlly.runtime.executor.prompt import (
-        execute_with_downgrade,
-        render_template,
-    )
-
-    template_path = Path(workdir) / evaluation.validator
-    try:
-        template_text = template_path.read_text()
-    except FileNotFoundError:
-        raise EvaluationError(
-            f"LLM gate template not found: {template_path}"
-        )
-    context = build_llm_gate_context(
-        node_id=node_id,
-        node_output=node_output,
-        attempt_number=attempt_number,
-        dep_outputs=dep_outputs,
-        dep_structured_outputs=dep_structured_outputs,
-        dep_worktrees=dep_worktrees,
-    )
-    rendered = render_template(template_text, context)
-
-    model = evaluation.model or default_model
-    result = await execute_with_downgrade(
-        backend, rendered, model, workdir, settings=settings or Settings(),
-    )
+    kind = "agent" if measurement.agent else "llm"
+    prompt = getattr(measurement, kind)
+    if measurement.model:
+        prompt = prompt.model_copy(update={"model": measurement.model})
+    if not outputs or not outputs.schema_file:
+        schema_path = Path(__file__).with_name("eval-score.schema.json")
+        outputs = Outputs(schema=str(schema_path))
+        outputs.load_schema(schema_path)
+    judge = Node(id=node.id, timeout=measurement.timeout, outputs=outputs,
+                 **({"worktree": "off"} if measurement.agent else {}), **{kind: prompt})
+    dispatch = executor or DispatchExecutor(workdir, settings)
+    result = await dispatch.execute(judge, context, workdir=workdir, settings_override=settings)
     if not result.success:
-        raise EvaluationBackendError(
-            f"LLM gate dispatch failed: {result.error}",
-            result.error_kind or "backend_error",
-        )
-
-    return _parse_evaluation_output(result.output, require_score=require_score)
+        raise EvaluationBackendError(result.error, result.error_kind or "backend_error")
+    fields = _validated_eval_output(outputs, result)
+    return {**(fields if isinstance(fields, dict) else {}), "text": result.output}
 
 
-async def run_evaluation(
-    evaluation: Evaluation,
-    node_id: str,
-    workdir: str = ".",
-    node_output: str = "",
-    workflow_name: str = "",
-    attempt_number: int = 1,
-    backend: Any = None,
-    default_model: str = "sonnet",
-    dep_outputs: dict[str, str] | None = None,
-    dep_structured_outputs: dict[str, Any] | None = None,
-    dep_worktrees: dict[str, str] | None = None,
-    settings: Settings | None = None,
-) -> EvaluationResult:
-    """Run an evaluation and return an EvaluationResult.
-
-    Script-based validators (.py/.js) are dispatched to subprocess.
-    Prompt-based validators (.md) are dispatched to the provided backend.
-
-    ``dep_*`` kwargs project upstream node outputs into the validator
-    so gates can inspect what they're gating. See
-    ``run_evaluation_script`` and ``run_evaluation_llm`` for the
-    per-dispatcher projection rules.
-    """
-    path = Path(evaluation.validator)
-    suffix = path.suffix.lower()
-    require_score = not evaluation.dimensions
-
-    if suffix in (".py", ".js"):
-        return await run_evaluation_script(
-            evaluation.validator, node_id, workdir, node_output,
-            workflow_name=workflow_name, attempt_number=attempt_number,
-            require_score=require_score,
-            dep_outputs=dep_outputs,
-            dep_structured_outputs=dep_structured_outputs,
-            dep_worktrees=dep_worktrees,
-        )
-    elif suffix == ".md":
-        if backend is None:
-            raise ValueError(
-                f"LLM evaluation validator '{evaluation.validator}' requires a "
-                f"PromptBackend but none was provided"
-            )
-        return await run_evaluation_llm(
-            evaluation, node_id, workdir, node_output,
-            backend=backend, default_model=default_model,
-            attempt_number=attempt_number, require_score=require_score,
-            dep_outputs=dep_outputs,
-            dep_structured_outputs=dep_structured_outputs,
-            dep_worktrees=dep_worktrees,
-            settings=settings,
-        )
-    else:
-        raise ValueError(f"Unsupported validator type: {suffix}")
-
-
+def _validated_eval_output(outputs, result):
+    try:
+        value = result.structured_output
+        if value is None:
+            value = json.loads(result.output)
+        outputs.validate_value(value)
+    except (ValueError, ValidationError) as exc:
+        raise EvaluationError(f"eval.outputs.schema {Path(outputs.schema_file).name}: {exc}") from exc
+    return value
 
 
 def matching_output_files(pattern: str, workdir: str):
