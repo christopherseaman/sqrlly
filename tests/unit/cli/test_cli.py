@@ -207,7 +207,7 @@ class TestRunCommand:
         config = tmp_path / "fail.yaml"
         config.write_text(
             "name: Fail\nnodes:\n"
-            "  - id: fail\n    name: Fail Test\n"
+            "  - id: fail_command\n    name: Fail Test\n"
             f"    run: [{false_bin}]\n"
         )
         result = runner.invoke(cli, ["run", str(config), "--workdir", str(tmp_path)])

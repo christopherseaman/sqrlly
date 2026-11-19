@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
-"""Gate validator that always returns score 0.3 (below threshold)."""
-import json
-import sys
+"""Emit a fixed score for the route fixture."""
 
-sys.stdin.read()
-print(json.dumps({"score": 0.3, "feedback": "Needs more work"}))
+import json
+
+print(json.dumps({"score": 0.3}))

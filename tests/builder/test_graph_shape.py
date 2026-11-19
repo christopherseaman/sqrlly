@@ -49,7 +49,7 @@ class TestSingleNodeGraph:
                     "id": "g1",
                     "name": "G1",
                     # gate-only-by-elision: no execute: block
-                    "evaluation": {"validator": "v.md", "threshold": 0.9},
+                    "eval": {"run": ["true"]},
                 }
             ]
         )
@@ -137,7 +137,7 @@ class TestGateRouting:
                     "id": "p1",
                     "name": "P1",
                     "agent": {"text": "test"},
-                    "evaluation": {"validator": "v.md", "threshold": 0.8},
+                    "eval": {"run": ["true"]},
                 }
             ]
         )
@@ -158,7 +158,7 @@ class TestGateRouting:
                     "id": "a",
                     "name": "A",
                     "agent": {"text": "test"},
-                    "evaluation": {"validator": "v.md", "threshold": 0.8},
+                    "eval": {"run": ["true"]},
                 },
                 {
                     "id": "b",
@@ -191,7 +191,7 @@ class TestGateRouting:
                     "id": "a",
                     "name": "A",
                     "agent": {"text": "test"},
-                    "evaluation": {"validator": "v.md", "threshold": 0.8},
+                    "eval": {"run": ["true"]},
                 },
                 {"id": "b", "name": "B", "agent": {"text": "test"}, "depends_on": ["a"]},
                 {"id": "c", "name": "C", "agent": {"text": "test"}, "depends_on": ["a"]},
@@ -216,99 +216,20 @@ class TestGateRouting:
 
 
 class TestInlineRouteShape:
-    """Stage 5c: `Node.route` block compiles to expected LangGraph shape."""
-
-    def test_standalone_inline_route(self):
-        """Inline route with no execute body: node IS the dispatcher."""
+    @pytest.mark.parametrize("kind", [{}, {"run": ["echo", "draft"]}, {"run": ["echo", "draft"], "eval": {"run": ["true"]}}])
+    def test_route_after_body(self, kind):
         config = make_config([
-            {"id": "produce", "name": "P", "agent": {"text": "test"}},
-            {"id": "dispatch", "name": "D", "depends_on": ["produce"],
-             "route": {
-                 "cases": [{"when": "True", "goto": "ship"}],
-                 "else": "__end__",
-             }},
-            {"id": "ship", "name": "S", "agent": {"text": "test"}},
+            {"id": "classify", **kind, "route": [{"then": ["ship", "review"]}]},
+            {"id": "ship", "run": ["true"]},
+            {"id": "review", "run": ["true"]},
         ])
         graph = build_workflow_graph(config)
-        nodes = graph.get_graph().nodes
-        # No synthetic _route_<id> for standalone form — the node fn itself dispatches.
-        assert "_route_dispatch" not in nodes
-        assert "dispatch" in nodes
-        assert "produce" in nodes
-        assert "ship" in nodes
-
-    def test_execute_plus_route_creates_synthetic(self):
-        """execute + route: _route_<id> synthetic dispatcher fires post-execute."""
-        config = make_config([
-            {"id": "classify", "name": "C", "agent": {"text": "test"},
-             "route": {"goto": "ship"}},
-            {"id": "ship", "name": "S", "agent": {"text": "test"}},
-        ])
-        graph = build_workflow_graph(config)
-        nodes = graph.get_graph().nodes
-        assert "classify" in nodes
-        assert "_route_classify" in nodes
         edges = _edges(graph)
-        # Plain edge: execute → synthetic dispatcher
-        assert ("classify", "_route_classify") in edges
-
-    def test_execute_plus_eval_plus_route_chains_through_eval(self):
-        """execute + eval + route: the gate's pass target is _route_<id>.
-        The chain is execute → _eval_<id> (one plain edge); the gate node
-        emits Command(goto=_route_<id>) on pass. No _decide_<id> node."""
-        config = make_config([
-            {"id": "classify", "name": "C",
-             "agent": {"text": "test"},
-             "evaluation": {"validator": "v.py", "threshold": 0.8},
-             "route": {"goto": "ship"}},
-            {"id": "ship", "name": "S", "agent": {"text": "test"}},
-        ])
-        graph = build_workflow_graph(config)
-        nodes = graph.get_graph().nodes
-        assert {
-            "classify", "_eval_classify", "_route_classify", "ship",
-        } <= set(nodes)
-        assert "_decide_classify" not in nodes
-        edges = _edges(graph)
-        # execute → gate (plain). The Command(goto=_route_<id>) path is
-        # runtime; no static edge from _eval_classify.
+        assert (START, "classify") in edges
         assert ("classify", "_eval_classify") in edges
-        # No conditional edges from the gate.
-        assert _conditional_edges(graph) == set()
-
-    def test_list_valued_goto_no_terminal_end_edge(self):
-        """`route: { goto: [a, b] }` produces Command(goto=[a,b]); the
-        source node must NOT get a static node→END edge."""
-        config = make_config([
-            {"id": "src", "name": "S", "agent": {"text": "test"},
-             "route": {"goto": ["a", "b"]}},
-            {"id": "a", "name": "A", "agent": {"text": "test"}},
-            {"id": "b", "name": "B", "agent": {"text": "test"}},
-        ])
-        graph = build_workflow_graph(config)
-        edges = _edges(graph)
-        assert ("src", "_route_src") in edges
-        # No spurious static src→END (would compete with Command(goto=)).
-        # LangGraph may infer _route_src→END as a graph-introspection
-        # artifact since the synthetic node returns Command without
-        # static edges; that's a framework display detail, not a
-        # routing bug, so we don't assert against it.
-        assert ("src", END) not in edges
-
-    def test_inline_route_targets_skip_start_fallback(self):
-        """Goto targets that are otherwise unreached should not get a
-        START → fallback edge — they're meant to be reached only via
-        Command(goto=...) from the route."""
-        config = make_config([
-            {"id": "src", "name": "S", "agent": {"text": "test"},
-             "route": {"goto": "tgt"}},
-            {"id": "tgt", "name": "T", "agent": {"text": "test"}},
-        ])
-        graph = build_workflow_graph(config)
-        edges = _edges(graph)
-        # src is the only entry node; tgt is reached via Command.
-        assert (START, "src") in edges
-        assert (START, "tgt") not in edges
+        assert (START, "ship") not in edges
+        assert (START, "review") not in edges
+        assert ("classify", END) not in edges
 
 
 class TestEvaluationNodeShape:
@@ -326,7 +247,7 @@ class TestDynamicGraphShape:
     def _dynamic_phase(self, template_evaluation=None):
         template = {"agent": {"text": "test"}}
         if template_evaluation is not None:
-            template["evaluation"] = template_evaluation
+            template["eval"] = template_evaluation
         dsc = {
             "template": template,
             "final_nodes": [
@@ -358,7 +279,7 @@ class TestDynamicGraphShape:
         # is ungated: exec → _fan_<id> plain edge, no _eval_p gate on the
         # parent. Child gates live inside the _sub_ inline retry loop.
         config = make_config([self._dynamic_phase(
-            template_evaluation={"validator": "v.md", "threshold": 0.8},
+            template_evaluation={"run": ["true"]},
         )])
         graph = build_workflow_graph(config)
         nodes = graph.get_graph().nodes
@@ -376,7 +297,7 @@ class TestDynamicGraphShape:
             "id": "p",
             "name": "P",
             "run": ["/usr/bin/echo", "manifest"],
-            "evaluation": {"validator": "v.md", "threshold": 0.8},
+            "eval": {"run": ["true"]},
             "fan_out": {
                 "template": {"agent": {"text": "test"}},
                 "final_nodes": [

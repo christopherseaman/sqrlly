@@ -8,18 +8,13 @@ nodes:
   - id: persist
     name: Persist Paper to Disk
     depends_on: [reconcile]
-    output_contract:
-      base_directory: output
-      required_files:
-      - paper.md
+    outputs:
+      files: [output/paper.md]
     run: [uv, run, --script, '{{workflow_dir}}/../scripts/persist_paper.py', '{{reconcile}}', output/paper.md]
 
   - id: submission_check
     name: Submission Structural Check
     depends_on: [persist]
-    evaluation:
-      validator: ../gates/submission_check.py
-      threshold: 1.0
-      blocking: true
+    run: [python3, '{{workflow_dir}}/../gates/submission_check.py']
 settings:
   prompts: ../prompts

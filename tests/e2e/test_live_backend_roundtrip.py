@@ -25,8 +25,6 @@ def test_jokes_roundtrip_cli_transport(tmp_path):
         catch_exceptions=False,
     )
 
-    # Exit 0 means the gate passed (validate_jokes returned 1.0) and
-    # both nodes completed.
     assert result.exit_code == 0, (
         f"cli run failed (exit {result.exit_code}). "
         f"Output:\n{result.output}"

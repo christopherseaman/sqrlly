@@ -53,6 +53,11 @@ REDUCERS: dict[str, Callable[[Any, Any], Any]] = {
     "node_outputs": _merge_dicts,
     "node_structured_outputs": _merge_dicts,
     "retries": _merge_dicts,
+    "attempts": _merge_dicts,
+    "settled_attempts": _merge_dicts,
+    "required_attempts": _merge_dicts,
+    "route_context": _merge_dicts,
+    "route_destinations": _merge_dicts,
     "child_outputs": _merge_dicts,
     "node_worktrees": _merge_worktrees,
     "node_models": _merge_dicts,
@@ -82,21 +87,12 @@ class WorkflowState(TypedDict):
     # nodes. Set by the subgraph wrapper before subgraph invocation; not
     # populated at the top level. Merged into build_context output.
     node_inputs: NotRequired[dict[str, str]]
-    # Inline-route sender threading (Stage 5c). Set by an inline-route
-    # node's `_route_X` synthetic node when it emits Command(goto=...);
-    # read by the goto target's `build_context` to bind `{{sender}}` /
-    # `{{sender_id}}` / `{{sender_*}}` and (when include_eval=True) to
-    # auto-prepend the neutral eval preamble. Last-write-wins via
-    # `_merge_updates`'s default overwrite path — no REDUCER entry.
-    _route_sender: NotRequired[str]
-    # Pre-built eval preamble string. The synthetic `_route_<id>`
-    # builds this at dispatch time when `include_eval: true` is set on
-    # the matched case AND the source node has an evaluation that
-    # produced a result. ``_dispatch_prompt`` reads it from context
-    # (via build_context) and concatenates before the rendered prompt
-    # body — auto-prepend, no template syntax required. Empty string
-    # or absent = no preamble.
-    _route_eval_preamble: NotRequired[str]
+    _cold_entry: NotRequired[str]
+    settled_attempts: Annotated[dict[str, int], REDUCERS["settled_attempts"]]
+    required_attempts: Annotated[dict[str, int], REDUCERS["required_attempts"]]
+    attempts: Annotated[dict[str, int], REDUCERS["attempts"]]
+    route_destinations: Annotated[dict[str, str | list[str] | None], REDUCERS["route_destinations"]]
+    route_context: Annotated[dict[str, dict], REDUCERS["route_context"]]
     # Resume skip-set (skip-completed --resume). A FROZEN snapshot of node
     # ids that completed in the prior run and are safe to skip this run.
     # Seeded ONCE at resume entry from the prior checkpoint; never written by
@@ -132,6 +128,11 @@ def make_initial_state(
         "node_structured_outputs": {},
         "evaluations": {},
         "retries": {},
+        "attempts": {},
+        "settled_attempts": {},
+        "required_attempts": {},
+        "route_context": {},
+        "route_destinations": {},
         "child_outputs": {},
         "node_worktrees": {},
         "node_models": {},

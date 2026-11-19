@@ -15,11 +15,7 @@ The top-level document.
 | `nodes` | `list[Node]` | required | The workflow's nodes. |
 | `settings` | `Settings` | `Settings()` | Global settings (see below). |
 
-Compile-time validation rejects: duplicate node ids; `depends_on`
-references to a missing or self node; `route` targets that are neither a
-real node id nor `__end__`; a node that `depends_on` an inline-route
-node; a node that sets both `fan_out` and `route` (incompatible
-dispatchers — route from a node downstream of the fan-out instead).
+Validation rejects duplicate or reserved node ids, missing or self dependencies and unknown route destinations. A fan-out parent can measure output, but an explicit route belongs on a downstream node.
 
 ## Settings
 
@@ -31,7 +27,6 @@ Unknown keys in `settings:` are rejected with a `ValidationError` — no silent 
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `max_retries` | `int` | `3` | Default retry budget when an evaluation fails. |
 | `safe_mode` | `bool` | `false` | Run Claude with `--safe-mode` (`provider: anthropic` only): operator customizations — output styles, CLAUDE.md, skills, MCP, hooks — are disabled. It has no effect on Codex. The `--safe-mode` / `--no-safe-mode` CLI flag overrides this per run. |
 | `default_timeout` | `float \| None` | `None` | Per-node timeout (seconds); `None` = no timeout. |
 | `preamble_file` | `str \| None` | `None` | Prepended to every prompt before Jinja rendering. A missing file is a hard error. |
@@ -75,11 +70,11 @@ A successful tree is removed after capture. With `promote: false`, the run repor
 | `id` | `str` | required | Unique id; referenced by `depends_on` and template `{{id}}`. |
 | `name` | `str` | node id | Human-readable label. |
 | `description` | `str \| None` | `None` | Free text. |
-| `depends_on` | `list[str]` | `[]` | Static DAG edges. Cannot reference an inline-route node. |
-| `evaluation` | `Evaluation \| None` | `None` | Quality gate. |
-| `output_contract` | `OutputContract \| None` | `None` | Required-files check after execution. |
+| `depends_on` | `list[str]` | `[]` | Static dependencies. |
+| `eval` | mapping | omitted | Measure the node output before routing. |
+| `outputs` | mapping | optional | Validate files and structured results after execution. |
 | `fan_out` | `FanOut \| None` | `None` | Manifest-driven `Send` fan-out. |
-| `route` | `Route \| None` | `None` | Inline forward-edge routing block. |
+| `route` | case list | omitted | Select the first matching destination. |
 | `timeout` | `float \| None` | `None` | Per-node timeout; falls back to `settings.default_timeout`. |
 | `worktree` | `isolated` or `off` | per-kind default | Select the execution directory for an agent or command. |
 | `promote` | boolean | true for isolated nodes | Apply the node’s snapshot delta when it settles. |
@@ -120,136 +115,44 @@ nodes:
 
 A node with only an id and dependencies joins its predecessors without launching a process.
 
-## Evaluation
+## Eval
 
-A quality gate that scores a node's output and drives retries.
+An eval has exactly one of `run`, `llm` and `agent`. The command or prompt runs in the node's worktree. Pass the output explicitly to a command argument with `{{output}}`. A command exposes `eval.exit_code`, `eval.text` and fields of a single JSON object printed to stdout.
 
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `validator` | `str` | required | Path to a `.py` / `.js` script or `.md` LLM-prompt gate. |
-| `threshold` | `float` | `0.0` | Minimum passing score (`0`–`1`). |
-| `blocking` | `bool` | `false` | If `true`, exhausted retries fail the workflow; if `false`, they pass with a warning. A gate with a positive `threshold` but `blocking: false` is advisory only (a below-threshold score won't halt) — `validate`/`run` emit an advisory warning so a hollow "green" run isn't mistaken for a real pass. The `gate_evaluated` JSONL event carries `passed` / `threshold` / `blocking` so a consumer can tell a pass from a warn-continue without recomputing. For a `dimensions:` gate it also carries `scores` (per-dimension values) and `dimension_thresholds` (the configured per-dimension floors), so a consumer can attribute which dimension blocked without reading the YAML. |
-| `max_retries` | `int \| None` | `None` | Overrides `settings.max_retries`. |
-| `model` | `str \| None` | `None` | Model for `.md` LLM gates. |
-| `dimensions` | `list[DimensionCheck] \| None` | `None` | Per-dimension score gates. |
+A prompt eval takes the usual prompt options, an optional `model`, `timeout` and `outputs.schema` (a workflow-relative JSON Schema file). Without a schema, a prompt eval returns numeric `score` and string `explanation`. Every measurement appends its attempt number and result to the node's history. The JSONL event `gate_evaluated` carries `node`, `attempt` and a nested `result`. For a command, read `result.exit_code`, `result.text` and any JSON fields. A prompt measurement carries `result.text` and its schema fields.
 
-### DimensionCheck
+## Outputs
 
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `field` | `str` | required | Dimension name. |
-| `threshold` | `float` | required | Minimum for this dimension (`0`–`1`). YAML key `min:` is accepted as a back-compat alias. |
+`outputs.files` lists file paths or globs relative to the execution worktree. Each entry must match a file. The same patterns limit which files the node promotes. Agents, commands and workflows can declare files.
 
-### Validator shapes
+`outputs.schema` names a JSON Schema file relative to the workflow YAML. Agents and LLMs pass it to their provider CLI. A command must print a single matching JSON document. Workflows can declare files, and LLMs can declare a schema.
 
-**Script validators (`.py`, `.js`)** read the node output on stdin and
-print to stdout. Environment: `NODE_ID`, `WORKFLOW_NAME`,
-`ATTEMPT_NUMBER`, `WORKDIR`. Output is accepted as a bare float
-(`0.85`), `{"score": 0.6}`, or a full feedback object
-(`{"score", "feedback", "pass_criteria_met", "pass_criteria_unmet"}`).
+A missing file or invalid result reruns the node with the validation error as feedback. After three unsuccessful attempts the node fails. Each execution counts toward the node’s persisted attempt number. Its eval runs after output validation succeeds, so the first measurement can record attempt two or three. Commands can include `{{_output_retry_reason}}` in an argv token to receive the feedback.
 
-**LLM validators (`.md`)** are rendered as Jinja2 templates with
-`{{output}}`, `{{node_id}}`, `{{attempt}}`, then dispatched through the
-node's backend. The response must be JSON with at least a `score`.
-Malformed output fails loudly (`score=0.0` + diagnostic) — it never
-silently passes.
+Templates can use ancestor results. `{{plan}}` renders its text, and `{{plan.count}}` reads a field when the ancestor declares a schema. Validation rejects references to a node outside the dependency or route path, field access on a node without a schema, and a route that compares a schema-less prompt node's entire text.
 
-### Routing
+## Route
 
-| Outcome | Result |
-|---|---|
-| `score >= threshold` | pass — dependents continue. |
-| `score < threshold`, retries left | retry — re-execute the node. |
-| `score < threshold`, retries exhausted, `blocking: true` | fail — dependents skipped. |
-| `score < threshold`, retries exhausted, `blocking: false` | pass with warning — dependents continue. |
-
-On retry, the previous score, per-dimension thresholds and reasons, and
-gate feedback are formatted into a neutral preamble. Reference it in a
-prompt template as `{{_retry_reason}}`.
-
----
-
-## OutputContract
-
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `base_directory` | `str` | required | Directory checked after the node runs. |
-| `required_files` | `list[str]` | `[]` | Paths or globs (`*`/`**`/`?`/`[…]`) checked under `base_directory` in the node's run dir (its worktree in a git repo). Each entry needs at least one match for the node to succeed; a literal path matches itself. `*` stays within one directory, `**` spans directories. |
-
-> `required_files` are interpreted relative to `base_directory` for **both** the existence check and the promote glob filter. A node with `base_directory: reference` and `required_files: [x.json]` validates and promotes `reference/x.json`; `required_files: ["*.json"]` validates when at least one `reference/*.json` exists and promotes every changed match.
-
----
-
-## Route — inline forward-edge dispatch
-
-`Node.route` declares where flow goes next. A node with `route:` and no
-kind is a standalone router. An executable node finishes its body and gate before routing.
-
-### Shapes
-
-**Goto shorthand** — unconditional:
+Cases run in order. The first matching case sends execution to its `then` destination. A destination is a node id, a list of node ids, `retry` or `fail`. The two reserved words cannot name nodes. A final `else` case is unconditional.
 
 ```yaml
+eval:
+  run: [uv, run, pytest, -q]
 route:
-  goto: write              # str → Command(goto="write")
+  - when: eval.exit_code != 0
+    then: retry
+    max_attempts: 3
+  - when: eval.exit_code != 0
+    then: escalate
+    context: all
+  - else: review
 ```
 
-```yaml
-route:
-  goto: [draft_a, draft_b] # list → static fan-out (concurrent edges)
-```
+A case with `max_attempts: 3` can match on attempts 1 and 2. At attempt 3 it falls through to the next case. If no case matches, the node completes and releases its dependents, unless a matching case exhausted its attempt limit. In that case the node fails. Attempts continue from the checkpoint on resume. A case may return to an ancestor. Set `max_attempts` to bound the loop.
 
-**Conditional ladder** — first-match-wins:
+Predicates can read the current node's `eval`, `attempt` and `history`, plus dependency outputs by node id. A route can branch on those outputs without an eval. Route context controls what the destination prompt receives. The default `last` includes the latest measurement and attempt. Use `all` for the full record list, `none` for no preamble, or supply a Jinja template.
 
-```yaml
-route:
-  cases:
-    - when: "passed('judge') and score('judge') >= 0.8"
-      goto: ship
-    - when: "len(history['judge']) >= 3"
-      goto: __end__
-  else: produce
-```
-
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `goto` | `str \| list[str] \| None` | `None` | Unconditional target(s). Mutually exclusive with `cases`. |
-| `cases` | `list[RouteCase]` | `[]` | Predicate ladder. Requires `else`. |
-| `else` | `RouteElse \| str \| list` | `None` | Fallback when no case matches. A bare string/list is auto-promoted. |
-| `include_eval` | `bool` | `false` | (goto shorthand only) opt the target into the eval preamble. |
-
-**RouteCase**: `when: str` (required), `goto: str | list` (required),
-`include_eval: bool` (default `false`).
-**RouteElse**: `goto: str | list` (required), `include_eval: bool`.
-
-`__end__` halts the workflow (LangGraph `END`). All other targets must
-resolve to a real node id. Inline-route nodes are leaves in the
-`depends_on` DAG — nothing may `depends_on` them.
-
-### `include_eval`
-
-By default a goto target does **not** receive the previous node's
-evaluation feedback (success paths usually do a different task). Set
-`include_eval: true` on a case/else to auto-prepend the neutral eval
-preamble to the target's prompt — no template syntax needed.
-
-### Route predicate namespace
-
-Case `when:` expressions evaluate in a sandboxed namespace (no dunders,
-no imports, no statements):
-
-| Name | Type | Meaning |
-|---|---|---|
-| `<dep_id>` | structured-or-raw | Each dep's structured output if present, else raw. |
-| `history` | `dict[str, list[dict]]` | Full `state.evaluations`. |
-| `state` | `dict` | Full state dict. |
-| `evals` | `dict[str, dict]` | `evals[id]` → latest eval result, or `{}`. |
-| `passed(id)` | `bool` | In `completed_nodes`, not in `failed_nodes`. |
-| `score(id)` | `float` | Latest top-level score (0.0 if absent). |
-| `scores(id)` | `dict[str, float]` | Latest per-dimension scores. |
-| `len`, `any`, `all`, `min`, `max`, `sum` | builtins | Safe functions. |
-
----
+With no explicit route, a command eval retries nonzero exits up to three total attempts. A prompt eval requires an explicit route.
 
 ## FanOut
 
@@ -264,7 +167,7 @@ presence is the activation; there is no enable flag.
 
 The manifest is read from the parent node's JSON output, falling back to
 `manifest_path`. Each Send branch runs the template's kind (and
-`template.evaluation`, with its own inline retry loop). Each branch's
+`template.eval`, with its own inline retry loop). Each branch's
 template renders against a per-item Jinja context: dep outputs,
 `{{<parent_id>}}` (the parent's output), and every key on the manifest
 item.
@@ -280,10 +183,9 @@ item.
 | Field | Type | Default | Effect |
 |---|---|---|---|
 | `agent`, `llm`, `run`, `workflow` | kind | | Operation for each branch. |
-| `evaluation` | `Evaluation \| None` | `None` | Optional gate applied to each branch (with its own inline retry loop). |
-| `worktree` | `isolated` or `off` | per-kind default | Select the execution directory for an agent or command. |
+| `eval`, `route` | measurement and case list | omitted | Measure each branch and route its result. |
 
-Final nodes take an id, an optional name and description, one kind, an optional evaluation and an optional output contract.
+Final nodes take an id, an optional name and description, one kind, an optional eval and an optional output contract.
 A `workflow` template loads a child graph per item.
 
 ## Fan-out resume behavior
@@ -308,7 +210,7 @@ worse, the node name). `workflow_end` also carries a `failed_kinds` map
 | `backend_error` | Backend `send_prompt` raised a non-overload exception surviving `backend_max_retries` (e.g. a `claude exited 1` blip) — in a prompt node or in a `.md` LLM gate dispatch (the gate fails its node; no evaluation record, no node retry). | **transient** |
 | `timeout` | `TimeoutError` on node execution or on a gate/evaluation await. | **transient** |
 | `infra` | A worktree/setup abort during dispatch — `git worktree add`, a `worktree_share` path, or a `worktree_setup` command failed. Caught at the foreman (or, for an isolated subgraph fan-out branch, the fan-out invoker) and returned as this node's failure instead of a raw traceback. | **transient** |
-| `gate_failure` | A **blocking** evaluation scored below threshold after `max_retries` — a real quality verdict on work that ran. | **deterministic** |
+| `gate_failure` | A route failed the node or exhausted a matching case — a real quality verdict on work that ran. | **deterministic** |
 | `node_error` | The node (or its dispatch/config/manifest/output-contract) definitively failed; re-running unchanged reproduces it. Also the **fail-safe default** for any unclassified failure. | **deterministic** |
 | `upstream_failed` | This node did **not** do the failing work: a `depends_on` id already failed, or an inner subgraph/fan-out branch node failed. The real failure is elsewhere in the same JSONL stream (a bare sibling id, or a `parent::child`-prefixed inner id). | **not-this-node** |
 

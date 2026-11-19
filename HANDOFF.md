@@ -17,10 +17,10 @@ Work the issues in this order. Each issue body has `Known`, `Where` and `Done wh
 | 1 | #36 | Spike the 1.0 schema models and a draft skill doc | complete |
 | 1 | #37 | Delete dead surface, validate params at load (pending a 0.10.x release) | complete |
 | 2 | #38 | Replace execute and presets with kind keys | complete |
-| 3 | #39 | Replace gates with eval and the route case list | ready |
-| 3 | #40 | Add `outputs.files` and `outputs.schema` | ready |
-| 3 | #41 | Snapshot refs, settle-time promote, new worktree defaults | ready |
-| 4 | #42 | Move fan-out to `for_each` | blocked by #40 |
+| 3 | #39 | Replace gates with eval and the route case list | complete |
+| 3 | #40 | Add `outputs.files` and `outputs.schema` | complete |
+| 3 | #41 | Snapshot refs, settle-time promote, new worktree defaults | complete |
+| 4 | #42 | Move fan-out to `for_each` | ready |
 
 An agent given only `docs/reference/skills-1.0-draft.md` authored five workflows covering linear dependencies, fan-out, eval with escalation, schema routing and subgraphs. All five and the referenced child loaded with the spike. The ten migrated examples use the engine’s kind keys.
 
@@ -74,9 +74,9 @@ The spec sections that carry the rules: 3 (kinds and matrix), 4 (defaults), 5 (o
 
 ## Unverified, check before relying on it
 
-- `claude --json-schema` and `codex exec --output-schema` were read in help text and never run.
-- The snapshot-ref promote (temporary index, base-blob check, ref pruning) is unprototyped.
-- `then: retry` on a `for_each` child and `attempt` across `--resume` are unprototyped.
+- Both provider CLIs passed live structured-output tests for object and array results.
+- Real Git workflows cover temporary-index capture, base conflicts, ref cleanup, and partial fan-out recovery.
+- Route retries on fan-out children and persisted attempt numbers are covered by integration tests. The repeating-node grammar changes in #42.
 - "5 settings" for remote prompt URLs and "53 test files" are counts from a code map, not rechecked.
 
 ## Not now

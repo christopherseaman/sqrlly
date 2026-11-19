@@ -255,7 +255,7 @@ class TerminalRenderer:
         self._failed: set[str] = set()
         self._retrying: set[str] = set()
         self._errors: dict[str, str] = {}
-        self._gate_scores: dict[str, float] = {}
+        self._eval_summaries: dict[str, str] = {}
         self._attempts: dict[str, int] = {}
 
         # Workflow-level
@@ -301,10 +301,17 @@ class TerminalRenderer:
             self._errors[node] = event.get("error", "")
         elif et == "gate_evaluated":
             node = event["node"]
-            self._gate_scores[node] = float(event.get("score", 0.0))
+            result = event["result"]
+            if "exit_code" in result:
+                summary = f"exit={result['exit_code']}"
+            elif isinstance(result.get("score"), (int, float)):
+                summary = f"score={result['score']:.2f}"
+            else:
+                summary = "evaluated"
+            self._eval_summaries[node] = summary
             self._attempts[node] = max(
                 self._attempts.get(node, 0),
-                int(event.get("invocation", 0)) + 1,
+                event["attempt"],
             )
         elif et == "node_retried":
             node = event["node"]
@@ -394,8 +401,8 @@ class TerminalRenderer:
         # Spinner glyph appears next to a running node; blank otherwise.
         glyph = spinner if status == "running" else " "
         extras: list[str] = []
-        if node_id in self._gate_scores:
-            extras.append(f"gate={self._gate_scores[node_id]:.2f}")
+        if node_id in self._eval_summaries:
+            extras.append(self._eval_summaries[node_id])
         attempts = self._attempts.get(node_id, 0)
         if attempts > 1:
             extras.append(f"{attempts} attempts")

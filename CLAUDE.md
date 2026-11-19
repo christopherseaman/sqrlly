@@ -142,26 +142,13 @@ Three-layer split (enforced by `tests/architecture/test_layers.py`):
 - `v1.py` defines the agent, llm, run and workflow payloads.
 
 **`src/sqrlly/compile/`** — YAML → LangGraph (no cli imports).
-- `graph.py` — `build_workflow_graph()`, edge wiring, gate + fan-out
-  dispatcher insertion. `_wire_evaluation_pair` registers ONE collapsed
-  gate node under `_eval_<id>` (plain edge `exec → _eval_<id>`) that
-  returns `Command(update=record+outcome, goto=...)`. `_make_fan_dispatcher`
-  builds the `_fan_<id>` node (mirrors `_route_<id>`): a gated parent's
-  gate gotoes `_fan_<id>`, an ungated parent plain-edges to it, and it
-  emits the per-item `Send` array. Carries `_make_inline_route_node` for
-  Stage 5c inline routes; synthetic `_route_<id>` dispatchers are
-  registered for execute+route nodes (post-gate pass target =
-  `_route_<id>`, which emits `Command(goto=...)`).
-- `nodes.py` — `_make_execution_node`, `_make_gate_node` (the collapsed
-  gate: 7-step guard body → one `Command`), pure helpers (`build_context`,
-  `inject_retry_reason`, `classify_evaluation_outcome`,
-  `run_evaluation_and_outcome`, `build_evaluation_outcome_update`).
+- `graph.py` wires execution nodes to a settlement node (`_eval_<id>`) for eval and route. A fan-out dispatcher (`_fan_<id>`) sends each manifest item to its branch.
+- `nodes.py` builds execution context and settles ordered route cases. The settlement update records the attempt, measurement, destination and forwarded context.
 - `dynamic.py` — fan-out via Send, inline retry loop.
 - `subgraph.py` — recursive composition, cycle detection, depth cap.
 - `route.py` — simpleeval namespace + predicate evaluation
   (langgraph-free).
-- `evaluation.py` — `evaluation_to_routes()`, `walk_routes()` —
-  desugars Evaluation → first-match route ladder.
+- `evaluation.py` selects the first matching case and detects exhausted attempt limits.
 - `lint.py` — `collect_warnings()` — pure, langgraph-free advisory
   footgun checks (non-fatal); surfaced by `validate` + `run`.
 
@@ -174,8 +161,7 @@ Three-layer split (enforced by `tests/architecture/test_layers.py`):
 - `logging.py` — `JsonlLogger`, `SubgraphLogger` (prefix decorator).
 - `terminal.py` — `TerminalRenderer`, `TeeLogger` — live TTY event
   renderer (JsonlLogger-shaped `emit`/`log_update`/`close`).
-- `gates.py` — `run_evaluation_script`, `run_evaluation_llm`,
-  output parsing, `EvaluationResult`.
+- `gates.py` runs command and prompt evals, builds route context and checks output files.
 - `foreman.py` — `ForemanExecutor` (worktree pool + worktree-CREATION
   throttle; the dispatch concurrency cap moved to `DispatchExecutor` so it
   applies off-git too — foreman gates only creation, no double-count).
@@ -307,10 +293,7 @@ resolver sees) — distinct from faking what an external system returns.
   collision risk; child ids need only be unique within their own subgraph.
 - **Checkpointer migration** — pre-refactor `.sqrlly-state.json` is
   ignored on `--resume`; re-run from scratch.
-- **`_route_sender` is last-write-wins** — a node reachable by a static
-  `depends_on` edge AFTER an inline-route hop elsewhere can see a stale
-  `{{sender_id}}`; guard with `{% if sender_id %}` in that rare
-  topology. Inside a goto-only target the var is always bound.
+- Route context is keyed by destination. A selected case forwards its measurement according to `context`.
 - Promote compares the current base blob with the input snapshot before applying the result. The default conflict policy fails the node. `promote: false` retains the output ref and leaves the base alone.
 - **Bad-manifest fan-out fails the run (recoverable)** — the `_fan_<id>` dispatcher (`compile/graph.py::_make_fan_dispatcher`) FAILS the parent node with a `make_failure_update` `Command(goto=END)` — NOT a raise — on either (a) a `_read_manifest` `ManifestError` (unreadable / invalid-JSON / mis-shaped `manifest_path`, raised in `_read_manifest`) or (b) a DUPLICATE child id (literal duplicate, or the `::unknown` collapse of ≥2 id-less items; a dict item missing `id` also WARNs in `_normalize_items`). Failing the node (not raising) puts the parent in `failed_nodes` so bare `--resume` dirties it via `prior_failed` and re-fans once the manifest is fixed; a raise would leave the parent completed-but-not-failed (the gate committed one super-step earlier) and bare `--resume` would freeze it and re-fail deterministically. The parent can land in BOTH `completed_nodes` (gate committed) and `failed_nodes` (`_fan_` failed) in that checkpoint — `compile/resume.py::compute_skip_set`'s dirty subtraction handles it. (Note: `_read_manifest` still RAISES `ManifestError` when called directly, e.g. via `cli/main.py`; only the dispatcher converts it.)
 - **JSONL `gate_evaluated` precedes `node_completed`/`node_failed`** — the collapsed gate emits its EvaluationRecord and its outcome (completed / failed) in ONE super-step update, so `runtime/logging.py::_emit_update_events` orders `gate_evaluated` BEFORE both `node_completed` and `node_failed` ("gate ran, then the node settled"). For the pre-collapse split top-level pair the record already landed a super-step earlier, so this preserves that order; it is a VISIBLE JSONL order change for fan-out children and dynamic gated parents (whose single merged update previously emitted `node_completed` first). In-repo consumers (`terminal.py`, `view.py`) are order-insensitive.
@@ -319,14 +302,14 @@ resolver sees) — distinct from faking what an external system returns.
   (a `claude exited 1` blip) up to N times with `retry_backoff` between
   attempts, wrapped around the `OverloadError`→downgrade loop in
   `runtime/executor/prompt.py::execute_with_downgrade`. Distinct from the
-  gate/evaluation `max_retries`. An overload walks the model-downgrade
+  route case’s `max_attempts`. An overload walks the model-downgrade
   chain first (no retry consumed); an exhausted chain (immediate for a
   model outside it, e.g. every Codex model) then consumes a retry and
   re-dispatches from the original model. `0` = terminal on first backend
   error or exhausted chain. `.md` LLM gates dispatch through the same
-  function (`runtime/gates.py::run_evaluation_llm`); a gate dispatch that
+  function (`runtime/gates.py::run_evaluation`); a gate dispatch that
   still fails raises `EvaluationBackendError`, which
-  `compile/nodes.py::_run_eval_core` turns into a node failure carrying the
+  `compile/nodes.py::settle` turns into a node failure carrying the
   dispatch's kind (no evaluation record, no node retry).
 - **`settings:` rejects unknown keys (`extra=forbid`, 0.7.6)** — a typo'd or stale `settings` key now raises a `ValidationError` at load (previously silently ignored). Every other schema model already enforced this; `settings` was the last to adopt it. Run `sqrlly validate` to surface the offending key.
 - **`--resume` re-runs only failed fan-out children** — a fan-out parent
@@ -384,9 +367,9 @@ resolver sees) — distinct from faking what an external system returns.
 | New backend | `src/sqrlly/runtime/executor/backends/` + factory case |
 | New CLI flag | `src/sqrlly/cli/main.py` `@click.option` decorators |
 | New node type | `src/sqrlly/compile/graph.py` (registration) + `src/sqrlly/compile/nodes.py` (factory) |
-| New gate validator shape | `src/sqrlly/runtime/gates.py::_parse_evaluation_output` |
+| New gate validator shape | `src/sqrlly/runtime/gates.py::run_evaluation` |
 | New WorkflowState field | `src/sqrlly/runtime/state.py` (TypedDict + REDUCERS) — beware of parity invariant in `compile/dynamic.py::_merge_updates` |
-| Inline routing (route block, sender bindings, include_eval preamble) | `src/sqrlly/schema/models.py::Route`, `src/sqrlly/compile/graph.py::_make_inline_route_node`, `src/sqrlly/runtime/gates.py::build_eval_preamble` |
+| Inline routing (route block, sender bindings, case context) | `src/sqrlly/schema/v1.py::Case`, `src/sqrlly/compile/nodes.py::settle`, `src/sqrlly/runtime/gates.py::build_eval_preamble` |
 | Layer rule violation | `tests/architecture/test_layers.py` errors point to the offending file |
 | Transient-error → `OverloadError` mapping | `src/sqrlly/runtime/executor/backends/_overload.py::maybe_raise_overload` (`OVERLOAD_SUBSTRINGS`) |
 

@@ -25,7 +25,7 @@ class ExecutionResult:
     # failure, which the failure funnel defaults to `node_error` (fail-safe
     # toward halt). See SCHEMA.md for the kind vocabulary + dispositions.
     error_kind: str | None = None
-    structured_output: dict[str, Any] | None = None
+    structured_output: Any = None
     # The directory the node actually executed in (a foreman git
     # worktree, when active). Set by ForemanExecutor; None means the node
     # ran directly in the workdir. Used to validate output_contract
@@ -35,6 +35,7 @@ class ExecutionResult:
     # The CLI chooses its own model when the workflow leaves it unset.
     model: str | None = None
     provider: str | None = None
+    exit_code: int | None = None
 
 
 class OverloadError(Exception):
@@ -44,11 +45,7 @@ class OverloadError(Exception):
 
 
 class EvaluationError(RuntimeError):
-    """A gate validator could not produce a score — it failed to run
-    (missing / non-zero exit) or emitted output with no parseable score.
-    Distinct from a low-quality verdict (a valid score below threshold):
-    a broken validator halts the run loudly rather than masquerading as
-    a 0.0 quality result."""
+    """An invalid measurement or failed route prevents the node from settling."""
 
 
 class EvaluationBackendError(RuntimeError):

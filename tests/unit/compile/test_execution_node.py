@@ -1,11 +1,4 @@
-"""Unit tests for _make_execution_node from compile/nodes.py.
-
-These call the returned closure directly with a MockExecutor and fake
-state dict. Gated nodes only exercise the execution half here — the
-Evaluation node body lives in test_evaluation_node.py and the
-Decision node body in test_decision_node.py.
-"""
-
+"""Execution node status and output updates."""
 import asyncio
 import time
 
@@ -15,9 +8,8 @@ from sqrlly.compile.nodes import _make_execution_node
 from sqrlly.runtime.result import ExecutionResult
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
-    OutputContract,
+    Outputs,
     Node,
-    Evaluation,
     Settings,
     Graph,
 )
@@ -77,7 +69,7 @@ class TestExecutionNodeClosure:
         NOT write completed_nodes — the downstream Evaluation node handles that."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            evaluation=Evaluation(validator="v.py", threshold=0.8),
+            eval={"run": ["true"]},
         )
         node = _make_execution_node(node, _config_with(node), executor=None)
         update = await node(make_initial_state())
@@ -135,8 +127,8 @@ class TestExecutionNodeClosure:
         """Successful execution + missing required file → failed_nodes, no retry."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            output_contract=OutputContract(
-                base_directory="out", required_files=["expected.md"],
+            outputs=Outputs(
+                files=['out/expected.md'],
             ),
         )
         node = _make_execution_node(node, _config_with(node), MockExecutor())
@@ -151,8 +143,8 @@ class TestExecutionNodeClosure:
         """Required file present post-execution → completion proceeds."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            output_contract=OutputContract(
-                base_directory="out", required_files=["expected.md"],
+            outputs=Outputs(
+                files=['out/expected.md'],
             ),
         )
         (tmp_path / "out").mkdir()
@@ -177,7 +169,7 @@ class TestExecutionNodeClosure:
         completed_nodes / retries / failed_nodes separately."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            evaluation=Evaluation(validator="v.py", threshold=0.8),
+            eval={"run": ["true"]},
         )
         node = _make_execution_node(node, _config_with(node), MockExecutor())
         state = make_initial_state(workdir=str(tmp_path))

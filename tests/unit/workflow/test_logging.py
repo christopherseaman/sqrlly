@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import sys
 from io import StringIO
 
 import pytest
@@ -162,85 +163,20 @@ class TestLogUpdate:
         event = json.loads(buf.getvalue().strip())
         assert event["kind"] == "node_error"
 
-    def test_detects_gate(self):
-        """gate_evaluated sources from update.evaluations (real scores)."""
+    @pytest.mark.parametrize("result", [
+        {"score": 0.95}, {"exit_code": 3, "text": "try again"},
+        {"node": "someone_else", "attempt": 400, "scores": {"rigor": 0.8}},
+    ])
+    def test_measurement_preserves_result_and_attempt(self, result):
         buf = StringIO()
-        logger = JsonlLogger(buf)
-        logger.log_update({
-            "evaluations": {
-                "research": [{
-                    "invocation": 0,
-                    "result": {"score": 0.95},
-                    "timestamp": "t",
-                }],
-            },
+        JsonlLogger(buf).log_update({
+            "evaluations": {"research": [{"attempt": 2, "result": result}]},
         })
-        events = [json.loads(l) for l in buf.getvalue().strip().split("\n")]
-        assert len(events) == 1
-        assert events[0]["event"] == "gate_evaluated"
-        assert events[0]["node"] == "research"
-        assert events[0]["score"] == 0.95
-        assert events[0]["invocation"] == 0
-
-    def test_gate_event_surfaces_passed_blocking_threshold(self):
-        """A programmatic consumer can tell pass from warn-continue without
-        recomputing score < threshold."""
-        buf = StringIO()
-        logger = JsonlLogger(buf)
-        logger.log_update({
-            "evaluations": {
-                "phase_2a": [{
-                    "invocation": 0,
-                    "result": {"score": 0.42, "passed": False,
-                               "blocking": False, "threshold": 0.7},
-                }],
-            },
-        })
-        event = json.loads(buf.getvalue().strip())
+        event = json.loads(buf.getvalue())
         assert event["event"] == "gate_evaluated"
-        assert event["passed"] is False
-        assert event["blocking"] is False
-        assert event["threshold"] == 0.7
-
-    def test_detects_multidim_gate(self):
-        """Per-dimension scores flow through (closes multi-dim log bug)."""
-        buf = StringIO()
-        logger = JsonlLogger(buf)
-        logger.log_update({
-            "evaluations": {
-                "p": [{
-                    "invocation": 0,
-                    "result": {"score": 0.0, "scores": {"rigor": 0.8, "humor": 0.5}},
-                    "timestamp": "t",
-                }],
-            },
-        })
-        events = [json.loads(l) for l in buf.getvalue().strip().split("\n")]
-        assert events[0]["event"] == "gate_evaluated"
-        assert events[0]["scores"] == {"rigor": 0.8, "humor": 0.5}
-
-    def test_gate_event_surfaces_dimension_thresholds(self):
-        """Per-dimension floors flow through so a consumer can attribute which
-        dimension blocked without reading the YAML."""
-        buf = StringIO()
-        logger = JsonlLogger(buf)
-        logger.log_update({
-            "evaluations": {
-                "p": [{
-                    "invocation": 0,
-                    "result": {
-                        "score": 0.0,
-                        "scores": {"rigor": 0.8, "humor": 0.4},
-                        "dimension_thresholds": {"rigor": 0.6, "humor": 0.5},
-                        "passed": False,
-                    },
-                    "timestamp": "t",
-                }],
-            },
-        })
-        event = json.loads(buf.getvalue().strip())
-        assert event["event"] == "gate_evaluated"
-        assert event["dimension_thresholds"] == {"rigor": 0.6, "humor": 0.5}
+        assert event["node"] == "research"
+        assert event["attempt"] == 2
+        assert event["result"] == result
 
     def test_detects_retry(self):
         buf = StringIO()
@@ -279,7 +215,7 @@ class TestLogUpdate:
         buf = StringIO()
         logger = JsonlLogger(buf)
         logger.log_update({
-            "evaluations": {"p": [{"invocation": 0, "result": {"score": 0.9}}]},
+            "evaluations": {"p": [{"attempt": 1, "result": {"score": 0.9}}]},
             "completed_nodes": {"p"},
         })
         events = [json.loads(l) for l in buf.getvalue().strip().split("\n")]
@@ -297,7 +233,7 @@ class TestLogUpdate:
         buf = StringIO()
         logger = JsonlLogger(buf)
         logger.log_update({
-            "evaluations": {"p": [{"invocation": 1, "result": {"score": 0.1}}]},
+            "evaluations": {"p": [{"attempt": 2, "result": {"score": 0.1}}]},
             "failed_nodes": {"p"},
             "errors": [{"node": "p", "error": "Evaluation failed after 1 retries"}],
         })
@@ -381,19 +317,14 @@ class TestRunWorkflowLogging:
     async def test_log_captures_gate_and_retry(self, tmp_path):
         """Gated node that fails gate should produce gate + retry events."""
         validator = tmp_path / "gate.py"
-        validator.write_text("print('0.0')\n")
+        validator.write_text("raise SystemExit(7)\n")
 
         config = make_config([
             {
                 "id": "gated",
                 "name": "gated",
                 "run": [_ECHO, "-n", "output"],
-                "evaluation": {
-                    "validator": str(validator),
-                    "threshold": 0.9,
-                    "blocking": True,
-                    "max_retries": 1,
-                },
+                "eval": {"run": [sys.executable, str(validator)]},
             }
         ])
         log_path = str(tmp_path / "events.jsonl")
@@ -409,8 +340,11 @@ class TestRunWorkflowLogging:
 
         events = [json.loads(l) for l in (tmp_path / "events.jsonl").read_text().strip().split("\n")]
         event_types = [e["event"] for e in events]
-        assert "gate_evaluated" in event_types
-        assert "node_retried" in event_types
+        records = [e for e in events if e["event"] == "gate_evaluated"]
+        assert [e["attempt"] for e in records] == [1, 2, 3]
+        assert all(e["result"]["exit_code"] == 7 for e in records)
+        assert event_types.count("node_retried") == 2
+        assert event_types[-1] == "node_failed"
 
     @pytest.mark.asyncio
     async def test_no_logger_no_side_effects(self, tmp_path):

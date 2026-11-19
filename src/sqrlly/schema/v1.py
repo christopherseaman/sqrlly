@@ -7,9 +7,10 @@ from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
+from sqrlly.schema.json_schema import load_validator
 import yaml
 from pydantic import (
-    BaseModel, ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt,
+    BaseModel, ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt, PrivateAttr,
     ValidationInfo, field_validator, model_validator,
 )
 
@@ -116,10 +117,34 @@ def require_reference(root: Path | None, path: Path, key: str, hint: str = "") -
 
 class SchemaOutput(Record):
     schema_file: Name | None = Field(None, alias="schema")
+    _schema_document: dict | bool | None = PrivateAttr(default=None)
+
+    @property
+    def schema_document(self) -> dict | bool | None:
+        return self._schema_document
+
+    _validator: Any = PrivateAttr(default=None)
+
+    def load_schema(self, path: Path, root: Path | None = None) -> None:
+        self._schema_document, self._validator = load_validator(
+            path, root or repository_root(path.parent.resolve()) or path.parent,
+        )
+
+    def validate_value(self, value: Any) -> None:
+        self._validator.validate(value)
 
 
 class Outputs(SchemaOutput):
     files: list[Name] = []
+
+    @field_validator("files")
+    @classmethod
+    def _relative_files(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            path = Path(pattern)
+            if path.is_absolute() or ".." in path.parts or {".git", ".sqrlly"}.intersection(path.parts):
+                raise ValueError(f"outputs.files requires a path inside the node tree: {pattern}")
+        return patterns
 
 
 class Eval(Record):
@@ -128,7 +153,14 @@ class Eval(Record):
     agent: Agent | None = None
     model: Name | None = None
     timeout: PositiveFloat | None = None
-    outputs: SchemaOutput | None = None
+    outputs: Outputs | None = None
+
+    @field_validator("outputs")
+    @classmethod
+    def _schema_only(cls, value):
+        if value and "files" in value.model_fields_set:
+            raise ValueError("eval cannot declare outputs.files")
+        return value
 
     @model_validator(mode="after")
     def _kind(self) -> Self:
@@ -145,6 +177,12 @@ class Case(Record):
     otherwise: Destination | None = Field(None, alias="else")
     max_attempts: PositiveInt | None = None
     context: str = "last"
+
+    @property
+    def targets(self) -> list[str]:
+        target = self.then if self.then is not None else self.otherwise
+        assert target is not None
+        return [target] if isinstance(target, str) else target
 
     @model_validator(mode="after")
     def _destination(self) -> Self:
@@ -297,7 +335,9 @@ class Graph(Record):
                     require_reference(root, directory / self.settings.prompts / prompt.prompt,
                             f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
                 if step.outputs and step.outputs.schema_file:
-                    require_reference(root, directory / step.outputs.schema_file, f"{node.id}.outputs.schema")
+                    schema_path = directory / step.outputs.schema_file
+                    require_reference(root, schema_path, f"{node.id}.outputs.schema")
+                    step.outputs.load_schema(schema_path, root or directory)
             if node.workflow:
                 require_reference(root, directory / node.workflow.file, f"{node.id}.workflow",
                         ' ({text: "..."} is for inline agent or llm prompts)')

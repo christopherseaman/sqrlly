@@ -23,12 +23,12 @@ async def main():
     for err in result.get("errors", []):
         print(f"  Error: {err}")
 
-    scores = {
-        node: records[-1].get("result", {}).get("score")
+    exit_codes = {
+        node: records[-1].get("result", {}).get("exit_code")
         for node, records in result.get("evaluations", {}).items()
         if records
     }
-    print(f"\nGate scores: {scores}")
+    print(f"\nEval exit codes: {exit_codes}")
     print(f"Retries: {result.get('retries', {})}")
 
     for node_id, output in result.get("node_outputs", {}).items():

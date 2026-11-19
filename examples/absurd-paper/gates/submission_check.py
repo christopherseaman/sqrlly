@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Structural integrity gate for the composed paper.
 
-Reads `<WORKDIR>/output/paper.md` and validates that reconcile produced
+Reads `output/paper.md` from the working directory and validates that reconcile produced
 a well-formed journal submission:
   - an H1 title
   - an Abstract section
@@ -9,19 +9,12 @@ a well-formed journal submission:
   - a Conclusion section
   - a References section with at least 3 bulleted entries
 
-Emits the full structured gate feedback schema so failures flow into
-`{{_retry_reason}}` — though this gate is wired as blocking with no
-retries since a malformed reconcile is a hard failure.
-
-Invoked as a `gate_only` node's validator: ignores stdin (gate-only
-nodes emit a stub output that is not the paper), reads from disk via
-the WORKDIR env var injected by the orchestrator.
+The command exits 1 when a required section or reference is missing.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -38,12 +31,11 @@ REQUIRED_SECTIONS = [
 
 
 def main() -> int:
-    workdir = Path(os.environ.get("WORKDIR", "."))
-    paper = workdir / "output" / "paper.md"
+    paper = Path("output/paper.md")
 
     if not paper.exists():
-        _emit(0.0, f"output/paper.md not found at {paper}", [f"paper missing: {paper}"])
-        return 0
+        print(f"Missing {paper}")
+        return 1
 
     text = paper.read_text()
 
@@ -68,21 +60,8 @@ def main() -> int:
             unmet.append(f"references has {len(bullets)} entries, need ≥3")
     # (missing-References already captured above)
 
-    if unmet:
-        _emit(0.0, "submission failed structural checks", unmet)
-    else:
-        _emit(1.0, "submission passes structural checks", [])
-
-    return 0
-
-
-def _emit(score: float, feedback: str, unmet: list[str]) -> None:
-    print(json.dumps({
-        "score": score,
-        "feedback": feedback,
-        "pass_criteria_met": [] if unmet else ["all required sections present"],
-        "pass_criteria_unmet": unmet,
-    }))
+    print(json.dumps({"missing": unmet}))
+    return int(bool(unmet))
 
 
 if __name__ == "__main__":

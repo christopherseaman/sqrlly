@@ -16,157 +16,41 @@ from pydantic import (
     model_validator,
 )
 
+from sqrlly.schema.references import assign_ancestors, validate_references
 from sqrlly.schema.v1 import (
-    KINDS, Agent, Defaults, Name, Prompt, Run, Workflow, WorkflowLoader, Worktree,
+    KINDS, RESERVED, Agent, Case, Defaults, Eval, Name, Outputs, Prompt, Run, Workflow, WorkflowLoader, Worktree,
     repository_root, require_reference,
 )
 
 
-class RouteCase(BaseModel):
-    """One case in a route ladder.
-
-    `goto` accepts a single target id or a list (static fan-out via
-    `Command(goto=[...])`). `include_eval` opts the goto target into
-    receiving the same neutral eval-result preamble that retry
-    attempts get auto-prepended to their prompt. Default off — success
-    paths typically perform a different task than the previous node,
-    so the previous eval's feedback is noise unless explicitly wanted.
-    """
-    model_config = ConfigDict(extra="forbid")
-    when: str
-    goto: str | list[str]
-    include_eval: bool = False
-
-
-class RouteElse(BaseModel):
-    """Structured else: target — same fields as RouteCase minus when:."""
-    model_config = ConfigDict(extra="forbid")
-    goto: str | list[str]
-    include_eval: bool = False
-
-
-class Route(BaseModel):
-    """Forward-edge dispatch on a node — Stage 5c inline routing.
-
-    Exactly one shape is set:
-
-    - **Unconditional shorthand**: `goto:` (str | list[str]) plus
-      optional `include_eval:`. Compiles to `Command(goto=...)` from
-      the source node, no predicate evaluation.
-    - **Conditional ladder**: `cases:` (first-match-wins) plus
-      `else:`. `else:` may be a bare string/list (auto-normalized to
-      `RouteElse(goto=..., include_eval=False)`) or a structured
-      RouteElse for `include_eval` control.
-
-    Lives on `Node.route`. When the source node also has `execute:`,
-    the route fires after execute (and after eval, if present)
-    settles. When `execute:` is omitted, the node is a standalone
-    router.
-    """
-    model_config = ConfigDict(populate_by_name=True)
-    # Unconditional shorthand:
-    goto: str | list[str] | None = None
-    include_eval: bool = False
-    # OR conditional ladder:
-    cases: list[RouteCase] = []
-    else_: RouteElse | None = Field(default=None, alias="else")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_else(cls, data: Any) -> Any:
-        # Allow `else: <string>` and `else: [a, b]` shorthand by
-        # promoting to RouteElse(goto=..., include_eval=False).
-        if not isinstance(data, dict):
-            return data
-        else_val = data.get("else") if "else" in data else data.get("else_")
-        if isinstance(else_val, (str, list)):
-            promoted = {"goto": else_val, "include_eval": False}
-            if "else" in data:
-                data = {**data, "else": promoted}
-            else:
-                data = {**data, "else_": promoted}
-        return data
-
-    @model_validator(mode="after")
-    def validate_shape(self) -> Self:
-        has_goto = self.goto is not None
-        has_cases = bool(self.cases)
-        has_else = self.else_ is not None
-        if has_goto:
-            if has_cases or has_else:
-                raise ValueError(
-                    "Route shorthand `goto:` is mutually exclusive with "
-                    "`cases:`/`else:` (got both)"
-                )
-        else:
-            if not has_cases and not has_else:
-                raise ValueError(
-                    "Route requires either `goto:` (unconditional) "
-                    "or `cases:` + `else:` (conditional ladder)"
-                )
-            if has_cases and not has_else:
-                raise ValueError(
-                    "Route with `cases:` requires `else:` target"
-                )
-            if has_else and not has_cases:
-                # `else:` without `cases:` would be a silent unconditional
-                # redirect — confusing structure, identical to `goto:`
-                # shorthand. Reject so authors pick the unambiguous form.
-                raise ValueError(
-                    "Route with `else:` requires `cases:` — use `goto:` "
-                    "shorthand for unconditional dispatch"
-                )
-            if self.include_eval:
-                # include_eval at the route level only meaningful for
-                # the goto-shorthand form; cases/else carry their own.
-                raise ValueError(
-                    "`include_eval` at the route level is only valid "
-                    "with `goto:` shorthand; for `cases:` ladders, set "
-                    "include_eval per-case (and on the else target)"
-                )
-        return self
-
-
-class DimensionCheck(BaseModel):
-    # `threshold` matches `Evaluation.threshold`; `min` stays accepted
-    # as a YAML alias for back-compat with pre-rename workflows.
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-    field: str
-    threshold: float = Field(ge=0.0, le=1.0, alias="min")
-
-
-class Evaluation(BaseModel):
-    """Evaluation configuration for a node."""
-    model_config = ConfigDict(extra="forbid")
-    validator: str
-    threshold: float = Field(ge=0.0, le=1.0, default=0.0)
-    blocking: bool = False
-    max_retries: int | None = None
-    model: str | None = None
-    dimensions: list[DimensionCheck] | None = None
-
-
-class OutputContract(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    base_directory: str
-    required_files: list[str] = []
-
-    def required_paths(self) -> list[str]:
-        """Required files as workdir-relative POSIX paths, with
-        ``base_directory`` prepended. A single derivation so every consumer
-        constructs these paths identically (used by the existence check in
-        ``gates.validate_output_contract``). A ``base_directory`` of ``"."``
-        collapses to the bare filename."""
-        return [(Path(self.base_directory) / f).as_posix()
-                for f in self.required_files]
 
 
 class KindStep(BaseModel):
+    outputs: Outputs | None = None
     model_config = ConfigDict(extra="forbid")
     agent: Agent | None = None
     llm: Prompt | None = None
     run: Run | None = None
     workflow: Workflow | None = None
+
+    eval: Eval | None = None
+    route: list[Case] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_route(self) -> Self:
+        if self.outputs:
+            if self.llm and "files" in self.outputs.model_fields_set:
+                raise ValueError("llm cannot declare outputs.files")
+            if self.workflow and self.outputs.schema_file:
+                raise ValueError("workflow cannot declare outputs.schema")
+            if not self.kind:
+                raise ValueError("outputs requires an executable kind")
+        if self.eval and (self.eval.agent or self.eval.llm) and not self.route:
+            kind = "agent" if self.eval.agent else "llm"
+            raise ValueError(f"{kind} eval requires a route")
+        if any(case.otherwise for case in (self.route or [])[:-1]):
+            raise ValueError("else must be the last route case")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -190,7 +74,6 @@ class KindStep(BaseModel):
 class FanOutTemplate(KindStep):
     """Template for nodes spawned during fan-out over a manifest."""
     model_config = ConfigDict(extra="forbid")
-    evaluation: Evaluation | None = None
 
 
 class FanOutFinalNode(KindStep):
@@ -199,11 +82,6 @@ class FanOutFinalNode(KindStep):
     id: Name
     name: Name = Field(default_factory=lambda data: data["id"])
     description: str | None = None
-    evaluation: Evaluation | None = None
-    # Enforced via the standard execution-node path (the final node runs
-    # through `_make_execution_node`), so it scaffolds + validates just
-    # like a top-level node's contract.
-    output_contract: OutputContract | None = None
 
 
 class FanOut(BaseModel):
@@ -239,7 +117,6 @@ class Settings(BaseModel):
     defaults: Defaults = Defaults()
     model_config = ConfigDict(extra="forbid")
 
-    max_retries: int = 3
     # Run Claude with `--safe-mode` (cli transport only): operator
     # customizations — output styles, CLAUDE.md, skills, MCP, hooks — are
     # disabled, so workflow generation stays reproducible and free of e.g.
@@ -284,14 +161,12 @@ class Settings(BaseModel):
 
 
 class Node(KindStep):
+    _ancestors: list[str] = PrivateAttr(default_factory=list)
     id: Name
     name: Name = Field(default_factory=lambda data: data["id"])
     description: str | None = None
     depends_on: list[str] = []
-    evaluation: Evaluation | None = None
-    output_contract: OutputContract | None = None
     fan_out: FanOut | None = None
-    route: Route | None = None
     timeout: float | None = None
     worktree: Worktree | None = None
     promote: bool | None = None
@@ -342,11 +217,6 @@ class Node(KindStep):
             return self.promote
         return getattr(settings.defaults, self.kind).promote is not False
 
-    def effective_max_retries(self, settings: Settings) -> int:
-        if self.evaluation and self.evaluation.max_retries is not None:
-            return self.evaluation.max_retries
-        return settings.max_retries
-
 
 class Graph(BaseModel):
     _source_path: Path | None = PrivateAttr(default=None)
@@ -385,6 +255,7 @@ class Graph(BaseModel):
         defaults = self.settings.defaults.agent
         if isinstance(defaults.tools, list) and defaults.provider != "anthropic":
             raise ValueError("agent tool-name lists require provider: anthropic")
+        node_ids = {node.id for node in self.nodes}
         for node in self.nodes:
             steps: list[KindStep] = [node]
             if node.fan_out:
@@ -392,18 +263,32 @@ class Graph(BaseModel):
                     steps.append(node.fan_out.template)
                 steps.extend(node.fan_out.final_nodes)
             for step in steps:
-                if step.agent:
-                    tools = defaults.tools if step.agent.tools is None else step.agent.tools
-                    if isinstance(tools, list) and (step.agent.provider or defaults.provider) != "anthropic":
-                        raise ValueError(f"{node.id}: agent tool-name lists require provider: anthropic")
-                if directory:
-                    prompt = step.agent or step.llm
-                    if prompt and prompt.prompt:
+                if isinstance(step, (Node, FanOutFinalNode)) and step.id in RESERVED:
+                    raise ValueError(f"reserved node id: {step.id}")
+                for payload in (step, step.eval):
+                    if payload is None:
+                        continue
+                    if payload.agent:
+                        agent = payload.agent
+                        tools = defaults.tools if agent.tools is None else agent.tools
+                        if isinstance(tools, list) and (agent.provider or defaults.provider) != "anthropic":
+                            raise ValueError(f"{node.id}: agent tool-name lists require provider: anthropic")
+                    prompt = payload.agent or payload.llm
+                    if directory and prompt and prompt.prompt:
                         require_reference(root, directory / self.settings.prompts / prompt.prompt,
                                           f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
-                    elif step.workflow:
-                        require_reference(root, directory / step.workflow.file, f"{node.id}.workflow",
-                                          ' ({text: "..."} is for inline agent or llm prompts)')
+                    if directory and payload.outputs and payload.outputs.schema_file:
+                        schema_path = directory / payload.outputs.schema_file
+                        label = f"{node.id}.eval" if payload is step.eval else node.id
+                        require_reference(root, schema_path, f"{label}.outputs.schema")
+                        payload.outputs.load_schema(schema_path, root or directory)
+                if directory and step.workflow:
+                    require_reference(root, directory / step.workflow.file, f"{node.id}.workflow",
+                                      ' ({text: "..."} is for inline agent or llm prompts)')
+                for case in step.route or []:
+                    for target in case.targets:
+                        if target not in node_ids and target not in RESERVED:
+                            raise ValueError(f"{node.id}.route references unknown node {target}")
         return self
 
     @model_validator(mode="after")
@@ -427,61 +312,19 @@ class Graph(BaseModel):
                         f"Node '{node.id}' depends on '{dep}' "
                         f"which references nonexistent node"
                     )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_route_targets(self) -> Self:
-        node_ids = {n.id for n in self.nodes}
-
-        def _check_targets(source_id: str, where: str, targets: Any) -> None:
-            ids = targets if isinstance(targets, list) else [targets]
-            for tgt in ids:
-                if tgt == "__end__":
-                    continue
-                if tgt not in node_ids:
-                    raise ValueError(
-                        f"Route '{source_id}' {where} '{tgt}' "
-                        f"references nonexistent node"
-                    )
-
-        for node in self.nodes:
-            if node.route is None:
-                continue
-            r = node.route
-            if r.goto is not None:
-                _check_targets(node.id, "goto", r.goto)
-            for case in r.cases:
-                _check_targets(
-                    node.id, f"case[when={case.when!r}] goto", case.goto,
-                )
-            if r.else_ is not None:
-                _check_targets(node.id, "else goto", r.else_.goto)
-        return self
-
-    @model_validator(mode="after")
-    def _validate_routes_not_depended_on(self) -> Self:
-        # Inline-route nodes dispatch via Command(goto=); they cannot
-        # appear in another node's `depends_on:` (would double-trigger
-        # the goto target).
-        inline_route_ids: set[str] = {
-            n.id for n in self.nodes if n.route is not None
-        }
-        for node in self.nodes:
-            for dep in node.depends_on:
-                if dep in inline_route_ids:
-                    raise ValueError(
-                        f"Node '{node.id}' depends on route '{dep}'; "
-                        f"routes dispatch via Command(goto=), so they "
-                        f"cannot appear in another node's depends_on"
-                    )
+        assign_ancestors(self)
         return self
 
 
 
 def load_workflow(
     path: str | Path, *, resolve_settings: Callable[[Settings], Settings] | None = None,
+    inputs: frozenset[str] | None = frozenset(),
 ) -> Graph:
     path = Path(path)
     with path.open(encoding="utf-8") as stream:
         raw = yaml.load(stream, Loader=WorkflowLoader)
-    return Graph.model_validate(raw, context={"workflow_path": path, "resolve_settings": resolve_settings})
+    graph = Graph.model_validate(raw, context={"workflow_path": path, "resolve_settings": resolve_settings})
+    if inputs is not None:
+        validate_references(graph, inputs)
+    return graph

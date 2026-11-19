@@ -67,58 +67,33 @@ For a Claude coordinator that spawns workers inside one node, grant its Task too
 `agent: {prompt: coordinator.md, provider: anthropic, tools: [Task]}`.
 For per-worker worktrees, gates and logs, use fan-out.
 
-1. **Add a gate** to retry a node until its output is good enough:
+1. Measure output with `eval`. A command runs in the node's worktree. Pass its input through argv.
    ```yaml
-   evaluation:
-     validator: gates/check.py   # .py / .js script, or .md LLM prompt
-     threshold: 0.8
-     blocking: true
-     max_retries: 3
-     # dimensions:               # optional multi-criteria gate
-     #   - field: accuracy
-     #     threshold: 0.8
-     #   - field: clarity
-     #     threshold: 0.7
+   eval:
+     run: [python3, "{{workflow_dir}}/check.py", "{{output}}"]
    ```
-   The validator's **output contract**: print to stdout a bare number
-   (`0.85`) or a JSON object (`{"score": 0.6, "feedback": "..."}`); a
-   script gate reads the node output on stdin, exits 0. With
-   `dimensions`, the JSON carries one numeric field per dimension
-   (`{"accuracy": 0.9, "clarity": 0.6}`) and each is checked against its
-   own threshold. LLM (`.md`) gates return the same JSON — a surrounding
-   ``` code fence or reasoning preamble is tolerated. A validator that
-   **can't produce a score** (crashes, exits non-zero, or emits no
-   parseable score) halts the run loudly — distinct from a valid score
-   below threshold.
-2. **Node options** (any node): `timeout: 30` (seconds; the node is
-   killed and fails if it overruns) and `output_contract:` to assert a
-   node wrote files —
+   With no route, a nonzero exit retries the node for up to three total attempts. A prompt eval requires an explicit route. Its default result has `score` and `explanation`; use `outputs.schema` for other fields.
+2. Declare the results each node must produce. Every glob must match a file in its worktree. A command with a schema prints one JSON document. LLM and agent nodes pass their schema to the provider CLI.
+
    ```yaml
-   output_contract:
-     base_directory: "."                  # base for required_files (required)
-     required_files: ["report.md"]        # node fails if missing after it runs
+   outputs:
+     files: ["reports/*.md"]
+     schema: schemas/plan.json
    ```
-   In a git repo, files are checked in the node's worktree (where it
-   wrote them), so write paths relative to the run, not absolute.
-   `required_files` entries are paths or globs (`out_*.md`, `**/*.json`);
-   each entry needs at least one match, and a literal path matches itself.
-3. **Branch** with a `route:` block — an unconditional `goto:`, or a
-   `cases:` / `else:` ladder of `when:` predicates:
+
+   Downstream nodes can render the text with `{{plan}}` or read a schema field with `{{plan.title}}`. A missing file or invalid result gives the node feedback and another attempt, up to three runs.
+3. Branch with ordered route cases. Every predicate can read the current measurement, attempt, history and dependency outputs.
    ```yaml
    route:
-     cases:
-       - when: "score('classify') >= 0.8"   # predicate (see below)
-         goto: high_quality
-       - when: "'urgent' in classify"        # `classify` = its output
-         goto: escalate
-     else:
-       goto: default_path
+     - when: eval.exit_code != 0
+       then: retry
+       max_attempts: 3
+     - when: eval.exit_code != 0
+       then: escalate
+       context: all
+     - else: review
    ```
-   `when:` is a **Python expression** (sandboxed simpleeval) — use
-   `True` / `False`, not the string `"true"`. In scope: each upstream
-   dependency id (bound to its output), `state` (the full state dict),
-   and `history` / `evals` (evaluation records); plus functions
-   `passed(id)`, `score(id)`, and `scores(id)`.
+   Attempt 3 falls through to escalation. Without an escalation case, an exhausted retry fails the node. When no predicate matches and no matching case exhausted its limit, dependents run normally. The default context carries the latest measurement and attempt. Use `none` to suppress it.
 4. **Parallelize** with a `fan_out:` block — one branch per manifest
    item, joined by `final_nodes`:
    ```yaml
@@ -126,14 +101,14 @@ For per-worker worktrees, gates and logs, use fan-out.
      manifest_path: items.json   # JSON: [{"id": "a", ...}, ...] or {"items": [...]}
      template:
        llm: item.md
-       # evaluation: ...          # optional: gate each branch
+       # eval: ...          # optional: gate each branch
      final_nodes:                 # inline nodes; run once after all branches join
        - id: summarize
          name: Summarize
          llm: summarize.md
    ```
    Each inline final node has an id and a kind. Optional fields include
-   `evaluation` and `output_contract`. Each
+   `eval` and `outputs`. Each
    manifest item is a JSON **object**; its fields become template
    variables (`{{id}}`, `{{name}}`, …). A bare string item is treated
    as `{"id": "<string>"}`. The manifest may instead be produced at run
@@ -182,7 +157,7 @@ start (upstream never ran). Distinct from `--resume-from`, which requires a
 checkpoint.
 
 On completion `run` prints a `where to find things` summary — the
-produced `output_contract` files, the `--log` path (or how to capture
+produced `outputs` files, the `--log` path (or how to capture
 one), and run artifacts (checkpoint DB + foreman worktree pool, when
 present). The live renderer shows only per-node status, so this epilogue
 is where a terminal run tells you where output / logs / artifacts
@@ -223,11 +198,7 @@ wave — are absent from both.
   in the stream). `workflow_end` also carries a `failed_kinds` map. Branch
   retry-vs-halt on `kind`, not on the free-text `error`. See the "Failure
   kinds" section in `SCHEMA.md`.
-- A node that keeps retrying is failing its gate — inspect the
-  `gate_evaluated` events for the `score` (and, for a `dimensions:`
-  gate, per-dimension `scores` plus `dimension_thresholds` — the
-  configured per-dimension floors, so you can see which dimension
-  blocked without reading the YAML).
+- Read the node and attempt in each `gate_evaluated` JSONL event. Compare its nested `result.exit_code`, `result.text` or schema fields with the route predicate.
 - `--dry-run` traces topology without calling backends or running
   scripts; use it to confirm the graph shape before a real run.
 - `--resume` reseeds from `<workdir>/.sqrlly-checkpoint.db` and **skips
@@ -244,8 +215,8 @@ wave — are absent from both.
 
 Set `settings.defaults.agent.backend_max_retries` or `settings.defaults.llm.backend_max_retries` to absorb transient backend blips (a
 `claude exited 1`, or an overload once the model-downgrade chain has no lower
-model — at once for Codex models) by retrying the same dispatch (default two retries) with `retry_backoff` between attempts — separate from the gate
-`max_retries`. A `.md` LLM gate dispatch gets the same retry and downgrade; if
+model — at once for Codex models) by retrying the same dispatch (default two retries) with `retry_backoff` between attempts — separate from the route case’s
+`max_attempts`. A `.md` LLM gate dispatch gets the same retry and downgrade; if
 it still fails, the node fails with kind `backend_error` / `overload` (no
 score is recorded and the node body is not re-run). On `--resume`, a fan-out whose child failed re-runs ONLY that
 child: the parent re-fans and completed siblings stay frozen (no re-bill), so a
@@ -259,8 +230,7 @@ large parallel build that loses one branch resumes cheaply.
   validation error); typos halt at load instead of silently ignoring the
   key. `settings:` adopted this in v0.7.6, making it consistent with every
   other schema model. Confirm exact field names in `SCHEMA.md`.
-- **Inline-route nodes are DAG leaves** — nothing may `depends_on` a
-  node that has a `route:` block.
+- Route cases may send execution to an ancestor. Bound those loops with `max_attempts`.
 - **Subgraphs share the schema** — a subgraph `.yaml` is an ordinary
   workflow and must validate standalone.
 - **Fan-out manifests need STABLE item ids for `--resume`** — a manifest

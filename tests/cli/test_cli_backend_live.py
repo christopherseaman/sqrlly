@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -42,17 +43,17 @@ class TestJokeWorkflowCLIIntegration:
         validator = tmp_path / "validate.py"
         validator.write_text(
             "import json, sys\n"
-            "raw = sys.stdin.read().strip()\n"
+            "raw = sys.argv[1].strip()\n"
             "try:\n"
             "    data = json.loads(raw)\n"
             "    jokes = data.get('jokes', [])\n"
             "    if isinstance(jokes, list) and len(jokes) == 3 "
             "and all(isinstance(j, str) and j for j in jokes):\n"
-            "        print('1.0')\n"
+            "        sys.exit(0)\n"
             "    else:\n"
-            "        print('0.0')\n"
+            "        sys.exit(1)\n"
             "except Exception:\n"
-            "    print('0.0')\n"
+            "    sys.exit(1)\n"
         )
 
         config = make_config(
@@ -61,12 +62,7 @@ class TestJokeWorkflowCLIIntegration:
                     "id": "generate",
                     "name": "Generate Jokes",
                     "llm": "generate.md",
-                    "evaluation": {
-                        "validator": str(validator),
-                        "threshold": 1.0,
-                        "blocking": True,
-                        "max_retries": 2,
-                    },
+                    "eval": {"run": [sys.executable, str(validator), "{{output}}"]},
                 },
                 {
                     "id": "select",
@@ -84,7 +80,7 @@ class TestJokeWorkflowCLIIntegration:
 
             assert "generate" in result["completed_nodes"]
             assert "select" in result["completed_nodes"]
-            assert result["evaluations"]["generate"][-1]["result"]["score"] == 1.0
+            assert result["evaluations"]["generate"][-1]["result"]["exit_code"] == 0
 
             gen_output = result["node_outputs"]["generate"]
             data = json.loads(gen_output)
@@ -141,3 +137,58 @@ async def test_codex_llm_disables_configured_mcp(tmp_path, monkeypatch):
     assert [(server["name"], server["enabled"]) for server in json.loads(configured)] == [
         ("test.server", False)
     ]
+
+
+@pytest.mark.cli
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_schema_field_reaches_route_and_template(tmp_path, provider):
+    from sqrlly.schema.models import load_workflow
+
+    (tmp_path / "field.json").write_text('{"type":"integer"}')
+    (tmp_path / "count.json").write_text(json.dumps({
+        "type": "object", "additionalProperties": False,
+        "properties": {"count": {"$ref": "field.json"}}, "required": ["count"],
+    }))
+    workflow = tmp_path / "workflow.yaml"
+    workflow.write_text("""
+name: Structured count
+nodes:
+  - id: count_items
+    llm:
+      text: Return a count of exactly seven.
+      provider: PROVIDER
+    timeout: 90
+    outputs: {schema: count.json}
+  - id: choose
+    depends_on: [count_items]
+    run: [echo, '{{count_items.count}}']
+    route:
+      - when: count_items.count == 7
+        then: show
+      - else: wrong
+  - id: show
+    run: [echo, correct]
+  - id: wrong
+    run: ['false']
+""".replace("PROVIDER", provider))
+    config = load_workflow(workflow)
+    executor = DispatchExecutor(workdir=str(tmp_path), settings=config.settings)
+    graph = build_workflow_graph(config, executor)
+    state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+    assert state["node_structured_outputs"]["count_items"] == {"count": 7}
+    assert state["node_outputs"]["choose"].strip() == "7"
+    assert state["node_outputs"]["show"].strip() == "correct"
+    assert "wrong" not in state["completed_nodes"]
+
+
+@pytest.mark.cli
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_provider_returns_array_schema(tmp_path, provider):
+    schema = tmp_path / "array.json"
+    schema.write_text(json.dumps({"type": "array", "items": {"type": "integer"}}))
+    backend = create_backend(provider, output_schema=schema)
+    result = await backend.send_prompt("Return the single-item array [7].", None, str(tmp_path), timeout=90)
+    assert result.structured_output == [7]
+    assert json.loads(result.output) == [7]

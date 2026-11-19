@@ -14,6 +14,7 @@ from sqrlly.cli.init import (
 from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.compile.lint import collect_warnings
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
+from sqrlly.runtime.gates import matching_output_files
 from sqrlly.runtime.foreman import ForemanExecutor
 from sqrlly.runtime.runner import run_workflow
 from sqrlly.runtime.state import make_initial_state
@@ -70,7 +71,7 @@ def _run_artifact_summary(
     artifacts. The live renderer shows only per-node status, so this
     epilogue is the one place a normal terminal run surfaces locations.
 
-    - output: promoted files declared via top-level `output_contract`s that
+    - output: promoted files declared via top-level `outputs`s that
       actually exist on disk; otherwise a pointer to run state + `--log`.
     - log: the resolved `--log` path, or how to capture one.
     - artifacts: the checkpoint DB and the foreman worktree pool, each
@@ -86,15 +87,14 @@ def _run_artifact_summary(
     seen: set[Path] = set()
     produced: list[Path] = []
     for node in config.nodes:
-        if node.output_contract is None:
+        if node.outputs is None:
             continue
-        for rel in node.output_contract.required_paths():
-            p = (wd / rel).resolve()
-            if p in seen:
-                continue
-            seen.add(p)
-            if p.exists():
-                produced.append(p)
+        for rel in node.outputs.files:
+            for path in sorted(matching_output_files(rel, str(wd))):
+                p = path.resolve()
+                if p not in seen:
+                    seen.add(p)
+                    produced.append(p)
     lines = ["where to find things:"]
     if produced:
         lines.append(row("output:", ", ".join(str(p) for p in produced)))
@@ -399,6 +399,7 @@ async def _seed_state(
             "_snapshot_reexecute": prior_failed | (prior_completed - skip),
         }
         if rerun_all:
+            state.pop("_cold_entry", None)
             source = "all nodes (rerun-all)"
         elif resume_from:
             source = ", ".join(sorted(resume_from))
@@ -432,6 +433,7 @@ async def _seed_state(
         )
         state["completed_nodes"] = set(skip)
         state["_resume_skip"] = set(skip)
+        state["_cold_entry"] = entry
         click.echo(
             f"Cold start at {entry!r}: running "
             f"{len(all_ids - skip)} node(s) ({entry} + downstream); "
@@ -460,10 +462,15 @@ async def _execute_workflow(
     log_file: str | None = None,
 ) -> dict:
     if dry_run:
-        compiled = build_workflow_graph(config, None, logger=logger)
+        compiled = build_workflow_graph(config, None, logger=logger, entry=entry)
         state = make_initial_state(
             workflow_name=config.name, workdir=workdir, dry_run=True,
         )
+        if entry is not None:
+            from sqrlly.compile.resume import compute_skip_set
+            state["_cold_entry"] = entry
+            skip = compute_skip_set(config, {node.id for node in config.nodes}, set(), {entry})
+            state.update(completed_nodes=skip, _resume_skip=skip)
         return await run_workflow(compiled, state, config, logger=logger)
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -528,7 +535,7 @@ async def _execute_workflow(
             if isinstance(executor_obj, ForemanExecutor):
                 executor_obj.reexecute.update(state.pop("_snapshot_reexecute", set()))
             compiled = build_workflow_graph(
-                config, executor_obj, checkpointer=cp, logger=logger,
+                config, executor_obj, checkpointer=cp, logger=logger, entry=entry or state.get("_cold_entry"),
             )
             result = await run_workflow(
                 compiled, state, config,

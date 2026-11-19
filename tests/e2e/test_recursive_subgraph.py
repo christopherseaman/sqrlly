@@ -177,17 +177,7 @@ async def test_subgraph_internal_failure_surfaces_to_parent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_subgraph_isolation_no_parent_state_leak(tmp_path):
-    """Subgraph never sees parent's `node_outputs` from siblings.
-
-    A subgraph node's template can reference both `{{from_parent}}`
-    (projected via `inputs:`) and `{{parent_only}}` (a parent sibling
-    that was NOT projected). Only the projected name should resolve;
-    the unprojected name must render empty. Observable signal: the
-    subgraph runs a script whose Jinja-rendered args print both
-    values literally — the dispatcher's script-args rendering happens
-    against the subgraph's context, so the script's stdout is the
-    direct evidence of what was in scope.
-    """
+    """Only explicitly passed parent inputs may appear in a child workflow."""
     _yaml(tmp_path / "sub.yaml", {
         "name": "Sub",
         "nodes": [{
@@ -216,20 +206,8 @@ async def test_subgraph_isolation_no_parent_state_leak(tmp_path):
     raw = yaml.safe_load((tmp_path / "parent.yaml").read_text())
     parent_config = Graph(**raw)
     executor = DispatchExecutor(workdir=str(tmp_path))
-    graph = build_workflow_graph(parent_config, executor, _base_dir=tmp_path)
-    result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-    assert "sub_ref" in result["completed_nodes"]
-    sub_output = result["node_outputs"]["sub_ref"]
-    # Projected input is in scope inside the subgraph...
-    assert "input=explicit-input" in sub_output
-    # ...but the parent sibling's output is NOT — `{{parent_only}}`
-    # renders to empty because subgraph state starts fresh.
-    assert "leak=|" in sub_output, (
-        f"got {sub_output!r}; expected `leak=|` (empty). If "
-        f"`leak=PARENT_VALUE|` appeared, parent state leaked across "
-        f"the subgraph boundary."
-    )
+    with pytest.raises(ValueError, match="parent_only is not an ancestor or available input"):
+        build_workflow_graph(parent_config, executor, _base_dir=tmp_path)
 
 
 def test_depth_limit_enforced(tmp_path):

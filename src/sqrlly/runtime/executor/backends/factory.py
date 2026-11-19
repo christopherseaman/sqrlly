@@ -1,10 +1,13 @@
 """Translate workflow tool policies to provider CLI arguments."""
+from pathlib import Path
+
 from sqrlly.runtime.executor.backends.cli import CLIBackend
 
 
 def create_backend(
     provider: str = "openai", *, tools: str | list[str] | None = None,
     cli_args: list[str] | None = None, safe_mode: bool = False,
+    output_schema: Path | dict | bool | None = None,
 ) -> CLIBackend:
     if provider == "anthropic":
         if isinstance(tools, list):
@@ -16,7 +19,7 @@ def create_backend(
             args = ["--permission-mode", modes[tools]]
         if safe_mode:
             args.append("--safe-mode")
-        return CLIBackend(("claude", "-p"), cli_args=[*args, *(cli_args or [])])
+        return CLIBackend(("claude", "-p"), cli_args=[*args, *(cli_args or [])], output_schema=output_schema)
 
     modes = {None: "read-only", "read": "read-only", "edit": "workspace-write",
              "full": "danger-full-access"}
@@ -36,4 +39,5 @@ def create_backend(
     return CLIBackend(
         ("codex", "exec", "--skip-git-repo-check"),
         cli_args=[*args, *(cli_args or [])], prompt_arg="-", disable_codex_mcp=tools is None,
+        output_schema=output_schema,
     )

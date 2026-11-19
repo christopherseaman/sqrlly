@@ -7,6 +7,8 @@ All tests use real subprocess execution via DispatchExecutor.
 import json
 import shutil
 
+import sys
+
 import pytest
 
 from sqrlly.compile.graph import build_workflow_graph
@@ -49,7 +51,7 @@ def dynamic_parent(id, manifest_items, *, template=None,
         **kwargs,
     }
     if evaluation:
-        node["evaluation"] = evaluation
+        node["eval"] = evaluation
     if final_nodes:
         node["fan_out"]["final_nodes"] = final_nodes
     return node
@@ -295,13 +297,12 @@ class TestDynamicGates:
         """Parent gate passes -> children execute."""
         (tmp_path / "template.md").write_text("Sub {{id}}")
         script = tmp_path / "pass.py"
-        script.write_text("print(1.0)")
+        script.write_text("print('{\"score\":1.0}')")
 
         items = [{"id": "a"}, {"id": "b"}]
         config = make_config([
             dynamic_parent("p", items,
-                           evaluation={"validator": str(script),
-                                         "threshold": 0.8}),
+                           evaluation={"run": [sys.executable, str(script)]}),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
         graph = build_workflow_graph(config, executor)
@@ -322,7 +323,7 @@ class TestDynamicGates:
         score. This is the timing the unit Send-payload pin can't prove (that
         one seeds state directly)."""
         script = tmp_path / "pass.py"
-        script.write_text("print(1.0)")
+        script.write_text("print('{\"score\":1.0}')")
         items = [{"id": "a"}, {"id": "b"}]
         config = make_config([
             dynamic_parent(
@@ -330,7 +331,7 @@ class TestDynamicGates:
                 template={
                     "run": [_ECHO, "-n", "score={{evals.p.score}}"],
                 },
-                evaluation={"validator": str(script), "threshold": 0.8},
+                evaluation={"run": [sys.executable, str(script)]},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -349,17 +350,15 @@ class TestDynamicGates:
 
     @pytest.mark.asyncio
     async def test_parent_gate_fail_blocks_fanout(self, tmp_path):
-        """Parent blocking gate fails -> no children run."""
+        """An exhausted parent retry prevents dispatching any children."""
         (tmp_path / "template.md").write_text("Sub {{id}}")
         script = tmp_path / "fail.py"
-        script.write_text("print(0.1)")
+        script.write_text("raise SystemExit(1)")
 
         items = [{"id": "a"}]
         config = make_config([
             dynamic_parent("p", items,
-                           evaluation={"validator": str(script),
-                                         "threshold": 0.8, "blocking": True,
-                                         "max_retries": 0}),
+                           evaluation={"run": [sys.executable, str(script)]}),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
         graph = build_workflow_graph(config, executor)
@@ -372,7 +371,7 @@ class TestDynamicGates:
     async def test_template_gate_scores_recorded(self, tmp_path):
         """Template quality gate scores recorded per child."""
         script = tmp_path / "score.py"
-        script.write_text("print(0.9)")
+        script.write_text("print('{\"score\":0.9}')")
 
         items = [{"id": "x"}, {"id": "y"}]
         config = make_config([{
@@ -382,10 +381,7 @@ class TestDynamicGates:
             "fan_out": {
                 "template": {
                     "run": [_ECHO, "-n", "child-{{id}}"],
-                    "evaluation": {
-                        "validator": str(script),
-                        "threshold": 0.5,
-                    },
+                    "eval": {"run": [sys.executable, str(script)]},
                 },
             },
         }])
@@ -396,30 +392,26 @@ class TestDynamicGates:
 
         assert result["evaluations"]["p::x"][-1]["result"]["score"] == 0.9
         assert result["evaluations"]["p::y"][-1]["result"]["score"] == 0.9
-        # Stage 3b: child gates also flow through EvaluationRecord writes.
         assert len(result["evaluations"]["p::x"]) >= 1
         assert len(result["evaluations"]["p::y"]) >= 1
 
     @pytest.mark.asyncio
     async def test_branch_gate_triggers_retry(self, tmp_path):
-        """Branch template gate with max_retries=2: validator fails
-        first call, passes on retry. Proves each child branch keeps
-        its own invocation counter via `_fan_out_item`-keyed state.
-        """
+        """Each child retries its own failed eval and succeeds on its second attempt."""
         # Per-item counter files so each item retries independently.
         (tmp_path / "cnt-x.txt").write_text("0")
         (tmp_path / "cnt-y.txt").write_text("0")
         validator = tmp_path / "validator.py"
         validator.write_text(
             'import os, sys, re\n'
-            'output = sys.stdin.read()\n'
+            'output = sys.argv[1]\n'
             '# Derive the item id from the node output (echo emits "p::ID").\n'
             'm = re.search(r"p::([a-z])", output)\n'
             'item = m.group(1) if m else "x"\n'
             f'path = os.path.join({str(tmp_path)!r}, f"cnt-{{item}}.txt")\n'
             'n = int(open(path).read())\n'
             'open(path, "w").write(str(n+1))\n'
-            'print(0.9 if n >= 1 else 0.3)\n'
+            'print(\'{\"score\":0.9}\'); sys.exit(n < 1)\n'
         )
 
         items = [{"id": "x"}, {"id": "y"}]
@@ -430,12 +422,7 @@ class TestDynamicGates:
             "fan_out": {
                 "template": {
                     "run": [_ECHO, "-n", "p::{{id}}"],
-                    "evaluation": {
-                        "validator": str(validator),
-                        "threshold": 0.5,
-                        "blocking": True,
-                        "max_retries": 2,
-                    },
+                    "eval": {"run": [sys.executable, str(validator), "{{output}}"]},
                 },
             },
         }])
@@ -446,10 +433,10 @@ class TestDynamicGates:
         # Each child should have TWO evaluation records (fail then pass).
         assert "p::x" in result["completed_nodes"]
         assert "p::y" in result["completed_nodes"]
-        invs_x = [r["invocation"] for r in result["evaluations"]["p::x"]]
-        invs_y = [r["invocation"] for r in result["evaluations"]["p::y"]]
-        assert invs_x == [0, 1], f"expected invocations [0, 1], got {invs_x}"
-        assert invs_y == [0, 1], f"expected invocations [0, 1], got {invs_y}"
+        invs_x = [r["attempt"] for r in result["evaluations"]["p::x"]]
+        invs_y = [r["attempt"] for r in result["evaluations"]["p::y"]]
+        assert invs_x == [1, 2], f"expected attempts [1, 2], got {invs_x}"
+        assert invs_y == [1, 2], f"expected attempts [1, 2], got {invs_y}"
         # Final record is the pass.
         assert result["evaluations"]["p::x"][-1]["result"]["score"] == 0.9
         assert result["evaluations"]["p::y"][-1]["result"]["score"] == 0.9

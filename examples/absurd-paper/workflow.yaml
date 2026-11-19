@@ -7,42 +7,31 @@ nodes:
   - id: choose_topic
     name: Synthesize Absurd Research Domain
     depends_on: [seed_inspiration]
-    evaluation:
-      validator: gates/choose_topic_eval.md
-      blocking: true
-      max_retries: 2
-      dimensions:
-      - field: absurdity
-        min: 0.7
-      - field: specificity
-        min: 0.7
-      - field: methodological_hook
-        min: 0.6
+    eval:
+      llm: ../gates/choose_topic_eval.md
+      outputs: {schema: gates/choose_topic_eval.json}
+    route:
+      - when: eval.absurdity < 0.7 or eval.specificity < 0.7 or eval.methodological_hook < 0.6
+        then: retry
+        max_attempts: 3
     llm: choose_topic.md
 
   - id: abstract
     name: Write Abstract
     depends_on: [choose_topic]
-    evaluation:
-      validator: gates/abstract_multi_dim.md
-      blocking: false
-      max_retries: 1
-      dimensions:
-      - field: rigor
-        min: 0.7
-      - field: humor
-        min: 0.6
-      - field: buzzwords
-        min: 0.5
+    eval:
+      llm: ../gates/abstract_multi_dim.md
+      outputs: {schema: gates/abstract_multi_dim.json}
+    route:
+      - when: attempt < 2 and (eval.rigor < 0.7 or eval.humor < 0.6 or eval.buzzwords < 0.5)
+        then: retry
     llm: abstract.md
 
   - id: outline
     name: Section Outline
     depends_on: [abstract]
-    evaluation:
-      validator: gates/outline_json.py
-      threshold: 1.0
-      blocking: true
+    eval:
+      run: [python3, '{{workflow_dir}}/gates/outline_json.py', '{{output}}']
     llm: outline.md
 
   - id: intro
@@ -80,14 +69,11 @@ nodes:
   - id: render_pdf
     name: Render Paper to PDF
     depends_on: [paper]
-    output_contract:
-      base_directory: output
-      required_files:
-      - paper.pdf
+    outputs:
+      files: [output/paper.pdf]
     run: [uv, run, --script, '{{workflow_dir}}/scripts/render_pdf.py', output/paper.md, output/paper.pdf]
 settings:
   preamble_file: preamble.md
-  max_retries: 2
   default_timeout: 180.0
   retry_backoff:
   - 5.0

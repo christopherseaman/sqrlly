@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from dataclasses import asdict
 import logging
 import os
 import subprocess
@@ -12,7 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sqrlly.runtime.gates import scaffold_output_directory
+from pydantic import TypeAdapter
+
 from sqrlly.runtime.memory_gate import POLL_INTERVAL_S, wait_for_memory
 from sqrlly.runtime.result import ExecutionResult, NodeExecutor, PromptBackend
 from sqrlly.runtime.snapshots import SnapshotRun
@@ -20,6 +20,7 @@ from sqrlly.runtime.worktree_share import ensure_setup, materialize_shares
 from sqrlly.schema.models import Node, Settings
 
 logger = logging.getLogger(__name__)
+_DISPATCH_RECORD = TypeAdapter(ExecutionResult | None)
 
 
 def _git(path: Path, *args: str) -> str:
@@ -163,8 +164,6 @@ class ForemanExecutor:
         isolated = node.effective_worktree(settings) == "isolated"
         try:
             dest = await self.acquire_branch_worktree(node.id, settings) if isolated else str(workdir or self._base)
-            if node.output_contract:
-                scaffold_output_directory(node.output_contract, dest)
             if not isolated:
                 return await self._inner.execute(node, context, workdir=dest, settings_override=settings_override)
 
@@ -173,27 +172,24 @@ class ForemanExecutor:
             record = self._owner(tree).with_name("sqrlly-dispatch.json")
             cached = None
             if record.exists():
-                cached = json.loads(record.read_text())
+                cached = _DISPATCH_RECORD.validate_json(record.read_bytes())
                 if cached is None:
                     raise RuntimeError(f"Interrupted dispatch has no recorded result; retained {tree}. Start a fresh run after inspecting it.")
             replay = self._recover and key not in self._dispatched and key not in self.reexecute
             self._dispatched.add(key)
-            if replay and cached and cached["success"]:
-                cached["retained_refs"] = set(cached["retained_refs"])
-                result = ExecutionResult(**cached)
+            if replay and cached and cached.success:
+                result = cached
             else:
                 # A crash before a result is recorded leaves the tree available for inspection.
                 record.write_text("null")
                 result = await self._inner.execute(node, context, workdir=dest, settings_override=settings_override)
                 result.worktree = dest
-                data = asdict(result)
-                data["retained_refs"] = sorted(result.retained_refs)
                 temporary = record.with_suffix(".tmp")
-                temporary.write_text(json.dumps(data))
+                temporary.write_bytes(_DISPATCH_RECORD.dump_json(result))
                 os.replace(temporary, record)
             self.snapshots.capture_out(key, str(tree), exclude_paths=self._shares(settings))
             return result
-        except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+        except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as exc:
             return ExecutionResult(success=False, error=str(exc), error_kind="infra")
 
     def settle(self, node: Node, settings: Settings, ids: list[str]) -> set[str]:
@@ -204,7 +200,7 @@ class ForemanExecutor:
             self.snapshots.capture_out(key, str(tree), exclude_paths=self._shares(settings))
         retained = set()
         if trees and node.effective_promote(settings):
-            globs = node.output_contract.required_paths() if node.output_contract else None
+            globs = node.outputs.files if node.outputs else None
             plan = self.snapshots.promote([(key, globs) for key, tree in trees], settings.on_promote_conflict,
                                           excludes=settings.promote_exclude, prefix=self._prefix.as_posix() if self._prefix.parts else "")
             if plan.conflicts and settings.on_promote_conflict == "warn":

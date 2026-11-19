@@ -4,7 +4,7 @@
 
 - **Nodes** execute one of: an LLM prompt (agent-with-tools or text-only), an interpreted script (`.py` / `.js` / `.ts` / `.sh`), a binary, or a recursive subgraph.
 - **Local context** — agents in a Git repository start from the current files, including uncommitted changes.
-- **Quality gates** — a script or LLM scorer judges output; failing gates re-run the node with feedback injected, up to a configurable retry budget.
+- **Evaluation** measures command output or prompts an agent. Ordered route cases decide when to retry, escalate or fail.
 - **Branching** — `route:` sends flow conditionally; `fan_out:` spawns parallel branches over a JSON manifest.
 - **Fault-recovery resume** — state checkpoints to SQLite; `--resume` re-runs seeded with the prior run's state and clears failures to retry.
 
@@ -61,11 +61,8 @@ nodes:
   - id: generate
     name: "Generate Jokes"
     llm: generate.md
-    evaluation:
-      validator: "gates/validate_jokes.py"
-      threshold: 1.0
-      blocking: true
-      max_retries: 2
+    eval:
+      run: [python3, "{{workflow_dir}}/gates/validate_jokes.py", "{{output}}"]
 
   - id: select
     name: "Select Best Joke"
@@ -85,7 +82,7 @@ sqrlly run examples/jokes/workflow.yaml --log run.jsonl
 
 - A node's kind selects its operation. Use `agent` for tools, `llm` for text, `run` for argv and `workflow` for a child graph.
 - **Jinja2 templates** — prompt files are full Jinja2; `{{generate}}` interpolates an upstream node's output; `{% if %}` / `{% for %}` / filters all work.
-- **Retry feedback loop** — when a gate scores below `threshold`, the next attempt's context gets `{{_retry_reason}}` auto-populated with the previous score, per-dimension thresholds, and feedback.
+- Route cases can retry the node, escalate to another node, or fail. Each attempt records the eval output for the next prompt.
 - **Worktree isolation** — agents and repeated commands run in their own Git worktrees. Their changes reach the base when the node or fan-out settles, before its dependents run.
 - **Checkpointed state** — runs persist to `<workdir>/.sqrlly-checkpoint.db` (LangGraph `AsyncSqliteSaver`); `--resume` re-runs seeded with that state, clearing failed nodes to retry. Completed nodes skip by default (fault-recovery re-run, not full replay) unless `--rerun-all` is set. For fan-out branches: failed children re-run, but completed siblings stay frozen (no re-billing).
 - **Recursive subgraphs** — a `.yaml` URL runs another sqrlly workflow; the same file works standalone or as a subgraph reference.
@@ -142,7 +139,7 @@ Render any example's interactive view with `sqrlly view <workflow.yaml>`; `examp
 |---|---|
 | [`examples/jokes/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/jokes/workflow.yaml) | Minimal: prompt + script gate + select. Start here. |
 | [`examples/route_classify/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/route_classify/workflow.yaml) | Inline `route:` case ladder over structured state. |
-| [`examples/pipeline_style/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/pipeline_style/workflow.yaml) | `route: { goto: <next> }` forward-edge authoring; a linear pipeline. |
+| [`examples/pipeline_style/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/pipeline_style/workflow.yaml) | `route: [{then: <next>}]` forward-edge authoring; a linear pipeline. |
 | [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Full pipeline: prompts, multi-dim quality gates, a subgraph, and a rendered PDF. Try `sqrlly init --example absurd-paper`. |
 | [`examples/wave_planner/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/wave_planner/workflow.yaml) | Wave-driven dynamic-task pattern — `goto:` loop-back to a fan-out parent. |
 

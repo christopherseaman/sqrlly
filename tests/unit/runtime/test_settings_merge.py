@@ -18,24 +18,24 @@ from sqrlly.schema.models import Settings
 
 
 class TestSingleFieldOverride:
-    def test_child_max_retries_wins(self):
-        parent = Settings(max_retries=3)
-        child = Settings(max_retries=5)
+    def test_child_max_parallel_jobs_wins(self):
+        parent = Settings(max_parallel_jobs=3)
+        child = Settings(max_parallel_jobs=5)
         merged = merge_settings(parent, child)
-        assert merged.max_retries == 5
+        assert merged.max_parallel_jobs == 5
 
     def test_unset_child_inherits_parent(self):
-        parent = Settings(max_retries=5, default_timeout=60.0)
+        parent = Settings(max_parallel_jobs=5, default_timeout=60.0)
         child = Settings()  # nothing authored
         merged = merge_settings(parent, child)
-        assert merged.max_retries == 5
+        assert merged.max_parallel_jobs == 5
         assert merged.default_timeout == 60.0
 
     def test_partial_child_keeps_parent_for_other_fields(self):
-        parent = Settings(max_retries=5, default_timeout=300.0)
-        child = Settings(max_retries=10)
+        parent = Settings(max_parallel_jobs=5, default_timeout=300.0)
+        child = Settings(max_parallel_jobs=10)
         merged = merge_settings(parent, child)
-        assert merged.max_retries == 10
+        assert merged.max_parallel_jobs == 10
         assert merged.default_timeout == 300.0
 
 
@@ -44,10 +44,10 @@ class TestExplicitDefaultStillWins:
     must still beat parent — author intent, not absence."""
 
     def test_child_explicitly_resets_to_default(self):
-        parent = Settings(max_retries=5)
-        child = Settings(max_retries=3)  # 3 == schema default
+        parent = Settings(max_parallel_jobs=5)
+        child = Settings(max_parallel_jobs=4)  # 4 == schema default
         merged = merge_settings(parent, child)
-        assert merged.max_retries == 3
+        assert merged.max_parallel_jobs == 4
 
 
 def test_worktree_inherits_and_overrides_per_kind():
@@ -65,16 +65,16 @@ class TestComposesNested:
     set wins per-field."""
 
     def test_three_level_inheritance(self):
-        top = Settings(max_retries=2, default_timeout=60.0, preamble_file="top")
+        top = Settings(max_parallel_jobs=2, default_timeout=60.0, preamble_file="top")
         mid = Settings(preamble_file="mid")
-        bot = Settings(max_retries=10)
+        bot = Settings(max_parallel_jobs=10)
 
         # Each layer merges with the result of the previous merge.
         l1 = merge_settings(top, mid)
         l2 = merge_settings(l1, bot)
 
         assert l2.preamble_file == "mid"  # mid's win held through l2
-        assert l2.max_retries == 10          # bot wins
+        assert l2.max_parallel_jobs == 10          # bot wins
         assert l2.default_timeout == 60.0    # top's flowed through
 
 
@@ -94,11 +94,11 @@ class TestRoundTripConstraint:
     refactors don't accidentally use a round-trip path."""
 
     def test_fields_set_preserved_through_kwargs(self):
-        s = Settings(max_retries=7)
-        assert "max_retries" in s.model_fields_set
+        s = Settings(max_parallel_jobs=7)
+        assert "max_parallel_jobs" in s.model_fields_set
         # Reconstruction via kwargs preserves the set.
         s2 = Settings(**s.model_dump(exclude_unset=True))
-        assert "max_retries" in s2.model_fields_set
+        assert "max_parallel_jobs" in s2.model_fields_set
 
     def test_nested_defaults_preserve_sibling_options(self):
         parent = Settings(defaults={"agent": {"model": "sonnet", "backend_max_retries": 4}})

@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.compile.nodes import (
+    assemble_success_update,
     _make_execution_node,
     build_context,
-    run_evaluation_and_outcome,
+    bind_output,
+    settle,
     run_with_timeout,
-    inject_retry_reason,
     make_failure_update,
 )
 from sqrlly.runtime.executor.prompt import retry_delay
@@ -42,11 +44,15 @@ def _merge_updates(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any
 
 def fan_child_node(parent: Node, settings: Settings) -> Node:
     template = parent.fan_out.template
-    child = Node(id=parent.id, evaluation=template.evaluation,
-                 output_contract=parent.output_contract,
-                 **parent.model_dump(include={"worktree", "promote"}, exclude_none=True),
-                 **({template.kind: getattr(template, template.kind)} if template.kind else {}))
-    child.worktree = child.effective_worktree(settings, fan_child=True)
+    options = {}
+    if template.kind in ("agent", "run"):
+        options = parent.model_dump(include={"worktree", "promote"}, exclude_none=True)
+    child = Node(
+        id=parent.id, eval=template.eval, route=template.route, outputs=template.outputs,
+        **options, **({template.kind: getattr(template, template.kind)} if template.kind else {}),
+    )
+    if template.kind in ("agent", "run"):
+        child.worktree = child.effective_worktree(settings, fan_child=True)
     return child
 
 
@@ -81,7 +87,6 @@ def _make_fan_out_node(
     settings = effective_settings or config.settings
     template = parent_node.fan_out.template
     timeout = parent_node.effective_timeout(settings)
-    max_retries = parent_node.effective_max_retries(settings)
     retry_backoff = settings.retry_backoff
 
     from sqrlly.compile.subgraph import make_fan_out_subgraph_invoker
@@ -139,11 +144,12 @@ def _make_fan_out_node(
             "id": child_id, "name": f"{parent_node.name} - {item.get('name', item_id)}",
         })
 
+        synthetic_node._ancestors = [*parent_node._ancestors, parent_node.id]
+
         # Build context up front — dep outputs + per-item manifest fields
         # do not change across retries within this node invocation.
         base_context = build_context(parent_node, state)
-        parent_output = state.get("node_outputs", {}).get(parent_node.id, "")
-        base_context[parent_node.id] = parent_output
+        base_context[parent_node.id] = bind_output(state, parent_node.id)
         for key, value in item.items():
             base_context[key] = str(value)
 
@@ -151,59 +157,29 @@ def _make_fan_out_node(
         # branch. Starts from the caller-provided state so reducers at the
         # super-step boundary see the whole history.
         update: dict[str, Any] = {}
-        history: list[dict[str, Any]] = list(
-            state.get("evaluations", {}).get(child_id, [])
-        )
-        retries_local = state.get("retries", {}).get(child_id, 0)
-
         while True:
-            context = dict(base_context)
-            if retries_local > 0:
-                delay = retry_delay(retries_local, retry_backoff)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                synthetic_state: WorkflowState = {
-                    **state,
-                    "evaluations": _synth_evaluations(
-                        state.get("evaluations", {}), child_id, history
-                    ),
-                    "retries": {
-                        **state.get("retries", {}),
-                        child_id: retries_local,
-                    },
-                }
-                context = inject_retry_reason(
-                    context, synthetic_node, synthetic_state,
-                    max_retries, node_id=child_id,
-                )
+            current = _merge_updates(state, update)
+            context = {**base_context, **build_context(synthetic_node, current)}
+            retries = current.get("retries", {}).get(child_id, 0)
+            if retries:
+                await asyncio.sleep(retry_delay(retries, retry_backoff))
 
-            if sub_invoker is not None:
-                # Subgraph template: each Send branch runs the subgraph
-                # with rendered inputs and surfaces its terminal output
-                # the same way an executor would surface stdout / prompt
-                # text. Timeout enforcement on the per-child subgraph
-                # uses asyncio.wait_for at the same boundary as the
-                # executor case for symmetry. The branch's child_id
-                # (e.g. ``reviewer_pool::maverick``) becomes the JSONL
-                # prefix so each per-Send subgraph's internals surface
-                # under their own namespace.
-                exec_result = await run_with_timeout(
-                    sub_invoker(
-                        context,
-                        state.get("workdir", "."),
-                        state.get("dry_run", False),
+            def execute(ctx):
+                if sub_invoker is not None:
+                    invocation = sub_invoker(
+                        ctx, state.get("workdir", "."), state.get("dry_run", False),
                         prefix=child_id,
-                    ),
-                    timeout,
-                )
-            else:
-                exec_result = await run_with_timeout(
-                    executor.execute(
-                        synthetic_node, context,
-                        settings_override=effective_settings,
-                    ),
-                    timeout,
-                )
+                    )
+                else:
+                    invocation = executor.execute(
+                        synthetic_node, ctx, settings_override=effective_settings,
+                    )
+                return run_with_timeout(invocation, timeout)
+
+            exec_result, executions = await execute_with_outputs(
+                execute, context, template.outputs, state.get("workdir", "."),
+            )
+            update["attempts"] = {child_id: current.get("attempts", {}).get(child_id, 0) + executions}
             if exec_result.retained_refs:
                 update.setdefault("retained_refs", set()).update(exec_result.retained_refs)
             if not exec_result.success:
@@ -213,68 +189,26 @@ def _make_fan_out_node(
                 ))
 
             exec_update: dict[str, Any] = {
-                "node_outputs": {child_id: exec_result.output},
+                **assemble_success_update(synthetic_node, exec_result),
                 "child_outputs": {child_id: exec_result.output},
             }
             if exec_result.worktree:
                 exec_update["node_worktrees"] = {child_id: exec_result.worktree}
             update = _merge_updates(update, exec_update)
 
-            if not template.evaluation:
+            if not (template.eval or template.route):
                 update.setdefault("completed_nodes", set()).add(child_id)
                 return update
 
-            backend = (
-                executor.get_backend(settings)
-                if hasattr(executor, "get_backend") else None
+            settlement, target = await settle(
+                synthetic_node, _merge_updates(state, update), settings, executor, context,
             )
-            # Call run_evaluation_and_outcome with a state reflecting the
-            # inline retries counter, so its own read of retries matches.
-            eval_state: WorkflowState = {
-                **state,
-                "node_worktrees": {**state.get("node_worktrees", {}), **exec_update.get("node_worktrees", {})},
-                "retries": {
-                    **state.get("retries", {}),
-                    child_id: retries_local,
-                },
-            }
-            eval_update = await run_evaluation_and_outcome(
-                synthetic_node, config, eval_state, exec_result.output, timeout,
-                backend=backend, node_id=child_id, history=history,
-                effective_settings=effective_settings,
-            )
-            update = _merge_updates(update, eval_update)
-
-            new_record = eval_update.get("evaluations", {}).get(child_id, [])
-            history = history + list(new_record)
-
-            if child_id in eval_update.get("completed_nodes", set()):
+            update = _merge_updates(update, settlement)
+            if target != "retry":
                 return update
-            if child_id in eval_update.get("failed_nodes", set()):
-                return update
-
-            # Retry outcome — increment and loop.
-            bumped = eval_update.get("retries", {}).get(child_id)
-            if bumped is None:
-                # Defensive: no retry signal → treat as terminal to avoid infinite loop.
-                return update
-            retries_local = bumped
 
     node_fn.__name__ = f"branch_{parent_node.id}"
     return node_fn
-
-
-def _synth_evaluations(
-    existing: dict[str, list[dict[str, Any]]],
-    key: str,
-    history: list[dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-    """Return a new evaluations dict where `key` reflects the inline
-    history. Leaves other keys untouched.
-    """
-    out = {k: list(v) for k, v in existing.items()}
-    out[key] = list(history)
-    return out
 
 
 def _make_final_fan_out_node(
@@ -310,12 +244,13 @@ def _make_final_fan_out_node(
         id=node_id,
         name=final_node.name,
         description=final_node.description,
-        evaluation=final_node.evaluation,
+        eval=final_node.eval, route=final_node.route,
         depends_on=[parent_node.id],
         **({final_node.kind: getattr(final_node, final_node.kind)} if final_node.kind else {}),
-        output_contract=final_node.output_contract,
+        outputs=final_node.outputs,
     )
 
+    synthetic._ancestors = [*parent_node._ancestors, parent_node.id]
     inner = build_subgraph(synthetic) if synthetic.workflow else _make_execution_node(
         synthetic, config, executor,
         effective_settings=effective_settings,

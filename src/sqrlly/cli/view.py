@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sqrlly.compile.lint import iter_route_edges
 from sqrlly.schema.models import Graph, Node
 
 
@@ -34,14 +35,6 @@ from sqrlly.schema.models import Graph, Node
 
 
 _END_TARGET = "__end__"
-
-
-def _flatten_goto(target: str | list[str] | None) -> list[str]:
-    if target is None:
-        return []
-    if isinstance(target, str):
-        return [target]
-    return list(target)
 
 
 def _node_shape(node: Node) -> tuple[str, str]:
@@ -59,7 +52,7 @@ def _node_label(node: Node) -> str:
     """Human-readable label used inside the shape brackets.
 
     Escapes double quotes and trims the rendered name. The full
-    config (timeouts, model, eval thresholds, etc.) is rendered in
+    config (timeouts, model, eval, etc.) is rendered in
     the side panel, not on the diagram.
     """
     label = node.name or node.id
@@ -78,36 +71,20 @@ def _route_targets(graph: Graph) -> dict[str, list[tuple[str, str | None]]]:
         if not node.route:
             continue
         edges: list[tuple[str, str | None]] = []
-        if node.route.goto is not None:
-            for t in _flatten_goto(node.route.goto):
-                edges.append((t, None))
-        else:
-            for case in node.route.cases:
-                for t in _flatten_goto(case.goto):
-                    edges.append((t, case.when))
-            if node.route.else_:
-                for t in _flatten_goto(node.route.else_.goto):
-                    edges.append((t, "else"))
+        for case in node.route:
+            for target in case.targets:
+                label = "else" if case.otherwise else case.when
+                if target in ("retry", "fail"):
+                    label = f"{label}: {target}" if label else target
+                    target = node.id if target == "retry" else _END_TARGET
+                edges.append((target, label))
         if edges:
             out[node.id] = edges
     return out
 
 
-def _classify_endpoints(
-    graph: Graph,
-    routes: dict[str, list[tuple[str, str | None]]],
-) -> tuple[set[str], set[str]]:
-    """Return (entry_ids, terminal_ids).
-
-    Entry: nodes with no incoming dep edge AND no incoming route
-    edge from another node.
-    Terminal: nodes with no outgoing dep edge AND no outgoing route
-    edge to another in-graph node (route to ``__end__`` counts as
-    outgoing-to-END, not in-graph).
-
-    Caller passes pre-computed ``routes`` (from ``_route_targets``)
-    so render_mermaid can reuse the single traversal.
-    """
+def _classify_endpoints(graph: Graph) -> tuple[set[str], set[str]]:
+    """Return nodes with an entry edge and nodes that fall through to END."""
     all_ids = {n.id for n in graph.nodes}
     has_incoming: set[str] = set()
     has_outgoing: set[str] = set()
@@ -120,26 +97,17 @@ def _classify_endpoints(
             for dep in node.depends_on:
                 has_outgoing.add(dep)
 
-    # Routes contribute outgoing for the source, incoming for the
-    # target (unless target is __end__).
-    for src, edges in routes.items():
-        has_outgoing.add(src)
-        for tgt, _label in edges:
-            if tgt != _END_TARGET and tgt in all_ids:
-                has_incoming.add(tgt)
+    # A conditional route can also fall through to its static dependents or END.
+    for node in graph.nodes:
+        if any(case.when is None and case.max_attempts is None for case in node.route or []):
+            has_outgoing.add(node.id)
+    for _, _, target, is_upstream in iter_route_edges(graph):
+        if not is_upstream and target in all_ids:
+            has_incoming.add(target)
 
     entry_ids = all_ids - has_incoming
     terminal_ids = all_ids - has_outgoing
     return entry_ids, terminal_ids
-
-
-def _routes_to_end(
-    routes: dict[str, list[tuple[str, str | None]]],
-    node_id: str,
-) -> bool:
-    """True iff the node has at least one route target == ``__end__``."""
-    edges = routes.get(node_id, [])
-    return any(tgt == _END_TARGET for tgt, _label in edges)
 
 
 def render_mermaid(graph: Graph, direction: str = "TB") -> str:
@@ -160,7 +128,7 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
         )
 
     routes = _route_targets(graph)
-    entry_ids, terminal_ids = _classify_endpoints(graph, routes)
+    entry_ids, terminal_ids = _classify_endpoints(graph)
 
     # Fan-out multiplicity: children only exist at run time, so each
     # fan-out parent gets a dashed STAND-IN node for its N children
@@ -202,7 +170,7 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
         prev, prev_label = standin, '|"N→1"|'
         for final in node.fan_out.final_nodes:
             rid = _fresh(f"{node.id}__{final.id}")
-            marker = ":::gated" if final.evaluation else ""
+            marker = ":::gated" if final.eval else ""
             safe_f = (final.name or final.id).replace('"', "&quot;")
             fan_decls.append(f'        {rid}["{safe_f}"]{marker}')
             fan_edges.append(f"        {prev} -->{prev_label} {rid}")
@@ -226,7 +194,7 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
     for node in nodes_sorted:
         open_b, close_b = _node_shape(node)
         label = _node_label(node)
-        suffix = ":::gated" if node.evaluation else ""
+        suffix = ":::gated" if node.eval else ""
         lines.append(f'        {node.id}{open_b}"{label}"{close_b}{suffix}')
     lines.extend(fan_decls)
 
@@ -258,12 +226,9 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
     for entry in sorted(entry_ids):
         lines.append(f"    START --> {entry}")
     for term in sorted(terminal_ids):
-        if _routes_to_end(routes, term):
-            continue  # already routes to __end__ explicitly
         lines.append(f"    {fan_exit.get(term, term)} --> END")
 
-    # Routes that go directly to __end__: emit as edge to the END
-    # node so it's visible in the diagram.
+    # A fail destination ends this path.
     for src in sorted(routes.keys()):
         for tgt, label in routes[src]:
             if tgt != _END_TARGET:
@@ -304,21 +269,8 @@ def extract_node_config(node: Node) -> dict[str, Any]:
         cfg["timeout"] = node.timeout
     if node.kind:
         cfg[node.kind] = getattr(node, node.kind).model_dump(by_alias=True, exclude_unset=True)
-    if node.evaluation:
-        ev: dict[str, Any] = {}
-        if node.evaluation.validator:
-            ev["validator"] = node.evaluation.validator
-        if node.evaluation.threshold != 1.0:
-            ev["threshold"] = node.evaluation.threshold
-        if node.evaluation.dimensions:
-            ev["dimensions"] = [
-                {"field": d.field, "min": d.threshold}
-                for d in node.evaluation.dimensions
-            ]
-        if node.evaluation.max_retries is not None:
-            ev["max_retries"] = node.evaluation.max_retries
-        ev["blocking"] = node.evaluation.blocking
-        cfg["evaluation"] = ev
+    if node.eval:
+        cfg["eval"] = node.eval.model_dump(by_alias=True, exclude_unset=True)
     if node.fan_out:
         fo: dict[str, Any] = {}
         if node.fan_out.manifest_path:
@@ -329,27 +281,9 @@ def extract_node_config(node: Node) -> dict[str, Any]:
             fo["final_nodes"] = [n.id for n in node.fan_out.final_nodes]
         cfg["fan_out"] = fo
     if node.route:
-        rt: dict[str, Any] = {}
-        if node.route.goto is not None:
-            rt["goto"] = node.route.goto
-        if node.route.cases:
-            rt["cases"] = [
-                {"when": c.when, "goto": c.goto, "include_eval": c.include_eval}
-                for c in node.route.cases
-            ]
-        if node.route.else_:
-            rt["else"] = {
-                "goto": node.route.else_.goto,
-                "include_eval": node.route.else_.include_eval,
-            }
-        cfg["route"] = rt
-    if node.output_contract:
-        oc: dict[str, Any] = {}
-        if node.output_contract.base_directory:
-            oc["base_directory"] = node.output_contract.base_directory
-        if node.output_contract.required_files:
-            oc["required_files"] = list(node.output_contract.required_files)
-        cfg["output_contract"] = oc
+        cfg["route"] = [case.model_dump(by_alias=True, exclude_unset=True) for case in node.route]
+    if node.outputs:
+        cfg["outputs"] = node.outputs.model_dump(by_alias=True, exclude_unset=True)
     return cfg
 
 

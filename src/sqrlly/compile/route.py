@@ -18,6 +18,7 @@ from typing import Any
 
 from simpleeval import EvalWithCompoundTypes
 
+from sqrlly.runtime._json import bind_json
 from sqrlly.runtime.state import WorkflowState
 
 _BASE_SAFE_FUNCS = {
@@ -43,11 +44,11 @@ def build_route_namespace(
     defaults for nodes that haven't been evaluated keeps predicates
     from blowing up on missing-key errors.
     """
-    ns: dict[str, Any] = {}
+    ns: dict[str, Any] = bind_json(state.get("node_inputs", {}))
     structured = state.get("node_structured_outputs", {}) or {}
     outputs = state.get("node_outputs", {}) or {}
     for dep in deps:
-        ns[dep] = structured.get(dep, outputs.get(dep))
+        ns[dep] = bind_json(structured[dep]) if dep in structured else outputs.get(dep)
     ns["history"] = state.get("evaluations", {}) or {}
     ns["state"] = dict(state)
 
@@ -79,10 +80,6 @@ def build_safe_funcs(state: WorkflowState) -> dict[str, Any]:
         return records[-1].get("result", {}) or {}
 
     def passed(node_id: str) -> bool:
-        # "Settled cleanly" — landed in completed_nodes and not in
-        # failed_nodes. For evaluated nodes this means score >=
-        # threshold OR (blocking=False AND retries exhausted with
-        # pass-with-warning). For ungated nodes, just "ran without error."
         return node_id in completed and node_id not in failed
 
     def score(node_id: str) -> float:

@@ -23,7 +23,7 @@ class TestMakeInitialState:
         expected_keys = {
             "workflow_name", "completed_nodes",
             "failed_nodes", "node_outputs", "node_structured_outputs",
-            "evaluations", "retries", "child_outputs",
+            "attempts", "settled_attempts", "required_attempts", "route_context", "route_destinations", "evaluations", "retries", "child_outputs",
             "node_worktrees", "node_models", "errors", "workdir", "dry_run",
         }
         assert set(state.keys()) == expected_keys
@@ -50,21 +50,21 @@ class TestMakeInitialState:
 
 class TestMergeEvaluations:
     def test_appends_per_key(self):
-        left = {"p1": [{"invocation": 0, "result": {}, "timestamp": "t1"}]}
-        right = {"p1": [{"invocation": 1, "result": {}, "timestamp": "t2"}]}
+        left = {"p1": [{"attempt": 1, "result": {}, "timestamp": "t1"}]}
+        right = {"p1": [{"attempt": 2, "result": {}, "timestamp": "t2"}]}
         merged = _merge_evaluations(left, right)
         assert len(merged["p1"]) == 2
-        assert [r["invocation"] for r in merged["p1"]] == [0, 1]
+        assert [r["attempt"] for r in merged["p1"]] == [1, 2]
 
     def test_does_not_mutate_inputs(self):
-        left = {"p1": [{"invocation": 0, "result": {}, "timestamp": "t"}]}
-        right = {"p1": [{"invocation": 1, "result": {}, "timestamp": "t"}]}
+        left = {"p1": [{"attempt": 1, "result": {}, "timestamp": "t"}]}
+        right = {"p1": [{"attempt": 2, "result": {}, "timestamp": "t"}]}
         _merge_evaluations(left, right)
         assert len(left["p1"]) == 1
         assert len(right["p1"]) == 1
 
     def test_disjoint_keys_merge(self):
-        left = {"p1": [{"invocation": 0, "result": {}, "timestamp": "t"}]}
-        right = {"p2": [{"invocation": 0, "result": {}, "timestamp": "t"}]}
+        left = {"p1": [{"attempt": 1, "result": {}, "timestamp": "t"}]}
+        right = {"p2": [{"attempt": 1, "result": {}, "timestamp": "t"}]}
         merged = _merge_evaluations(left, right)
         assert set(merged.keys()) == {"p1", "p2"}

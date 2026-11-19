@@ -39,3 +39,20 @@ def extract_json(text: str, *, objects_only: bool = False) -> str:
         if start <= end:
             return t[start : end + 1]
     return t
+
+
+class _JsonObject(dict):
+    """Let template and predicate attribute lookup prefer authored JSON keys."""
+
+    def __getattribute__(self, name):
+        if not name.startswith("__") and name in self:
+            return self[name]
+        return super().__getattribute__(name)
+
+
+def bind_json(value):
+    if isinstance(value, dict):
+        return _JsonObject((key, bind_json(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return [bind_json(item) for item in value]
+    return value

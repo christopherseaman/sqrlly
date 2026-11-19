@@ -7,6 +7,8 @@ propagation rather than executor semantics.
 
 import shutil
 
+import sys
+
 import pytest
 
 from sqrlly.compile.graph import build_workflow_graph
@@ -129,14 +131,14 @@ class TestParallelExecution:
 
         pass_script = tmp_path / "pass.py"
         pass_script.write_text("import sys\nsys.stdin.read()\nprint('1.0')\n")
-        gate = {"validator": str(pass_script), "threshold": 0.5}
+        gate = {"run": [sys.executable, str(pass_script)]}
 
         mock = MockExecutor()
         config = make_config([
             cmd_phase("root"),
             cmd_phase("chain_1", depends_on=["root"]),
             cmd_phase("chain_2", depends_on=["chain_1"]),
-            cmd_phase("fast_gated", depends_on=["root"], evaluation=gate),
+            cmd_phase("fast_gated", depends_on=["root"], eval=gate),
             cmd_phase("join_node", depends_on=["chain_2", "fast_gated"]),
         ])
         graph = build_workflow_graph(config, mock)
@@ -219,10 +221,7 @@ class TestFailureHandling:
 class TestGateIntegration:
     @pytest.mark.asyncio
     async def test_multi_retry_then_pass(self, tmp_path):
-        """Stage 3b: a gated node whose validator fails twice and passes
-        on the third call produces three EvaluationRecords (invocations
-        0, 1, 2) and ends in completed_nodes. Exercises the eval-node
-        retry self-loop back through the node execution node."""
+        """Two failed command evals precede a successful third attempt."""
         counter = tmp_path / "n.txt"
         counter.write_text("0")
         validator = tmp_path / "staged.py"
@@ -230,17 +229,12 @@ class TestGateIntegration:
             f"import sys\nsys.stdin.read()\n"
             f"n = int(open('{counter}').read())\n"
             f"open('{counter}', 'w').write(str(n + 1))\n"
-            "print(0.9 if n >= 2 else 0.3)\n"
+            "sys.exit(n < 2)\n"
         )
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                evaluation={
-                    "validator": str(validator),
-                    "threshold": 0.5,
-                    "blocking": True,
-                    "max_retries": 3,
-                },
+                eval={"run": [sys.executable, str(validator)]},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -249,17 +243,17 @@ class TestGateIntegration:
 
         assert "p1" in result["completed_nodes"]
         records = result["evaluations"]["p1"]
-        invocations = [r["invocation"] for r in records]
-        assert invocations == [0, 1, 2], f"expected [0, 1, 2], got {invocations}"
-        assert records[-1]["result"]["score"] == 0.9
+        attempts = [r["attempt"] for r in records]
+        assert attempts == [1, 2, 3]
+        assert records[-1]["result"]["exit_code"] == 0
 
     @pytest.mark.asyncio
     async def test_passing_gate_completes(self, tmp_path):
         script = tmp_path / "pass.py"
-        script.write_text("print(0.95)")
+        script.write_text("print('{\"score\":0.95}')")
         config = make_config([
             cmd_phase("p1", output="data",
-                      evaluation={"validator": str(script), "threshold": 0.8}),
+                      eval={"run": [sys.executable, str(script)]}),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
         graph = build_workflow_graph(config, executor)
@@ -273,7 +267,7 @@ class TestGateIntegration:
         script.write_text("print(1.0)")
         config = make_config([
             cmd_phase("a", output="ok",
-                      evaluation={"validator": str(script), "threshold": 0.8}),
+                      eval={"run": [sys.executable, str(script)]}),
             cmd_phase("b", output="ok", depends_on=["a"]),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -283,38 +277,32 @@ class TestGateIntegration:
         assert "b" in result["completed_nodes"]
 
     @pytest.mark.asyncio
-    async def test_blocking_gate_failure_blocks(self, tmp_path):
+    async def test_default_retry_exhaustion_fails(self, tmp_path):
         script = tmp_path / "fail.py"
-        script.write_text("print(0.1)")
+        script.write_text("raise SystemExit(1)")
         config = make_config([
             cmd_phase("p1", output="data",
-                      evaluation={
-                          "validator": str(script), "threshold": 0.8,
-                          "blocking": True, "max_retries": 0,
-                      }),
+                      eval={"run": [sys.executable, str(script)]}),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
         graph = build_workflow_graph(config, executor)
         result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
         assert "p1" in result["failed_nodes"]
-        assert any("evaluation failed" in e["error"].lower() for e in result["errors"])
+        assert any("exhausted" in e["error"].lower() for e in result["errors"])
 
     @pytest.mark.asyncio
-    async def test_non_blocking_gate_failure_continues(self, tmp_path):
+    async def test_nonzero_exit_without_matching_case_completes(self, tmp_path):
         script = tmp_path / "fail.py"
-        script.write_text("print(0.1)")
+        script.write_text("raise SystemExit(1)")
         config = make_config([
             cmd_phase("p1", output="data",
-                      evaluation={
-                          "validator": str(script), "threshold": 0.8,
-                          "blocking": False, "max_retries": 0,
-                      }),
+                      eval={"run": [sys.executable, str(script)]}, route=[{"when": "eval.exit_code == 2", "then": "fail"}]),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
         graph = build_workflow_graph(config, executor)
         result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
         assert "p1" in result["completed_nodes"]
-        assert any("non-blocking" in e["error"].lower() for e in result["errors"])
+        assert result["evaluations"]["p1"][-1]["result"]["exit_code"] == 1
 
     @pytest.mark.asyncio
     async def test_resume_skipped_gate_still_routes_downstream(self, tmp_path):
@@ -327,7 +315,7 @@ class TestGateIntegration:
         broken.write_text("import sys; sys.exit(3)")  # nonzero => eval error if run
         config = make_config([
             cmd_phase("a", output="frozen-out",
-                      evaluation={"validator": str(broken), "threshold": 0.8}),
+                      eval={"run": [sys.executable, str(broken)]}),
             cmd_phase("b", output="b-ran", depends_on=["a"]),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -355,7 +343,7 @@ class TestGateIntegration:
         slow.write_text("import time, sys; sys.stdin.read(); time.sleep(5)")
         config = make_config([
             cmd_phase("p1", output="data",
-                      evaluation={"validator": str(slow), "threshold": 0.8},
+                      eval={"run": [sys.executable, str(slow)], "timeout": 0.2},
                       timeout=1),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -375,7 +363,7 @@ class TestDryRun:
     @pytest.mark.asyncio
     async def test_dry_run_traces_gated_chain(self):
         config = make_config([
-            cmd_phase("a", evaluation={"validator": "v.md", "threshold": 0.99}),
+            cmd_phase("a", eval={"run": ["true"]}),
             cmd_phase("b", depends_on=["a"]),
         ])
         graph = build_workflow_graph(config)
@@ -437,7 +425,7 @@ class TestDispatchExecutor:
 class TestGateRetryExecution:
     @pytest.mark.asyncio
     async def test_retry_re_executes_phase(self, tmp_path):
-        """Validator uses a counter file: returns 0.0 on first call, 1.0 on second."""
+        """The counter advances once for each execution of the command eval."""
         counter = tmp_path / "counter.txt"
         counter.write_text("0")
 
@@ -448,18 +436,13 @@ class TestGateRetryExecution:
             "n = int(counter.read_text().strip())\n"
             "n += 1\n"
             "counter.write_text(str(n))\n"
-            "print('1.0' if n >= 2 else '0.0')\n"
+            "print('needs another attempt'); raise SystemExit(n < 2)\n"
         )
 
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                evaluation={
-                    "validator": str(validator),
-                    "threshold": 1.0,
-                    "blocking": True,
-                    "max_retries": 2,
-                },
+                eval={"run": [sys.executable, str(validator)]},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -477,8 +460,8 @@ class TestGateRetryExecution:
 
 class TestRetryContextInjection:
     @pytest.mark.asyncio
-    async def test_retry_injects_retry_reason(self, tmp_path):
-        """On retry, executor receives _retry_reason in context."""
+    async def test_retry_injects_route_eval_preamble(self, tmp_path):
+        """On retry, executor receives _route_eval_preamble in context."""
         counter = tmp_path / "counter.txt"
         counter.write_text("0")
 
@@ -489,7 +472,7 @@ class TestRetryContextInjection:
             "n = int(counter.read_text().strip())\n"
             "n += 1\n"
             "counter.write_text(str(n))\n"
-            "print('1.0' if n >= 2 else '0.3')\n"
+            "print('needs another attempt'); raise SystemExit(n < 2)\n"
         )
 
         from mock_executor import MockExecutor
@@ -503,12 +486,7 @@ class TestRetryContextInjection:
                 "id": "p1",
                 "name": "P1",
                 "agent": "t.md",
-                "evaluation": {
-                    "validator": str(validator),
-                    "threshold": 1.0,
-                    "blocking": True,
-                    "max_retries": 2,
-                },
+                "eval": {"run": [sys.executable, str(validator)]},
             },
         ])
         graph = build_workflow_graph(config, mock)
@@ -518,12 +496,12 @@ class TestRetryContextInjection:
         # Node was executed twice (initial + retry)
         assert mock.execution_order.count("p1") == 2
         # MockExecutor overwrites context per node ID, so last call wins —
-        # the retry call should have _retry_reason
-        assert "_retry_reason" in mock.received_contexts["p1"]
+        # the retry call should have _route_eval_preamble
+        assert "_route_eval_preamble" in mock.received_contexts["p1"]
 
     @pytest.mark.asyncio
-    async def test_retry_reason_contains_score_and_threshold(self, tmp_path):
-        """_retry_reason includes the previous score and threshold."""
+    async def test_retry_context_contains_measurement_and_attempt(self, tmp_path):
+        """The retry context includes the previous command output and attempt."""
         counter = tmp_path / "counter.txt"
         counter.write_text("0")
 
@@ -534,7 +512,7 @@ class TestRetryContextInjection:
             "n = int(counter.read_text().strip())\n"
             "n += 1\n"
             "counter.write_text(str(n))\n"
-            "print('1.0' if n >= 2 else '0.30')\n"
+            "print('needs another attempt'); raise SystemExit(n < 2)\n"
         )
 
         from mock_executor import MockExecutor
@@ -548,30 +526,24 @@ class TestRetryContextInjection:
                 "id": "p1",
                 "name": "P1",
                 "agent": "t.md",
-                "evaluation": {
-                    "validator": str(validator),
-                    "threshold": 1.0,
-                    "blocking": True,
-                    "max_retries": 2,
-                },
+                "eval": {"run": [sys.executable, str(validator)]},
             },
         ])
         graph = build_workflow_graph(config, mock)
         result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
 
         assert "p1" in result["completed_nodes"]
-        # MockExecutor overwrites context on each call, so last call has _retry_reason
+        # MockExecutor overwrites context on each call, so last call has _route_eval_preamble
         ctx = mock.received_contexts["p1"]
-        assert "_retry_reason" in ctx
-        assert "0.30" in ctx["_retry_reason"]
-        assert "threshold=1.0" in ctx["_retry_reason"]
-        assert "Attempt 1 of 2" in ctx["_retry_reason"]
+        assert "_route_eval_preamble" in ctx
+        assert "needs another attempt" in ctx["_route_eval_preamble"]
+        assert "Attempt 1" in ctx["_route_eval_preamble"]
         # Neutral preamble — no "failed" framing.
-        assert "failed" not in ctx["_retry_reason"].lower()
+        assert "failed" not in ctx["_route_eval_preamble"].lower()
 
     @pytest.mark.asyncio
-    async def test_no_retry_reason_on_first_attempt(self, tmp_path):
-        """First execution should not have _retry_reason in context."""
+    async def test_no_route_eval_preamble_on_first_attempt(self, tmp_path):
+        """First execution should not have _route_eval_preamble in context."""
         script = tmp_path / "pass.py"
         script.write_text("print(1.0)")
 
@@ -586,18 +558,14 @@ class TestRetryContextInjection:
                 "id": "p1",
                 "name": "P1",
                 "agent": "t.md",
-                "evaluation": {
-                    "validator": str(script),
-                    "threshold": 0.8,
-                    "blocking": True,
-                },
+                "eval": {"run": [sys.executable, str(script)]},
             },
         ])
         graph = build_workflow_graph(config, mock)
         result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
 
         assert "p1" in result["completed_nodes"]
-        assert "_retry_reason" not in mock.received_contexts["p1"]
+        assert "_route_eval_preamble" not in mock.received_contexts["p1"]
 
 
 # ---------------------------------------------------------------------------
@@ -667,13 +635,8 @@ class TestDimensionGateExecution:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                evaluation={
-                    "validator": str(validator),
-                    "dimensions": [
-                        {"field": "correctness", "min": 0.8},
-                        {"field": "style", "min": 0.5},
-                    ],
-                },
+                eval={"run": [sys.executable, str(validator)]},
+                route=[{"when": "eval.correctness < 0.8 or eval.style < 0.5", "then": "retry", "max_attempts": 3}],
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -682,8 +645,8 @@ class TestDimensionGateExecution:
 
         assert "p1" in result["completed_nodes"]
         last_result = result["evaluations"]["p1"][-1]["result"]
-        assert last_result["scores"]["correctness"] == 0.9
-        assert last_result["scores"]["style"] == 0.7
+        assert last_result["correctness"] == 0.9
+        assert last_result["style"] == 0.7
 
     @pytest.mark.asyncio
     async def test_dimension_gate_fails_one_dimension(self, tmp_path):
@@ -705,15 +668,8 @@ class TestDimensionGateExecution:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                evaluation={
-                    "validator": str(validator),
-                    "max_retries": 2,
-                    "blocking": True,
-                    "dimensions": [
-                        {"field": "correctness", "min": 0.8},
-                        {"field": "style", "min": 0.5},
-                    ],
-                },
+                eval={"run": [sys.executable, str(validator)]},
+                route=[{"when": "eval.correctness < 0.8 or eval.style < 0.5", "then": "retry", "max_attempts": 3}],
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -724,7 +680,7 @@ class TestDimensionGateExecution:
         assert int(counter.read_text().strip()) == 2
 
 
-class TestOutputContract:
+class TestOutputs:
     @pytest.mark.asyncio
     async def test_contract_pass_continues_to_gate(self, tmp_path):
         """Files exist → gate runs → node completes."""
@@ -738,15 +694,15 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["result.txt"]},
-                evaluation={"validator": str(script), "threshold": 0.8},
+                outputs={"files": ["out/result.txt"]},
+                eval={"run": [sys.executable, str(script)]},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
         graph = build_workflow_graph(config, executor)
         result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
         assert "p1" in result["completed_nodes"]
-        assert result["evaluations"]["p1"][-1]["result"]["score"] == 1.0
+        assert result["evaluations"]["p1"][-1]["result"]["exit_code"] == 0
 
     @pytest.mark.asyncio
     async def test_contract_fail_blocks_phase(self, tmp_path):
@@ -754,8 +710,8 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
-                evaluation={"validator": "never_called.py", "threshold": 0.8},
+                outputs={"files": ["out/missing.txt"]},
+                eval={"run": [sys.executable, "never_called.py"]},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -771,7 +727,7 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "a", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
+                outputs={"files": ['out/missing.txt']},
             ),
             cmd_phase("b", output="ok", depends_on=["a"]),
         ])
@@ -787,7 +743,7 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
+                outputs={"files": ['out/missing.txt']},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -801,11 +757,8 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
-                evaluation={
-                    "validator": "never_called.py", "threshold": 0.8,
-                    "blocking": True, "max_retries": 3,
-                },
+                outputs={"files": ["out/missing.txt"]},
+                eval={"run": [sys.executable, "never_called.py"]},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))

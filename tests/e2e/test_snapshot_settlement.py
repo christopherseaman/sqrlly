@@ -140,10 +140,11 @@ def test_eval_runs_in_isolated_tree_before_promotion(repo, tmp_path):
         "from pathlib import Path\n"
         f"assert not (Path({str(repo)!r}) / 'candidate').exists()\n"
         "assert Path('candidate').read_text() == 'ready'\n"
-        f"print(float(Path({str(approval)!r}).exists()))\n"
+        f"raise SystemExit(0 if Path({str(approval)!r}).exists() else 1)\n"
     )
     nodes = [{"id": "generate", "worktree": "isolated", "run": ["sh", "-c", "printf ready > candidate"],
-              "evaluation": {"validator": "judge.py", "threshold": 1.0, "blocking": True, "max_retries": 0}}]
+              "eval": {"run": [sys.executable, "judge.py"]},
+              "route": [{"when": "eval.exit_code != 0", "then": "fail"}]}]
     failed = invoke(repo, nodes)
     assert failed.returncode == 1, failed.stdout + failed.stderr
     assert not (repo / "candidate").exists()
@@ -236,3 +237,41 @@ def test_interruption_preserves_ambiguous_dispatch(repo, tmp_path):
     assert sorted(started.read_text().splitlines()) == ["a", "b"]
     assert not (repo / "a").exists()
     assert len(list((repo / ".sqrlly").glob("wt-*/a"))) == 1
+
+
+def test_same_named_files_have_independent_refs_and_checkpoints(repo):
+    refs = []
+    for name in ("first", "second"):
+        config = repo / f"{name}.yaml"
+        config.write_text(yaml.safe_dump({"name": "same", "nodes": [{
+            "id": "edit", "worktree": "isolated", "promote": False,
+            "run": ["sh", "-c", f"echo {name} > result"],
+        }]}))
+        result = subprocess.run([str(Path(sys.executable).with_name("sqrlly")), "run", str(config), "-w", str(repo)],
+                                text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        refs.append(next(line.split()[-1] for line in result.stdout.splitlines() if line.startswith("Retained snapshot:")))
+    assert [git(repo, "show", f"{ref}:result") for ref in refs] == ["first", "second"]
+
+
+def test_output_checks_finish_before_filtered_promotion(repo, tmp_path):
+    allow = tmp_path / "allow"
+    count = tmp_path / "attempts"
+    script = ('echo attempt >> "$1"; mkdir -p out; echo kept > out/value.txt; '
+              'echo hidden > private; if test -e "$2"; then echo ready > out/status; fi')
+    nodes = [{"id": "build", "worktree": "isolated",
+              "outputs": {"files": ["out/*.txt", "out/status"]},
+              "run": ["sh", "-ec", script, "worker", str(count), str(allow)]}]
+    failed = invoke(repo, nodes)
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    assert count.read_text().splitlines() == ["attempt"] * 3
+    assert not (repo / "out").exists()
+    tree, = (repo / ".sqrlly").glob("wt-*")
+    assert (tree / "out/value.txt").read_text() == "kept\n"
+    allow.touch()
+    resumed = invoke(repo, nodes, "--resume")
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert (repo / "out/value.txt").read_text() == "kept\n"
+    assert (repo / "out/status").read_text() == "ready\n"
+    assert not (repo / "private").exists()
+    assert not tree.exists()

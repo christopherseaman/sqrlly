@@ -15,29 +15,19 @@ import json
 import re
 import sys
 
-raw = sys.stdin.read().strip()
+raw = sys.argv[1].strip()
 
 # Tolerate surrounding markdown fences Claude sometimes adds despite "JSON only" instructions.
 m = re.search(r"\{[\s\S]*\}", raw)
 if not m:
-    print(json.dumps({
-        "score": 0.0,
-        "feedback": "no JSON object found in output",
-        "pass_criteria_met": [],
-        "pass_criteria_unmet": ["output contains a JSON object"],
-    }))
-    sys.exit(0)
+    print("No JSON object found in output")
+    sys.exit(1)
 
 try:
     data = json.loads(m.group(0))
 except json.JSONDecodeError as e:
-    print(json.dumps({
-        "score": 0.0,
-        "feedback": f"JSON parse error: {e}",
-        "pass_criteria_met": [],
-        "pass_criteria_unmet": ["JSON parses cleanly"],
-    }))
-    sys.exit(0)
+    print(f"Invalid JSON: {e}")
+    sys.exit(1)
 
 met: list[str] = []
 unmet: list[str] = []
@@ -74,10 +64,5 @@ for item in items:
     elif not all(isinstance(b, str) and b.strip() for b in beats):
         unmet.append(f"item {item.get('id', '?')} has empty/non-string beats")
 
-score = 1.0 if not unmet else 0.0
-print(json.dumps({
-    "score": score,
-    "feedback": "" if score == 1.0 else "; ".join(unmet),
-    "pass_criteria_met": met,
-    "pass_criteria_unmet": unmet,
-}))
+print(json.dumps({"met": met, "unmet": unmet}))
+sys.exit(bool(unmet))

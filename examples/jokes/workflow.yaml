@@ -2,11 +2,8 @@ name: Joke Generator
 nodes:
   - id: generate
     name: Generate Jokes
-    evaluation:
-      validator: gates/validate_jokes.py
-      threshold: 1.0
-      blocking: true
-      max_retries: 2
+    eval:
+      run: [python3, '{{workflow_dir}}/gates/validate_jokes.py', '{{output}}']
     llm: generate.md
 
   - id: select

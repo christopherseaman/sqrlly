@@ -7,8 +7,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 
+from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.compile._manifest import find_terminal_nodes
 from sqrlly.compile.nodes import (
+    count_attempts,
+    run_with_timeout,
     all_deps_completed,
     build_context,
     check_dep_failed,
@@ -41,10 +44,11 @@ class SubgraphDepthError(ValueError):
 
 def load_graph(
     config_path: str, base_dir: str | Path = ".", parent_settings: Settings | None = None,
+    *, inputs: frozenset[str] | None = frozenset(),
 ) -> Graph:
     """Load and parse a Graph YAML file. Path is relative to base_dir."""
     resolve = (lambda child: merge_settings(parent_settings, child, Path(base_dir))) if parent_settings else None
-    return load_workflow(Path(base_dir) / config_path, resolve_settings=resolve)
+    return load_workflow(Path(base_dir) / config_path, resolve_settings=resolve, inputs=inputs)
 
 
 def _terminal_node_output(sub_state: dict[str, Any], sub_config: Graph) -> str:
@@ -94,8 +98,7 @@ def make_subgraph_node(
     parent_id = parent_node.id
     inputs_decl = parent_node.workflow.inputs
 
-    async def run_child(parent_state: WorkflowState) -> dict[str, Any]:
-        parent_context = build_context(parent_node, parent_state)
+    async def run_child(parent_state: WorkflowState, parent_context: dict) -> ExecutionResult:
         rendered_inputs = {
             k: render_template(v, parent_context) if isinstance(v, str) else v
             for k, v in inputs_decl.items()
@@ -107,6 +110,9 @@ def make_subgraph_node(
             dry_run=parent_state.get("dry_run", False),
         )
         sub_state["node_inputs"] = rendered_inputs
+        if reason := parent_context.get("_output_retry_reason"):
+            rendered_inputs["_output_retry_reason"] = reason
+            rendered_inputs["_retry_reason"] = reason
 
         if sub_logger is not None:
             sub_result = sub_state
@@ -121,26 +127,12 @@ def make_subgraph_node(
         else:
             sub_result = await sub_graph.ainvoke(sub_state)
 
-        update: dict[str, Any] = {"completed_nodes": {parent_id}}
-        if sub_result.get("retained_refs"):
-            update["retained_refs"] = sub_result["retained_refs"]
-        update["node_outputs"] = {parent_id: _terminal_node_output(sub_result, sub_config)}
-
-        if sub_result.get("failed_nodes"):
-            update["failed_nodes"] = {parent_id}
-            update["errors"] = [{
-                "node": parent_id,
-                "error": (
-                    f"subgraph '{sub_config.name}' had failed nodes: "
-                    f"{sub_result['failed_nodes']}"
-                ),
-                # The real failure is an inner subgraph node (see the prefixed
-                # `parent::inner` id in the same stream), not this reference node.
-                "kind": "upstream_failed",
-            }]
-            update["completed_nodes"] = set()
-
-        return update
+        output = _terminal_node_output(sub_result, sub_config)
+        retained = sub_result.get("retained_refs", set())
+        if failures := sub_result.get("failed_nodes"):
+            return ExecutionResult(success=False, output=output, error_kind="upstream_failed", retained_refs=retained,
+                                   error=f"subgraph '{sub_config.name}' had failed nodes: {failures}")
+        return ExecutionResult(output=output, retained_refs=retained)
 
     async def wrapper(parent_state: WorkflowState) -> dict[str, Any]:
         if (parent_id in parent_state.get("_resume_skip", set())
@@ -157,14 +149,24 @@ def make_subgraph_node(
         ):
             return {}
 
-        try:
-            async with asyncio.timeout(timeout):
-                return await run_child(parent_state)
-        except TimeoutError:
-            return make_failure_update(parent_id, f"Node timed out after {timeout}s", kind="timeout")
+        result, executions = await execute_with_outputs(
+            lambda ctx: run_with_timeout(run_child(parent_state, ctx), timeout),
+            build_context(parent_node, parent_state),
+            None if parent_state.get("dry_run") else parent_node.outputs,
+            parent_state.get("workdir", "."),
+        )
+        update = {"node_outputs": {parent_id: result.output},
+                  "attempts": {parent_id: parent_state.get("attempts", {}).get(parent_id, 0) + executions}}
+        if result.retained_refs:
+            update["retained_refs"] = result.retained_refs
+        if not result.success:
+            update.update(make_failure_update(parent_id, result.error, result.error_kind))
+        elif not (parent_node.eval or parent_node.route):
+            update["completed_nodes"] = {parent_id}
+        return update
 
     wrapper.__name__ = f"subgraph_{parent_id}"
-    return wrapper
+    return count_attempts(parent_node, wrapper)
 
 
 def make_fan_out_subgraph_invoker(
@@ -196,7 +198,7 @@ def make_fan_out_subgraph_invoker(
     # subgraphs don't re-walk the same chains.
     if depth == 0:
         detect_config_cycle(workflow_file, base_dir=base_dir, parent_settings=parent_settings)
-    sub_config = load_graph(workflow_file, base_dir, parent_settings)
+    sub_config = load_graph(workflow_file, base_dir, parent_settings, inputs=frozenset(inputs_decl))
 
     async def invoke(
         context: dict[str, Any], workdir: str, dry_run: bool,
@@ -221,6 +223,9 @@ def make_fan_out_subgraph_invoker(
             workdir=branch_tree,
             dry_run=dry_run,
         )
+        if reason := context.get("_output_retry_reason"):
+            rendered_inputs["_output_retry_reason"] = reason
+            rendered_inputs["_retry_reason"] = reason
         sub_state["node_inputs"] = rendered_inputs
 
         try:
@@ -279,7 +284,7 @@ def detect_config_cycle(
         chain = " -> ".join(visited + [abs_path])
         raise SubgraphCycleError(f"Subgraph reference cycle: {chain}")
     visited.append(abs_path)
-    sub = load_graph(config_path, base_dir, parent_settings)
+    sub = load_graph(config_path, base_dir, parent_settings, inputs=None)
     for node in sub.nodes:
         steps = [node]
         if node.fan_out:

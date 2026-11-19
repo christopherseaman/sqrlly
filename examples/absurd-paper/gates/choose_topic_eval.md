@@ -21,9 +21,9 @@ Score each on a 0.0–1.0 scale:
 Return ONLY this JSON — no prose, no code fences, no markdown:
 
 ```
-{"absurdity": 0.0-1.0, "specificity": 0.0-1.0, "methodological_hook": 0.0-1.0, "feedback": "<1-2 sentences — if any dim is below its minimum, say concretely what to change>", "pass_criteria_met": ["..."], "pass_criteria_unmet": ["..."]}
+{"absurdity": 0.0-1.0, "specificity": 0.0-1.0, "methodological_hook": 0.0-1.0, "feedback": "<1-2 sentences — if any dim is below its minimum, say concretely what to change>"}
 ```
 
-Each dimension MUST be a **top-level numeric field** (not nested inside `"scores"`). The orchestrator derives the overall gate score from the per-dimension minimums declared in the workflow; do NOT emit a `"score"` field.
+Return each dimension as a numeric field at the top level.
 
 (Node id: `{{node_id}}`, attempt: `{{attempt}}`.)
