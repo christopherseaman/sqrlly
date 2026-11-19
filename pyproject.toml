@@ -93,6 +93,7 @@ packages = ["src/sqrlly"]
 # checkpoint DBs, scratch dirs, and internal dev docs) explicitly.
 # README / CHANGELOG / SCHEMA / LICENSE stay — they are user-facing.
 exclude = [
+    "/HANDOFF.md",
     "/.sqrlly",
     "/.sqrlly/**",
     "/.temp",

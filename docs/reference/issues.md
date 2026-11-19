@@ -88,6 +88,11 @@ Title: imperative, under 70 characters. Body: one paragraph on what is wrong or 
 `Known`, `Where` (paths, tests, docs) and `Done when`. One issue per piece of work that can be
 claimed alone. New issues start `status:untriaged` unless the filer already triaged them.
 
+An issue makes an artifact or builds something. A spec or design is a file under
+`docs/reference/`, committed to main; issues cite the file and its section. An issue body is
+never the spec for another issue. A decision issue is done when its answer is written into the
+file it changes.
+
 ## Automation
 
 `.github/workflows/issue-queue.yml` runs `tools/issue-queue.py` on issue open, issue close, new

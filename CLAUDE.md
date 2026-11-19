@@ -26,6 +26,41 @@ Read those when narrative context is needed; this file stays focused on
 day-to-day operator concerns (build, test, layout, limitations,
 environment quirks).
 
+## Work tracking
+
+Read this before starting any work. The full rules are in
+`docs/reference/issues.md`.
+
+- **Start at `HANDOFF.md`** when it exists: it names the current work and
+  the order. Delete or rewrite it when it goes stale.
+- **Every piece of work is a GitHub issue.** An issue makes an artifact or
+  builds something, and has a "Done when" that names a test or an exact
+  output. File one before starting work that has none.
+- **A spec is a file in the repo**, under `docs/reference/`, committed to
+  main. An issue cites the file and its section. An issue body never serves
+  as the spec for another issue. A decision is recorded in the file it
+  changes, with its date.
+- **Labels are the state.** Each open issue has one `status:` label
+  (`untriaged`, `ready`, `in-progress`, `feedback`, `blocked`, `parked`).
+  The [project board](https://github.com/users/christopherseaman/projects/4)
+  mirrors them; `tools/issue-queue.py board` syncs it.
+- **Pick up:** list `status:ready` issues, skip any with a live claim,
+  comment `Claim: <agent> <branch>`, set `status:in-progress`.
+- **While working:** comment `Progress:` at least every 4 hours. Work on a
+  branch named for the issue (`issue-<n>-<slug>`) and push it.
+- **Stop:** `Handoff:` (what is done, the branch, what remains) then
+  `status:ready`. `Question:` plus `status:feedback` asks the owner.
+  `Blocked by #N` in the body plus `status:blocked` waits on another issue.
+- **Finish:** merge to main when tests pass, comment `Result:` with the
+  commit and the test result, close the issue.
+- **Every agent comment** starts with one of `Claim:`, `Progress:`,
+  `Question:`, `Result:`, `Handoff:`, `Takeover:`, `Triage:`, `Note:`. A
+  comment with none of them counts as the owner's.
+- **Owner only:** a minor or major release, a schema removal outside an
+  agreed spec, a direction call. Issues carrying `needs:owner` are not
+  claimed; add evidence to them.
+- **Never** open an issue, pull request or comment on another project.
+
 ## Architecture (30-second sketch)
 
 ```
