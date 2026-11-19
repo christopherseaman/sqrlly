@@ -8,6 +8,7 @@ operate on WorkflowState/Node dicts with no langgraph dependency.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END
@@ -34,6 +35,19 @@ from sqrlly.schema.models import Node, Settings, Graph
 
 if TYPE_CHECKING:
     from sqrlly.runtime.result import NodeExecutor
+
+
+def settle_nodes(executor, node: Node, settings: Settings, ids: list[str]) -> dict:
+    if not hasattr(executor, "settle"):
+        return {}
+    try:
+        retained = executor.settle(node, settings, ids)
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        return make_failure_update(node.id, f"Snapshot settlement failed: {exc}")
+    update = {"node_worktrees": dict.fromkeys(ids)}
+    if retained:
+        update["retained_refs"] = retained
+    return update
 
 
 def check_dep_failed(node: Node, state: WorkflowState) -> dict | None:
@@ -73,7 +87,7 @@ def all_deps_completed(node: Node, state: WorkflowState) -> bool:
     marker nodes that cost more than this guard.
     """
     completed = state.get("completed_nodes", set())
-    return all(dep in completed for dep in node.depends_on)
+    return all(dep in completed and state.get("fan_ready", {}).get(dep, True) for dep in node.depends_on)
 
 
 def check_dry_run(node: Node, state: WorkflowState) -> dict | None:
@@ -509,7 +523,7 @@ async def _run_eval_core(
     eval_call = run_evaluation(
         evaluation,
         node_id,
-        workdir=state.get("workdir", "."),
+        workdir=state.get("node_worktrees", {}).get(node_id) or state.get("workdir", "."),
         node_output=node_output,
         workflow_name=config.name,
         attempt_number=retries + 1,
@@ -669,11 +683,17 @@ def _make_execution_node(
                 }
 
         update = assemble_success_update(node, exec_result)
+        if node.fan_out:
+            update["fan_ready"] = {node.id: False}
         if hasattr(executor, "get_worktree"):
             wt = executor.get_worktree(node.id)
             if wt:
                 update["node_worktrees"] = {node.id: wt}
         if not node.evaluation:
+            settled = settle_nodes(executor, node, settings, [node.id])
+            if settled.get("failed_nodes"):
+                return settled
+            update.update(settled)
             update["completed_nodes"] = {node.id}
         # Gated nodes hand off to _eval_{node.id} via plain edge; the
         # Evaluation node writes completed_nodes / retries / failed_nodes.
@@ -810,6 +830,11 @@ def _make_gate_node(
         elif outcome == "fail_blocking":
             target = END
         else:  # pass or warn_continue
+            settled = settle_nodes(executor, node, settings, [node_id])
+            if settled.get("failed_nodes"):
+                update.pop("completed_nodes", None)
+                return Command(update={**update, **settled}, goto=END)
+            update.update(settled)
             target = _pass_goto()
         return Command(update=update, goto=target)
 

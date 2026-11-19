@@ -214,182 +214,44 @@ class TestRunCommand:
         assert result.exit_code != 0
         assert "Failed:" in result.output
 
-    def test_worktree_gc_on_success_removes_trees(self, runner, tmp_path):
-        """worktree_gc: on_success removes all .sqrlly/wt-* dirs after a
-        clean run; worktree_gc: never (default) leaves them in place.
-        Uses a real git repo + /usr/bin/true (no LLM required)."""
-        import shutil
+    @pytest.mark.parametrize("promote", [True, False])
+    def test_isolated_success_cleans_tree_and_reports_retained_ref(self, runner, tmp_path, promote):
+        from helpers import init_git_repo
         import subprocess
+        import yaml
 
-        true_bin = shutil.which("true") or "/usr/bin/true"
+        init_git_repo(tmp_path)
+        node = {"id": "write", "worktree": "isolated", "run": ["sh", "-c", "echo hi > out.txt"]}
+        if not promote:
+            node["promote"] = False
+        config = tmp_path / "workflow.yaml"
+        config.write_text(yaml.safe_dump({"nodes": [node]}))
+        result = runner.invoke(cli, ["run", str(config), "--workdir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert not list((tmp_path / ".sqrlly").glob("wt-*"))
+        if promote:
+            assert (tmp_path / "out.txt").read_text() == "hi\n"
+        else:
+            assert not (tmp_path / "out.txt").exists()
+            refs = subprocess.check_output(["git", "-C", tmp_path, "for-each-ref",
+                                            "--format=%(refname)", "refs/sqrlly"], text=True)
+            ref, = (line for line in refs.splitlines() if line.endswith("/out"))
+            assert ref in result.output
+            assert subprocess.check_output(["git", "-C", tmp_path, "show", ref + ":out.txt"]) == b"hi\n"
 
-        def _init_repo(path: Path) -> None:
-            subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
-            subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
-            subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
-            (path / "README").write_text("init")
-            subprocess.run(["git", "-C", str(path), "add", "README"], check=True)
-            subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True)
+    def test_isolated_failure_keeps_working_tree(self, runner, tmp_path):
+        from helpers import init_git_repo
+        import yaml
 
-        # --- on_success: trees must be removed after a clean run ---
-        repo_gc = tmp_path / "repo_gc"
-        repo_gc.mkdir()
-        _init_repo(repo_gc)
-        cfg_gc = repo_gc / "workflow.yaml"
-        cfg_gc.write_text(
-            "name: GcTest\n"
-            "settings:\n  worktree_gc: on_success\n"
-            "nodes:\n"
-            "  - id: step\n    name: Step\n"
-            f"    run: [{true_bin}]\n"
-        )
-        result_gc = runner.invoke(cli, ["run", str(cfg_gc), "--workdir", str(repo_gc)])
-        assert result_gc.exit_code == 0, result_gc.output + result_gc.stderr
-        sqrlly_dir = repo_gc / ".sqrlly"
-        leftover = list(sqrlly_dir.glob("wt-*")) if sqrlly_dir.exists() else []
-        assert leftover == [], f"on_success GC left trees: {leftover}"
-
-        # --- never (default): tree remains after run ---
-        repo_keep = tmp_path / "repo_keep"
-        repo_keep.mkdir()
-        _init_repo(repo_keep)
-        cfg_keep = repo_keep / "workflow.yaml"
-        cfg_keep.write_text(
-            "name: KeepTest\n"
-            "nodes:\n"
-            "  - id: step\n    name: Step\n"
-            f"    run: [{true_bin}]\n"
-        )
-        result_keep = runner.invoke(cli, ["run", str(cfg_keep), "--workdir", str(repo_keep)])
-        assert result_keep.exit_code == 0, result_keep.output + result_keep.stderr
-        sqrlly_dir_keep = repo_keep / ".sqrlly"
-        leftover_keep = list(sqrlly_dir_keep.glob("wt-*")) if sqrlly_dir_keep.exists() else []
-        assert leftover_keep != [], "never GC should leave trees but found none"
-
-
-    def test_worktree_gc_on_success_keeps_trees_on_failure(self, runner, tmp_path):
-        """Safety invariant: worktree_gc: on_success must NOT reclaim trees
-        when the run ends with failed_nodes.  The guard in cli/main.py
-        only calls foreman.reclaim() when exit_code == 0; this test pins
-        that behaviour so a regression is caught immediately.
-
-        The test will pass immediately because the guard already exists —
-        it is a regression pin, not a TDD driver.
-        """
-        import shutil
-        import subprocess
-
-        false_bin = shutil.which("false") or "/bin/false"
-        true_bin = shutil.which("true") or "/usr/bin/true"
-
-        def _init_repo(path: Path) -> None:
-            subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
-            subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
-            subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
-            (path / "README").write_text("init")
-            subprocess.run(["git", "-C", str(path), "add", "README"], check=True)
-            subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True)
-
-        repo = tmp_path / "repo_fail_gc"
-        repo.mkdir()
-        _init_repo(repo)
-        # Two nodes: first succeeds (allocates a worktree), second fails.
-        # worktree_gc: on_success is set, but the run is not clean.
-        cfg = repo / "workflow.yaml"
-        cfg.write_text(
-            "name: FailGcTest\n"
-            "settings:\n  worktree_gc: on_success\n"
-            "nodes:\n"
-            "  - id: ok\n    name: Ok\n"
-            f"    run: [{true_bin}]\n"
-            "  - id: bad\n    name: Bad\n"
-            "    depends_on: [ok]\n"
-            f"    run: [{false_bin}]\n"
-        )
-        result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
-        assert result.exit_code != 0, "expected non-zero exit on failure"
-        # Trees must still be present — reclaim() must NOT have been called.
-        sqrlly_dir = repo / ".sqrlly"
-        leftover = list(sqrlly_dir.glob("wt-*")) if sqrlly_dir.exists() else []
-        assert leftover != [], (
-            "failed run with worktree_gc: on_success must keep worktrees, "
-            f"but .sqrlly/wt-* was empty. output={result.output!r}"
-        )
-
-
-    def test_promote_copies_worktree_delta_to_base(self, runner, tmp_path):
-        """promote: true copies isolated-worktree delta into the base workdir.
-
-        One node with worktree: isolated + promote: true writes out.txt inside
-        its worktree via a shell script.  After a clean run, out.txt must exist
-        in the base workdir (promoted).  Control: same workflow without
-        promote: true leaves no out.txt in base (it stays in the worktree).
-        Real git repo; no LLM required.
-        """
-        import subprocess
-
-        def _init_repo(path: Path) -> None:
-            subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
-            subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
-            subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
-            (path / "README").write_text("init")
-            subprocess.run(["git", "-C", str(path), "add", "README"], check=True)
-            subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True)
-
-        # Write a shell script that creates out.txt in the cwd (the worktree).
-        script = tmp_path / "write_file.sh"
-        script.write_text("#!/bin/bash\nset -euo pipefail\necho hi > out.txt\n")
-        script.chmod(0o755)
-
-        # --- promote: true case ---
-        repo_promote = tmp_path / "repo_promote"
-        repo_promote.mkdir()
-        _init_repo(repo_promote)
-        cfg_promote = repo_promote / "workflow.yaml"
-        cfg_promote.write_text(
-            "name: PromoteTest\n"
-            "nodes:\n"
-            "  - id: writer\n    name: Writer\n"
-            "    worktree: isolated\n"
-            "    promote: true\n"
-            f"    run: [{script}]\n"
-        )
-        result_promote = runner.invoke(
-            cli, ["run", str(cfg_promote), "--workdir", str(repo_promote)]
-        )
-        assert result_promote.exit_code == 0, (
-            result_promote.output + result_promote.stderr
-        )
-        promoted_file = repo_promote / "out.txt"
-        assert promoted_file.exists(), (
-            f"promote: true — out.txt was not promoted to base workdir. "
-            f"output={result_promote.output!r}"
-        )
-        assert promoted_file.read_text().strip() == "hi", (
-            f"promoted file content wrong: {promoted_file.read_text()!r}"
-        )
-
-        # --- control: promote omitted (defaults false) ---
-        repo_nopromote = tmp_path / "repo_nopromote"
-        repo_nopromote.mkdir()
-        _init_repo(repo_nopromote)
-        cfg_nopromote = repo_nopromote / "workflow.yaml"
-        cfg_nopromote.write_text(
-            "name: NoPromoteTest\n"
-            "nodes:\n"
-            "  - id: writer\n    name: Writer\n"
-            "    worktree: isolated\n"
-            f"    run: [{script}]\n"
-        )
-        result_nopromote = runner.invoke(
-            cli, ["run", str(cfg_nopromote), "--workdir", str(repo_nopromote)]
-        )
-        assert result_nopromote.exit_code == 0, (
-            result_nopromote.output + result_nopromote.stderr
-        )
-        assert not (repo_nopromote / "out.txt").exists(), (
-            "promote omitted — out.txt must NOT appear in base workdir"
-        )
+        init_git_repo(tmp_path)
+        config = tmp_path / "workflow.yaml"
+        config.write_text(yaml.safe_dump({"nodes": [{"id": "bad", "worktree": "isolated",
+                                         "run": ["sh", "-c", "echo diagnosis > evidence; exit 1"]}]}))
+        result = runner.invoke(cli, ["run", str(config), "--workdir", str(tmp_path)])
+        assert result.exit_code != 0
+        tree, = (tmp_path / ".sqrlly").glob("wt-*")
+        assert (tree / "evidence").read_text() == "diagnosis\n"
+        assert not (tmp_path / "evidence").exists()
 
 
 class TestRunOptions:
@@ -482,96 +344,22 @@ class TestCliHelpers:
         assert result == str(Path(tmp_path) / CHECKPOINT_DB)
 
 
-class TestPromoteConflict:
-    def _init_repo(self, path):
-        import subprocess
-        subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
-        subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
-        subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
-        (path / "README").write_text("init")
-        subprocess.run(["git", "-C", str(path), "add", "README"], check=True)
-        subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True)
+@pytest.mark.parametrize("mode,success,content", [
+    ("fail", False, "external"), ("warn", True, "node"),
+    ("overwrite", True, "node"), ("skip", True, "external"),
+])
+def test_concurrent_base_change_conflict_modes(runner, tmp_path, mode, success, content):
+    from helpers import init_git_repo
+    import yaml
 
-    def _scripts(self, tmp_path):
-        a = tmp_path / "wa.sh"
-        a.write_text("#!/bin/bash\nset -euo pipefail\necho AAA > shared.txt\necho a > a.txt\n")
-        a.chmod(0o755)
-        b = tmp_path / "wb.sh"
-        b.write_text("#!/bin/bash\nset -euo pipefail\necho BBB > shared.txt\necho b > b.txt\n")
-        b.chmod(0o755)
-        return a, b
-
-    def _cfg(self, repo, a, b, mode):
-        cfg = repo / "workflow.yaml"
-        cfg.write_text(
-            "name: ConflictTest\n"
-            "settings:\n"
-            f"  on_promote_conflict: {mode}\n"
-            "nodes:\n"
-            "  - id: writer_a\n    name: A\n    worktree: isolated\n    promote: true\n"
-            f"    run: [{a}]\n"
-            "  - id: writer_b\n    name: B\n    worktree: isolated\n    promote: true\n"
-            f"    run: [{b}]\n"
-        )
-        return cfg
-
-    def test_warn_last_write_wins_and_warns(self, runner, tmp_path):
-        repo = tmp_path / "warn"; repo.mkdir(); self._init_repo(repo)
-        a, b = self._scripts(tmp_path)
-        cfg = self._cfg(repo, a, b, "warn")
-        result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
-        assert result.exit_code == 0, result.output + result.stderr
-        assert (repo / "shared.txt").read_text().strip() == "BBB"
-        assert (repo / "a.txt").exists() and (repo / "b.txt").exists()
-        assert "promote conflict" in result.stderr
-        assert "shared.txt" in result.stderr
-
-    def test_skip_first_writer_wins(self, runner, tmp_path):
-        repo = tmp_path / "skip"; repo.mkdir(); self._init_repo(repo)
-        a, b = self._scripts(tmp_path)
-        cfg = self._cfg(repo, a, b, "skip")
-        result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
-        assert result.exit_code == 0, result.output + result.stderr
-        assert (repo / "shared.txt").read_text().strip() == "AAA"
-        assert (repo / "a.txt").exists() and (repo / "b.txt").exists()
-
-    def test_fail_aborts_nonzero_and_nothing_promoted(self, runner, tmp_path):
-        repo = tmp_path / "fail"; repo.mkdir(); self._init_repo(repo)
-        a, b = self._scripts(tmp_path)
-        cfg = self._cfg(repo, a, b, "fail")
-        result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
-        assert result.exit_code != 0
-        assert "Promote conflict" in result.stderr
-        assert not (repo / "shared.txt").exists()
-
-    def test_committed_worktree_aborts_and_keeps_worktrees(self, runner, tmp_path):
-        repo = tmp_path / "moved"; repo.mkdir(); self._init_repo(repo)
-        commit = tmp_path / "commit.sh"
-        commit.write_text(
-            "#!/bin/bash\nset -euo pipefail\necho out > out.txt\n"
-            "git add out.txt\ngit commit -q -m work\n")
-        commit.chmod(0o755)
-        dirty = tmp_path / "dirty.sh"
-        dirty.write_text("#!/bin/bash\nset -euo pipefail\necho d > dirty.txt\n")
-        dirty.chmod(0o755)
-        cfg = self._cfg(repo, commit, dirty, "warn")
-        cfg.write_text(cfg.read_text().replace(
-            "settings:\n", "settings:\n  worktree_gc: on_success\n"))
-        result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
-        assert result.exit_code != 0
-        assert "writer_a" in result.stderr
-        assert "writer_b" not in result.stderr
-        assert not (repo / "out.txt").exists()
-        assert not (repo / "dirty.txt").exists()
-        # worktree_gc is skipped: both worktrees still hold their work.
-        kept = sorted(p.name for p in (repo / ".sqrlly").glob("*/*.txt"))
-        assert kept == ["dirty.txt", "out.txt"]
-
-    def test_overwrite_silent_last_write_wins(self, runner, tmp_path):
-        repo = tmp_path / "ow"; repo.mkdir(); self._init_repo(repo)
-        a, b = self._scripts(tmp_path)
-        cfg = self._cfg(repo, a, b, "overwrite")
-        result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
-        assert result.exit_code == 0, result.output + result.stderr
-        assert (repo / "shared.txt").read_text().strip() == "BBB"
-        assert "promote conflict" not in result.stderr
+    init_git_repo(tmp_path, files={"shared": "old"})
+    config = tmp_path / "workflow.yaml"
+    config.write_text(yaml.safe_dump({
+        "settings": {"on_promote_conflict": mode},
+        "nodes": [{"id": "edit", "worktree": "isolated", "run": [
+            "sh", "-c", 'echo node > shared; echo external > "$1/shared"', "edit", str(tmp_path),
+        ]}],
+    }))
+    result = runner.invoke(cli, ["run", str(config), "--workdir", str(tmp_path)])
+    assert (result.exit_code == 0) == success, result.output
+    assert (tmp_path / "shared").read_text().strip() == content

@@ -3,7 +3,7 @@
 `compute_skip_set` decides which prior-run-completed nodes are safe to skip on
 ``--resume``: prior_completed minus the "dirty" closure (prior failures +
 ``--resume-from`` targets, expanded by transitive ``depends_on`` dependents,
-route-target reachability, and ``worktree_group`` siblings). Topological only —
+and route-target reachability). Topological only —
 no content hashing (LLM nondeterminism + fan-out/promote side-effects make a
 content hash neither sufficient nor safe; see the design spec)."""
 from __future__ import annotations
@@ -40,9 +40,7 @@ def compute_skip_set(
 
     ``skip = prior_completed - dirty`` where ``dirty`` starts at
     ``prior_failed | rerun_targets`` and is closed over: transitive
-    ``depends_on`` dependents, route-target reachability, and
-    ``worktree_group`` siblings (a shared mutable tree means any dirty member
-    dirties the whole group). A node in ``prior_failed`` is subtracted out of
+    ``depends_on`` dependents and route-target reachability. A node in ``prior_failed`` is subtracted out of
     the skip set even if it is ALSO in ``prior_completed`` — the only case
     where that overlap arises is a fan-out parent that committed its gate
     (completed) and then had its ``_fan_`` dispatcher fail on a duplicate-id
@@ -64,14 +62,6 @@ def compute_skip_set(
                 dependents.setdefault(n.id, []).append(f"_final_{n.id}_{f.id}")
 
     route_adj = {n.id: _route_targets(n) for n in config.nodes}
-    groups: dict[str, list[str]] = {}
-    group_of: dict[str, str] = {}
-    for n in config.nodes:
-        kind, group = n.effective_worktree(config.settings)
-        if kind == "group":
-            groups.setdefault(group, []).append(n.id)
-            group_of[n.id] = group
-
     # A failed fan-out child has a synthetic id `<parent>::<item>` that is
     # NOT in config.nodes, so the BFS below can't reach its parent. Seed the
     # parent into the dirty set so it re-fans on resume; the dirty closure
@@ -92,9 +82,6 @@ def compute_skip_set(
     while frontier:
         cur = frontier.pop()
         neighbors = dependents.get(cur, []) + route_adj.get(cur, [])
-        g = group_of.get(cur)
-        if g:
-            neighbors += groups.get(g, [])
         for nxt in neighbors:
             if nxt not in dirty:
                 dirty.add(nxt)

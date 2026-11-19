@@ -458,14 +458,6 @@ class TestFanOut:
         assert config.manifest_path is None
         assert config.final_nodes == []
 
-    def test_fan_out_promote_field(self):
-        from sqrlly.schema.models import FanOut, FanOutTemplate
-        fo = FanOut(template=FanOutTemplate(agent="x.md"), promote=True)
-        assert fo.promote is True
-        # default is False
-        assert FanOut(template=FanOutTemplate(agent="x.md")).promote is False
-
-
 def test_kitchen_sink_composes_a_child_workflow(kitchen_sink_workflow_path):
     from sqrlly.schema.models import load_workflow
 
@@ -511,9 +503,9 @@ class TestNodeTimeout:
 
 
 class TestOnPromoteConflict:
-    def test_default_is_warn(self):
+    def test_default_is_fail(self):
         from sqrlly.schema.models import Settings
-        assert Settings().on_promote_conflict == "warn"
+        assert Settings().on_promote_conflict == "fail"
 
     def test_accepts_all_four_modes(self):
         from sqrlly.schema.models import Settings
@@ -557,25 +549,15 @@ class TestPromoteExclude:
             == ["node_modules", ".next/cache"]
 
 
-def test_settings_promote_include_field():
-    from sqrlly.schema.models import Settings
-    s = Settings(promote_include=["log/phases/*"])
-    assert s.promote_include == ["log/phases/*"]
-    assert Settings().promote_include == []   # default empty
-
-
 class TestWorktreeSetupFields:
     def test_defaults(self):
         from sqrlly.schema.models import Settings
         s = Settings()
         assert s.worktree_setup == []
-        assert s.worktree_setup_exclude == []
 
     def test_accepts_values(self):
         from sqrlly.schema.models import Settings
         s = Settings(
             worktree_setup=["pnpm install --prefer-offline"],
-            worktree_setup_exclude=["node_modules", "src/generated/prisma"],
         )
         assert s.worktree_setup == ["pnpm install --prefer-offline"]
-        assert s.worktree_setup_exclude == ["node_modules", "src/generated/prisma"]

@@ -40,6 +40,16 @@ def _merge_updates(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def fan_child_node(parent: Node, settings: Settings) -> Node:
+    template = parent.fan_out.template
+    child = Node(id=parent.id, evaluation=template.evaluation,
+                 output_contract=parent.output_contract,
+                 **parent.model_dump(include={"worktree", "promote"}, exclude_none=True),
+                 **({template.kind: getattr(template, template.kind)} if template.kind else {}))
+    child.worktree = child.effective_worktree(settings, fan_child=True)
+    return child
+
+
 def _make_fan_out_node(
     parent_node: Node,
     config: Graph,
@@ -87,7 +97,6 @@ def _make_fan_out_node(
             executor=executor,
             logger=logger,
             parent_settings=settings,
-            template_worktree=template.worktree,
         )
 
     async def node_fn(state: WorkflowState) -> dict[str, Any]:
@@ -126,17 +135,9 @@ def _make_fan_out_node(
                 "completed_nodes": {child_id},
             }
 
-        synthetic_node = Node(
-            id=child_id,
-            name=f"{parent_node.name} - {item.get('name', item_id)}",
-            evaluation=template.evaluation,
-            **({template.kind: getattr(template, template.kind)} if template.kind else {}),
-            # Per-fan-out worktree override (FanOutTemplate.worktree). None
-            # inherits settings.worktree — identical to a top-level node with
-            # no worktree set. Node-mode-wins-over-settings in
-            # effective_worktree applies the override at the foreman gate.
-            worktree=template.worktree,
-        )
+        synthetic_node = fan_child_node(parent_node, settings).model_copy(update={
+            "id": child_id, "name": f"{parent_node.name} - {item.get('name', item_id)}",
+        })
 
         # Build context up front — dep outputs + per-item manifest fields
         # do not change across retries within this node invocation.
@@ -203,6 +204,8 @@ def _make_fan_out_node(
                     ),
                     timeout,
                 )
+            if exec_result.retained_refs:
+                update.setdefault("retained_refs", set()).update(exec_result.retained_refs)
             if not exec_result.success:
                 return _merge_updates(update, make_failure_update(
                     child_id, exec_result.error,
@@ -229,6 +232,7 @@ def _make_fan_out_node(
             # inline retries counter, so its own read of retries matches.
             eval_state: WorkflowState = {
                 **state,
+                "node_worktrees": {**state.get("node_worktrees", {}), **exec_update.get("node_worktrees", {})},
                 "retries": {
                     **state.get("retries", {}),
                     child_id: retries_local,

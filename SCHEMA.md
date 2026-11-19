@@ -54,22 +54,19 @@ Node options override kind defaults. Each of the four kinds accepts a default ti
 
 ### Worktree isolation
 
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `worktree` | `Literal["auto","isolated","off"]` | `"auto"` | Graph-level isolation **mode**, inherited graph→subgraph. `auto` = isolate each node in its own git worktree iff the workdir is a git repo (else no worktree). `isolated` = force a per-node worktree. `off` (alias `none`) = no worktree; the node runs in the shared base workdir. Bare YAML `off`/`on` booleans are accepted (`off`→`off`, `on`→`isolated`). A non-mode value is rejected (a shared-tree **name** goes in `worktree_group`, not here). Per-node override: `Node.worktree`. |
-| `worktree_group` | `str \| None` | `None` | Names a **shared worktree** so multiple nodes write into one tree (the "feature team" pattern). Mutually exclusive with an explicit `worktree` mode (`isolated`/`off`) — setting both is a validation error; `worktree` left at `auto` is fine. Inherited graph→subgraph; a child authoring either field clears the inherited sibling. Resolution is by scope specificity (node → subgraph → graph). |
-| `worktree_gc` | `Literal["never","on_success"]` | `"never"` | Opt-in worktree cleanup. `on_success` removes every allocated worktree (per-node and shared group trees, each once) after a **clean** run (no `failed_nodes`); `never` keeps them for inspection / `--resume`. GC is end-of-run only — never mid-run — so retry-reuse and resume rehydrate are unaffected. A failed run never GCs. |
-| `on_promote_conflict` | `"fail" \| "warn" \| "overwrite" \| "skip"` | `"warn"` | Resolution when two same-wave promoting nodes touch the same path. `warn` logs the overlap and applies last-write-wins (run stays green); `fail` aborts before any write; `overwrite` is silent last-write-wins; `skip` keeps the first promoting node's version (by `nodes` order) and drops the path from later nodes (their other paths still promote). Detection runs discover-first, so `fail` never half-promotes. |
-| `on_manifest_drift` | `"fail" \| "warn"` | `"fail"` | Fan-out `--resume` manifest-drift policy. On resume a fan-out parent re-reads its manifest and re-fans; if that manifest DROPS a prior branch `id` (the dispatcher minted non-deterministic ids), the completed siblings silently vanish and the failed child is orphaned while all N re-run. `fail` (default) halts the parent before any `Send`, naming the vanished/orphaned ids (mirrors `on_promote_conflict: fail`); `warn` logs and proceeds with the new manifest (opt-in for an author who intends a changed manifest on resume). A stable-id or purely additive re-fan never trips it; no-op on fresh / `--entry` / `--rerun-all`. |
-| `promote_exclude` | `list[str]` | `[]` | Git pathspecs filtered out of every promoting node's footprint (promote layer). Defense-in-depth keeping generated artifacts (node_modules, build caches) out of base. |
-| `promote_include` | `list[str]` | `[]` | Git pathspecs RE-INCLUDED into every promoting node's footprint after `promote_exclude` removes them — the allow-list half. `promote_exclude: ["log/"]` + `promote_include: ["log/phases/**"]` promotes `log/phases/**` while dropping the rest of `log/`. (Git `:(exclude)` has no in-list negation, so this is a second pass; `include` overrides `exclude`.) |
-| `worktree_share` | `list[str]` | `[]` | Read-only whole-dir symlinks of these base paths into each worktree (no install). For read-only in-branch gates (`tsc --noEmit`, scoped tests). Each is also written to the repo's shared `.git/info/exclude` (git has no per-worktree exclude) so it stays out of the promote footprint. |
-| `worktree_setup` | `list[str]` | `[]` | Ordered shell commands run in each fresh worktree (e.g. `pnpm install --prefer-offline`, `pnpm exec prisma generate`). Sentinel-gated (runs once per base state); fatal-per-branch on failure. PM-agnostic. |
-| `worktree_setup_exclude` | `list[str]` | `[]` | Paths written to the repo's shared `.git/info/exclude` (git has no per-worktree exclude) before promote, so rehydrate artifacts (node_modules, in-tree generated clients) stay out of the footprint. Explicit (sqrlly does not infer them). |
+Inside a Git repository, agents and repeated commands start in an isolated worktree. Serial commands and LLM nodes run in the base directory. Outside Git, nodes run in the base directory. Agents and commands accept node-level `worktree: isolated|off` and `promote: true|false`. Set per-kind defaults under `settings.defaults.agent` or `settings.defaults.run`.
 
-The memory gate composes (AND) with the semaphores — every gate must
-allow dispatch. In-flight jobs are never aborted by the gate; only new
-acquisitions wait.
+| Setting | Default | Effect |
+|---|---|---|
+| `on_promote_conflict` | `fail` | Handle a path changed by another branch or in the base since the snapshot. Use `skip` to keep the existing version, `warn` to apply with a warning, or `overwrite` to apply silently. |
+| `promote_exclude` | `[]` | Git pathspecs omitted from promotion. Include generated directories when using setup commands. |
+| `worktree_share` | `[]` | Link named base directories into each new worktree for shared dependencies. |
+| `worktree_setup` | `[]` | Ordered shell commands to prepare an isolated worktree. |
+| `on_manifest_drift` | `fail` | Fail when a resumed manifest drops an earlier child id. Use `warn` to accept removals. |
+
+The engine snapshots the base workdir, including uncommitted files, before an isolated node starts. At settlement its committed and uncommitted changes become visible to dependents. A fan-out promotes its successful children together after all children succeed. The real Git index stays intact. `outputs.files` limits the promotion footprint when declared.
+
+A successful tree is removed after capture. With `promote: false`, the run reports the output ref for inspection. Failed worktrees remain available for recovery. A clean run prunes refs from earlier inactive runs of the same workflow.
 
 ## Node
 
@@ -84,9 +81,8 @@ acquisitions wait.
 | `fan_out` | `FanOut \| None` | `None` | Manifest-driven `Send` fan-out. |
 | `route` | `Route \| None` | `None` | Inline forward-edge routing block. |
 | `timeout` | `float \| None` | `None` | Per-node timeout; falls back to `settings.default_timeout`. |
-| `worktree` | `Literal["auto","isolated","off"] \| None` | `None` | Per-node isolation **mode** override; `None` inherits. Values: `auto` / `isolated` / `off` (alias `none`); bare YAML `off`/`on` booleans accepted. `off` runs the node in the shared base workdir (so e.g. a script gate, which runs at the base workdir, can read the node's files). See `settings.worktree`. |
-| `worktree_group` | `str \| None` | `None` | Per-node shared-tree name; mutually exclusive with an explicit `worktree` mode. Nodes sharing a name share one worktree. See `settings.worktree_group`. |
-| `promote` | `bool` | `False` | After a **clean** run, apply this node's worktree git delta (adds/edits/deletes vs the fork point) to the base workdir. Discovers the footprint from git — no need to predict which files changed — so it handles open-ended work (bugfixes/refactors) including deletions. If `output_contract.required_files` is set, those entries (git pathspec; `*`/`**`/`?`/`[…]`) filter what's promoted; otherwise the whole delta is promoted. Only UNCOMMITTED changes are promoted: a node that commits inside its worktree fails the promote step with an error naming the node, before any file is written. Runs before GC. Top-level nodes only. An `off` node already writes to the base workdir, so `promote` is a no-op there. Multi-source reconciliation of *overlapping* isolated trees (3-way merge) is out of scope. |
+| `worktree` | `isolated` or `off` | per-kind default | Select the execution directory for an agent or command. |
+| `promote` | boolean | true for isolated nodes | Apply the node’s snapshot delta when it settles. |
 
 The node schema rejects unknown keys.
 
@@ -265,7 +261,6 @@ presence is the activation; there is no enable flag.
 | `manifest_path` | `str \| None` | `None` | On-disk JSON manifest fallback. |
 | `template` | `FanOutTemplate \| None` | `None` | What each Send branch runs. |
 | `final_nodes` | `list[FanOutFinalNode]` | `[]` | Nodes that run after all branches, consuming aggregated output. |
-| `promote` | `bool` | `false` | When true, each Send branch's worktree delta is promoted back to base at the end of a clean run (top-level nodes only, before GC), through `reconcile_promotions` + `on_promote_conflict` + `promote_exclude` — the native merge-back for an isolated parallel build. Distinct from `Node.promote` (which promotes the parent's own manifest-only worktree delta, not the branch deltas); setting `node.promote: true` on a fan-out parent is a no-op, and `sqrlly validate` warns to steer you to `fan_out.promote` instead. |
 
 The manifest is read from the parent node's JSON output, falling back to
 `manifest_path`. Each Send branch runs the template's kind (and
@@ -286,7 +281,7 @@ item.
 |---|---|---|---|
 | `agent`, `llm`, `run`, `workflow` | kind | | Operation for each branch. |
 | `evaluation` | `Evaluation \| None` | `None` | Optional gate applied to each branch (with its own inline retry loop). |
-| `worktree` | `"auto" \| "isolated" \| "off"` | `null` (inherit `settings.worktree`) | Per-fan-out isolation override. Lets one workflow run an isolated build fan-out AND a shared-base planner fan-out under one top-level `settings.worktree`: this value overrides `settings.worktree` for every branch of THIS fan-out. `off` runs branches in the shared base workdir (their writes are visible to a downstream join node); `isolated`/`auto` give each branch its own git worktree. Same optional-override semantics as `Node.worktree`. Applies to both workflow and executable templates. |
+| `worktree` | `isolated` or `off` | per-kind default | Select the execution directory for an agent or command. |
 
 Final nodes take an id, an optional name and description, one kind, an optional evaluation and an optional output contract.
 A `workflow` template loads a child graph per item.

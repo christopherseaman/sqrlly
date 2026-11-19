@@ -51,7 +51,7 @@ def test_fan_out_files_resolve_at_load(tmp_path, monkeypatch):
 def test_per_kind_defaults_and_node_overrides():
     settings = Settings(defaults={"run": {"worktree": "off", "timeout": 10, "promote": True}})
     node = Node(id="a", run="pwd")
-    assert node.effective_worktree(settings) == ("off", None)
+    assert node.effective_worktree(settings) == "off"
     assert node.effective_timeout(settings) == 10
     assert node.effective_promote(settings) is True
     assert Node(id="a", run="pwd", promote=False).effective_promote(settings) is False

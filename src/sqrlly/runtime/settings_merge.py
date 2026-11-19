@@ -13,10 +13,6 @@ def merge_settings(parent: Settings, child: Settings, parent_dir: Path = Path(".
     defaults = base.setdefault("defaults", {})
     for kind, options in overrides.pop("defaults", {}).items():
         defaults.setdefault(kind, {}).update(options)
-    if "worktree" in overrides and "worktree_group" not in overrides:
-        base.pop("worktree_group", None)
-    if "worktree_group" in overrides and "worktree" not in overrides:
-        base.pop("worktree", None)
     merged = Settings.model_validate(base | overrides)
     merged._workflow_dir = child.workflow_dir or parent.workflow_dir
     if "preamble_file" in overrides:

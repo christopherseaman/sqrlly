@@ -1,30 +1,12 @@
-"""ForemanExecutor: worktree pool + creation throttle + memory gate.
-
-Wraps an inner `NodeExecutor` (typically `DispatchExecutor`) and adds:
-  - A **worktree pool** — per-node trees for ``auto``/``isolated`` nodes;
-    group nodes share one tree keyed by group name; ``off`` nodes run in
-    the base workdir.
-  - A **worktree-creation throttle** (`asyncio.Semaphore`) bounding how many
-    `git worktree add` run at once. The DISPATCH concurrency cap lives in
-    `DispatchExecutor` (so it applies off-git too); the foreman gates only
-    worktree creation, so a git child never holds two semaphores.
-  - **Memory back-pressure** — when ``settings.memory_threshold_pct`` is
-    set, blocks new dispatches while host memory percent is above it
-    (see ``runtime/memory_gate.py``; default off).
-
-Foreman is LangGraph-agnostic: it imports nothing from `compile/` or `langgraph`.
-The retry decision lives at the compile layer; foreman just runs what's handed
-to it.
-
-Worktree lifecycle: foreman creates worktrees on first `execute()` per
-`node_id`, reused across retries. With ``settings.worktree_gc: on_success``
-the CLI calls ``reclaim()`` after a clean run to remove all allocated trees;
-by default (``never``) they persist for inspection / ``--resume``.
-"""
+"""Isolate nodes in snapshot-backed Git worktrees and settle their deltas."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+from dataclasses import asdict
 import logging
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -33,245 +15,224 @@ from typing import Any
 from sqrlly.runtime.gates import scaffold_output_directory
 from sqrlly.runtime.memory_gate import POLL_INTERVAL_S, wait_for_memory
 from sqrlly.runtime.result import ExecutionResult, NodeExecutor, PromptBackend
+from sqrlly.runtime.snapshots import SnapshotRun
 from sqrlly.runtime.worktree_share import ensure_setup, materialize_shares
 from sqrlly.schema.models import Node, Settings
 
 logger = logging.getLogger(__name__)
 
 
-class ForemanExecutor:
-    """NodeExecutor wrapper adding a concurrency cap + worktree pool."""
+def _git(path: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "git command failed")
+    return result.stdout.strip()
 
+
+class ForemanExecutor:
     def __init__(
-        self,
-        inner: NodeExecutor,
-        base_workdir: str,
-        max_parallel_jobs: int = 4,
-        rehydrate: dict[str, str] | None = None,
+        self, inner: NodeExecutor, base_workdir: str, max_parallel_jobs: int = 4,
         settings: Settings | None = None,
-        memory_poll_interval_s: float = POLL_INTERVAL_S,
+        memory_poll_interval_s: float = POLL_INTERVAL_S, *,
+        workflow: str = "workflow", run: str | None = None, exclude_paths: tuple[str, ...] = (),
+        recover: bool = False,
     ):
         self._inner = inner
-        # Resolve to absolute so recorded worktree paths (node_worktrees,
-        # branch_map.worktree, promote/GC targets) are unambiguous regardless
-        # of the `--workdir` form — a fan-in consumer needn't re-resolve them.
-        self._base = str(Path(base_workdir).resolve())
-        # Throttles worktree CREATION only (not dispatch — that cap lives in
-        # DispatchExecutor). Prevents a wide fan-out from firing N `git
-        # worktree add` at once.
-        self._worktree_create_sem = asyncio.Semaphore(max_parallel_jobs)
-        self._worktrees: dict[str, str] = dict(rehydrate or {})
-        self._created_paths: set[str] = set()
-        self._worktree_lock = asyncio.Lock()
-        # In-flight creations, keyed by node_id. The global lock is held
-        # only to register/look up a task here — never across the
-        # `git worktree add` subprocess — so concurrent fan-out children
-        # create their worktrees in parallel instead of serializing.
-        self._worktree_tasks: dict[str, asyncio.Task[str]] = {}
+        self._base = Path(base_workdir).resolve()
+        self._root = Path(_git(self._base, "rev-parse", "--show-toplevel")).resolve()
+        self._prefix = self._base.relative_to(self._root)
+        self._pool = self._base / ".sqrlly"
+        self._common = Path(_git(self._base, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
         self._settings = settings or Settings()
+        self._creation = asyncio.Semaphore(max_parallel_jobs)
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._worktrees: dict[str, str] = {}
+        self._names: tuple[str, ...] = ()
+        self._recover = recover
+        self.reexecute: set[str] = set()
+        self._dispatched: set[str] = set()
         self._memory_poll_s = memory_poll_interval_s
+        self.run_id = run or uuid.uuid4().hex
+        excluded = [str(self._prefix / ".sqrlly")]
+        for path in exclude_paths:
+            absolute = (self._base / path).resolve()
+            if absolute.is_relative_to(self._root):
+                excluded.append(str(absolute.relative_to(self._root)))
+        self.snapshots = SnapshotRun(str(self._root), workflow, self.run_id, tuple(excluded))
 
-    async def execute(
-        self,
-        node: Node,
-        context: dict[str, Any],
-        workdir: str | None = None,
-        settings_override: Settings | None = None,
-    ) -> ExecutionResult:
-        s = settings_override or self._settings
+    def scoped(self, name: str) -> ForemanExecutor:
+        """Share the run and its leases while qualifying nested node ids."""
+        from copy import copy
+        child = copy(self)
+        child._names = (*self._names, name)
+        return child
 
-        # Memory back-pressure runs before any acquisition so a gated
-        # dispatch doesn't sit holding resources. Defaults to ``None``
-        # (disabled — a fast no-op).
-        await wait_for_memory(
-            s.memory_threshold_pct, node_id=node.id,
-            poll_interval=self._memory_poll_s,
-        )
+    def _key(self, node_id: str) -> str:
+        if not self._names and not node_id.startswith("["):
+            return node_id
+        return json.dumps([*self._names, node_id], separators=(",", ":"))
 
-        kind, group = node.effective_worktree(s)
-        if kind == "off":
-            run_dir = workdir or self._base
-        else:
-            pool_key = f"group:{group}" if kind == "group" else node.id
-            # Throttle worktree CREATION only; released before dispatch, so
-            # the inner DispatchExecutor's own cap is the sole dispatch gate
-            # (no nested-semaphore double-count).
+    def _tree(self, key: str) -> Path:
+        digest = hashlib.sha256(self.snapshots.ref(key, "in").encode()).hexdigest()
+        return self._pool / f"wt-{digest}"
+
+    def _owner(self, tree: Path) -> Path:
+        if tree.resolve() != tree or tree.parent != self._pool:
+            raise RuntimeError(f"Unexpected worktree path {tree}")
+        admin = Path(_git(tree, "rev-parse", "--absolute-git-dir")).resolve()
+        if (admin.parent != self._common / "worktrees"
+            or Path((admin / "gitdir").read_text().strip()).resolve() != tree / ".git"):
+            raise RuntimeError(f"Unregistered snapshot worktree {tree}")
+        return admin / "sqrlly-owner"
+
+    def _prepare_tree(self, key: str, tree: Path, ref: str, settings: Settings) -> None:
+        if self._pool.resolve() != self._pool:
+            raise RuntimeError(f"Worktree pool has a symlink ancestor: {self._pool}")
+        if not tree.exists():
+            if self._recover and key not in self.reexecute and key not in self._dispatched:
+                out = self.snapshots.ref(key, "out")
+                if _git(self._root, "rev-parse", "--revs-only", out):
+                    raise RuntimeError(f"Previous dispatch already produced {out}; checkpoint completion is missing. Inspect the ref before a fresh run.")
+            self._pool.mkdir(exist_ok=True)
+            commit = self.snapshots.capture_in(key, exclude_paths=self._shares(settings))
+            _git(self._root, "worktree", "add", "--detach", "--no-checkout", "-q", str(tree), commit)
+            self._owner(tree).write_text(ref)
+        owner = self._owner(tree)
+        if owner.read_text() != ref:
+            raise RuntimeError(f"Snapshot owner differs for {tree}")
+        checked_out = owner.with_name("sqrlly-checkout")
+        if not checked_out.exists():
+            if any(entry.name != ".git" for entry in tree.iterdir()):
+                raise RuntimeError(f"Incomplete checkout contains files; retained {tree}")
+            # Populate an empty, owned tree before invoking the repository's checkout hook.
+            if _git(tree, "ls-tree", "HEAD"):
+                _git(tree, "-c", "core.hooksPath=/dev/null", "restore", "--source=HEAD", "--staged", "--worktree", "--", ".")
+            checked_out.touch()
+        ready = owner.with_name("sqrlly-hook-complete")
+        if not ready.exists():
+            commit = _git(tree, "rev-parse", "HEAD")
+            _git(tree, "hook", "run", "--ignore-missing", "post-checkout", "--", "0" * len(commit), commit, "1")
+            ready.touch()
+
+    def _check_removable(self, key: str, tree: Path) -> None:
+        if self._owner(tree).read_text() != self.snapshots.ref(key, "in"):
+            raise RuntimeError(f"Snapshot owner differs for {tree}")
+        registered = _git(self._root, "worktree", "list", "--porcelain", "-z")
+        for field in registered.split("\0"):
+            if field.startswith("worktree "):
+                other = Path(field.removeprefix("worktree ")).resolve()
+                if other != tree and other.is_relative_to(tree):
+                    raise RuntimeError(f"Nested Git worktree at {other}; retained {tree}")
+
+        def fail(error):
+            raise error
+        for directory, dirs, files in os.walk(tree, onerror=fail):
+            path = Path(directory)
+            if path != tree and (".git" in dirs or ".git" in files
+                                 or ("HEAD" in files and "objects" in dirs and "refs" in dirs)):
+                raise RuntimeError(f"Nested Git repository at {path}; retained {tree}")
+
+    def _shares(self, settings: Settings) -> tuple[str, ...]:
+        return tuple(str(self._prefix / path) for path in settings.worktree_share)
+
+    async def acquire_branch_worktree(self, node_id: str, settings: Settings | None = None) -> str:
+        settings = settings or self._settings
+        key = self._key(node_id)
+        tree = self._tree(key)
+        ref = self.snapshots.ref(key, "in")
+        async with self._locks.setdefault(key, asyncio.Lock()), self._creation:
+            prepare = asyncio.create_task(asyncio.to_thread(self._prepare_tree, key, tree, ref, settings))
             try:
-                async with self._worktree_create_sem:
-                    run_dir = await self._acquire_worktree(
-                        node.id, pool_key, group
-                    )
-            except RuntimeError as e:
-                # A transient-infra abort (git worktree add / worktree_share
-                # materialize / worktree_setup) — return a classified failure
-                # for THIS node (attribution at the caller, which knows the id)
-                # rather than escaping as a raw traceback. `infra` is transient:
-                # a bounded --resume retry can clear a disk/FS/install blip, and
-                # returning (not raising) lets the graph settle so node_failed +
-                # workflow_end.failed_kinds land (no 0/0 halted-vs-clean ambiguity).
-                return ExecutionResult(
-                    success=False, error=str(e), error_kind="infra",
-                )
-        if node.output_contract:
-            scaffold_output_directory(node.output_contract, run_dir)
-        result = await self._inner.execute(
-            node, context, workdir=run_dir,
-            settings_override=settings_override,
-        )
-        if kind != "off" and result.worktree is None:
-            result.worktree = run_dir
-        return result
+                await asyncio.shield(prepare)
+            except asyncio.CancelledError:
+                await prepare
+                raise
+            dest = tree / self._prefix
+            if dest.resolve() != dest:
+                raise RuntimeError(f"Snapshot working directory contains a symlink: {dest}")
+            dest.mkdir(parents=True, exist_ok=True)
+            self._worktrees[key] = str(dest)
+            materialize_shares(str(self._base), str(dest), settings.worktree_share)
+            await ensure_setup(base=str(self._base), dest=str(dest), commands=settings.worktree_setup)
+            return str(dest)
 
-    async def _acquire_worktree(
-        self,
-        node_id: str,
-        pool_key: str | None = None,
-        group: str | None = None,
-    ) -> str:
-        """Return the worktree path for ``node_id``, creating it once.
-
-        ``pool_key`` controls deduplication of in-flight creation tasks:
-        - For group nodes: ``"group:<name>"`` so all siblings share one task.
-        - For per-node (auto/isolated): ``node_id`` (default).
-
-        ``_worktrees`` is always keyed by ``node_id`` (never by pool_key), so
-        ``get_worktree`` / ``worktree_map`` expose node-level paths as expected
-        by state persistence and rehydration.
-
-        The retry-reuse check on ``node_id`` runs first, before pool-key
-        dedup, so a retried node immediately reuses its own recorded path.
-        """
-        if pool_key is None:
-            pool_key = node_id
-
-        # Retry / resume reuse: if this node already has a live tree, make it
-        # ready (idempotent) OUTSIDE the lock and return it.
-        async with self._worktree_lock:
-            existing = self._worktrees.get(node_id)
-        if existing and Path(existing).is_dir():
-            await self._ensure_worktree_ready(existing)
-            return existing
-        # Dedup in-flight creation by pool_key (group siblings share one task).
-        async with self._worktree_lock:
-            task = self._worktree_tasks.get(pool_key)
-            if task is None:
-                task = asyncio.create_task(self._create_worktree(pool_key, group))
-                self._worktree_tasks[pool_key] = task
-
+    async def execute(self, node: Node, context: dict[str, Any], workdir: str | None = None,
+                      settings_override: Settings | None = None) -> ExecutionResult:
+        settings = settings_override or self._settings
+        await wait_for_memory(settings.memory_threshold_pct, node_id=node.id, poll_interval=self._memory_poll_s)
+        isolated = node.effective_worktree(settings) == "isolated"
         try:
-            path = await task
-        finally:
-            # Drop the finished task so a failed creation can be retried
-            # rather than re-awaiting a task that holds a stale error.
-            async with self._worktree_lock:
-                if self._worktree_tasks.get(pool_key) is task:
-                    del self._worktree_tasks[pool_key]
+            dest = await self.acquire_branch_worktree(node.id, settings) if isolated else str(workdir or self._base)
+            if node.output_contract:
+                scaffold_output_directory(node.output_contract, dest)
+            if not isolated:
+                return await self._inner.execute(node, context, workdir=dest, settings_override=settings_override)
 
-        # Record under the node's own id (not pool_key) — invariant for
-        # get_worktree / worktree_map / state persistence.
-        async with self._worktree_lock:
-            self._worktrees[node_id] = path
-        return path
+            key = self._key(node.id)
+            tree = self._tree(key)
+            record = self._owner(tree).with_name("sqrlly-dispatch.json")
+            cached = None
+            if record.exists():
+                cached = json.loads(record.read_text())
+                if cached is None:
+                    raise RuntimeError(f"Interrupted dispatch has no recorded result; retained {tree}. Start a fresh run after inspecting it.")
+            replay = self._recover and key not in self._dispatched and key not in self.reexecute
+            self._dispatched.add(key)
+            if replay and cached and cached["success"]:
+                cached["retained_refs"] = set(cached["retained_refs"])
+                result = ExecutionResult(**cached)
+            else:
+                # A crash before a result is recorded leaves the tree available for inspection.
+                record.write_text("null")
+                result = await self._inner.execute(node, context, workdir=dest, settings_override=settings_override)
+                result.worktree = dest
+                data = asdict(result)
+                data["retained_refs"] = sorted(result.retained_refs)
+                temporary = record.with_suffix(".tmp")
+                temporary.write_text(json.dumps(data))
+                os.replace(temporary, record)
+            self.snapshots.capture_out(key, str(tree), exclude_paths=self._shares(settings))
+            return result
+        except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+            return ExecutionResult(success=False, error=str(exc), error_kind="infra")
 
-    async def _create_worktree(self, pool_key: str, group: str | None = None) -> str:
-        """Create a git worktree for the given pool_key.
-
-        - Group trees use a deterministic path ``base/.sqrlly/wt-group-<name>``
-          so every member of the group, and resumed runs, reuse the same tree
-          without any uuid suffix. An ``is_dir`` check skips ``git worktree add``
-          when the tree already exists (sibling races or prior-run resume).
-        - Per-node trees use ``base/.sqrlly/wt-<safe_id>-<uuid8>``.
-
-        The node_id→path write is done by ``_acquire_worktree``, not here —
-        ``_worktrees`` must only be keyed by real node ids.
-        """
-        dest_dir = Path(self._base) / ".sqrlly"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        if group is not None:
-            safe = group.replace("/", "_").replace("::", "__")
-            # NOTE: group names that differ only by '/' vs '_' (or '::') map to
-            # the same safe name and therefore the same wt-group-<safe> path;
-            # authors should use distinct names that remain unique after sanitization.
-            dest = dest_dir / f"wt-group-{safe}"
-            if dest.is_dir() and (dest / ".git").exists():
-                # Shared live worktree already exists (sibling created it, or prior run).
-                self._created_paths.add(str(dest))
-                await self._ensure_worktree_ready(str(dest))
-                return str(dest)
+    def settle(self, node: Node, settings: Settings, ids: list[str]) -> set[str]:
+        keys = [self._key(node_id) for node_id in ids]
+        trees = [(key, self._tree(key)) for key in keys if self._tree(key).exists()]
+        for key, tree in trees:
+            self._check_removable(key, tree)
+            self.snapshots.capture_out(key, str(tree), exclude_paths=self._shares(settings))
+        retained = set()
+        if trees and node.effective_promote(settings):
+            globs = node.output_contract.required_paths() if node.output_contract else None
+            plan = self.snapshots.promote([(key, globs) for key, tree in trees], settings.on_promote_conflict,
+                                          excludes=settings.promote_exclude, prefix=self._prefix.as_posix() if self._prefix.parts else "")
+            if plan.conflicts and settings.on_promote_conflict == "warn":
+                logger.warning("Promote conflicts: %s", plan.conflicts)
         else:
-            safe = pool_key.replace("::", "__").replace("/", "_")
-            dest = dest_dir / f"wt-{safe}-{uuid.uuid4().hex[:8]}"
-
-        proc = await asyncio.create_subprocess_exec(
-            "git", "-C", self._base, "worktree", "add", "-q", str(dest), "HEAD",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _out, err = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"foreman: 'git worktree add' failed for {pool_key}: "
-                f"{err.decode().strip()}"
-            )
-        self._created_paths.add(str(dest))
-        await self._ensure_worktree_ready(str(dest))
-        return str(dest)
-
-    async def _ensure_worktree_ready(self, dest: str) -> None:
-        """Materialize read-only shares + run rehydrate setup for a worktree
-        about to be handed back. Idempotent (share symlinks + setup sentinel).
-        MUST be called WITHOUT self._worktree_lock held — ensure_setup runs
-        subprocesses; holding the lock would serialize all acquisitions."""
-        materialize_shares(self._base, dest, self._settings.worktree_share)
-        await ensure_setup(
-            base=self._base, dest=dest,
-            commands=self._settings.worktree_setup,
-            excludes=self._settings.worktree_setup_exclude,
-        )
-
-    async def reclaim(self) -> list[str]:
-        """Remove every distinct worktree this foreman created.
-
-        Returns the removed paths. The caller decides WHEN (end-of-run,
-        success only); this method does not gate on run status.
-        Group nodes share a single path — deduplication ensures each
-        distinct tree is removed exactly once.
-        """
-        distinct = sorted(set(self._worktrees.values()) | self._created_paths)
-        for path in distinct:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "-C", self._base, "worktree", "remove", "--force", path,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            _out, err = await proc.communicate()
-            if proc.returncode != 0:
-                logger.warning(
-                    "foreman: 'git worktree remove --force %s' failed (ignored): %s",
-                    path, err.decode().strip(),
-                )
-        self._worktrees.clear()
-        self._created_paths.clear()
-        return distinct
-
-    async def acquire_branch_worktree(self, branch_id: str) -> str:
-        """Acquire (or reuse) one isolated worktree keyed by a fan-out branch
-        id — mirrors inline-child keying so GC/resume/retry-reuse see it."""
-        return await self._acquire_worktree(branch_id, branch_id, None)
+            retained.update(self.snapshots.ref(key, "out") for key, tree in trees)
+        for key, tree in trees:
+            self._check_removable(key, tree)
+            try:
+                _git(self._root, "worktree", "remove", str(tree))
+            except RuntimeError:
+                self._check_removable(key, tree)
+                _git(self._root, "worktree", "remove", "--force", str(tree))
+            self._worktrees.pop(key, None)
+        return retained
 
     def get_worktree(self, node_id: str) -> str | None:
-        """Return the worktree path for a node_id, or None if not yet allocated."""
-        return self._worktrees.get(node_id)
+        return self._worktrees.get(self._key(node_id))
 
     def worktree_map(self) -> dict[str, str]:
-        """Snapshot of node_id → worktree path, for state persistence."""
         return dict(self._worktrees)
 
     def get_backend(self, settings: Settings | None = None) -> PromptBackend | None:
-        """Pass through to inner executor's backend (for .md LLM gates)."""
         if hasattr(self._inner, "get_backend"):
             return self._inner.get_backend(settings)
         return None
 
-    async def close(self) -> None:
+    async def close(self, clean: bool = False) -> None:
+        self.snapshots.close(clean=clean)
         if hasattr(self._inner, "close"):
             await self._inner.close()

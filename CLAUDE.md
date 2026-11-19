@@ -181,13 +181,10 @@ Three-layer split (enforced by `tests/architecture/test_layers.py`):
   applies off-git too — foreman gates only creation, no double-count).
 - `memory_gate.py` — `wait_for_memory` (optional, default-off host-memory
   back-pressure; isolates the sole `psutil` dependency).
-- `promote.py` — `discover_changes` / `apply_changes` / `plan_promotions`
-  / `reconcile_promotions` / `PromoteConflictError` /
-  `PromoteHeadMovedError`: cross-node promote reconciliation under
-  `settings.on_promote_conflict` (HEAD check→discover→plan→apply).
+- `snapshots.py` and `promote.py` capture Git refs through a temporary index, compare base blobs and apply the settled delta.
 - `settings_merge.py` — `merge_settings(parent, child)` for
   scope-aware inheritance.
-- `worktree_share.py` — `write_worktree_excludes` / `materialize_shares` / `ensure_setup` (worktree dep sharing: info/exclude write, read-only symlinks, sentinel-gated rehydrate).
+- `worktree_share.py` prepares dependency links and runs setup commands in new worktrees.
 - `executor/dispatch.py` — `DispatchExecutor` (node kind dispatch; owns
   the `max_parallel_jobs` dispatch semaphore — always applied, foreman or
   not, so a non-git fan-out is still throttled).
@@ -291,10 +288,7 @@ resolver sees) — distinct from faking what an external system returns.
   `1→N`), declared `final_nodes` render as chained real steps, and the
   parent's dependents fan in `N→1` from the chain exit — only the
   realized per-manifest child NODES (created at run time) are absent.
-- **Worktree cleanup is opt-in** — `settings.worktree_gc: on_success`
-  reclaims end-of-run on a clean exit; default `never` keeps trees under
-  `<workdir>/.sqrlly/` for inspection and `--resume`. `git worktree
-  remove <path>` always works manually.
+- Successful isolated worktrees are removed after their output ref is captured. Failed trees stay available. A clean run prunes earlier inactive runs’ refs for that workflow.
 - **`--resume` skips completed nodes (0.6.0)** — bare `--resume` reseeds
   the prior checkpoint and skips nodes that completed cleanly and aren't
   downstream of a failure (`compile/resume.py::compute_skip_set` → the
@@ -317,12 +311,7 @@ resolver sees) — distinct from faking what an external system returns.
   `depends_on` edge AFTER an inline-route hop elsewhere can see a stale
   `{{sender_id}}`; guard with `{% if sender_id %}` in that rare
   topology. Inside a goto-only target the var is always bound.
-- **Fan-out branch promotion is `fan_out.promote`, and external promote needs `worktree_gc: never`** — `fan_out.promote: true` merges each Send branch's worktree delta back to base at end-of-run via the shared `reconcile_promotions` path (before GC, so no race for the in-CLI path). A promote done OUTSIDE the run (a runner script after `sqrlly run` returns) must set `settings.worktree_gc: never`: with `on_success`, `reclaim()` `git worktree remove`s the branch trees before the process exits, so an external promote finds nothing and silently no-ops (silent data loss).
-- **Promote copies UNCOMMITTED changes only, and fails on a committed worktree** — `discover_changes` reads `git status`, which cannot see commits. `reconcile_promotions` therefore runs `git merge-base --is-ancestor <worktree HEAD> <base HEAD>` per spec first and raises `PromoteHeadMovedError` (naming every offending node id + worktree path) before any file is written; the CLI surfaces it as a `ClickException`, which also skips `worktree_gc`, so the commits stay in the worktree. A promoting node must leave its work uncommitted. The ancestor check passes when the base HEAD advanced during the run, and also when a node checked out an OLDER commit (not detected).
-- **`promote_include` re-includes after `promote_exclude`** — `settings.promote_include` (git pathspecs) is a second `discover_changes` pass unioned back into every promoting node's footprint, so you can exclude a directory but keep a subpath (`promote_exclude: ["log/"]` + `promote_include: ["log/phases/**"]`). It overrides `promote_exclude` and ignores a node's `output_contract` globs (footprint-level override).
-- **Worktree dep sharing** — gitignored base deps reach branch worktrees two ways: `settings.worktree_share` (read-only whole-dir symlink — for read-only gates) and `settings.worktree_setup` (per-worktree rehydrate commands; sentinel-gated, fatal-per-branch). Both write the shared paths to the repo's shared `.git/info/exclude` so they stay out of the promote footprint; `settings.promote_exclude` is the promote-layer backstop. Wired in `runtime/foreman.py::_ensure_worktree_ready` via `runtime/worktree_share.py`. Consumer note: a `prisma generate` in `worktree_setup` needs its output path in `worktree_setup_exclude` (a `validate` lint warns otherwise).
-  - **Shared `info/exclude`, not per-worktree** — git has no per-worktree exclude file: `git rev-parse --git-path info/exclude` resolves to the common git dir, the same `.git/info/exclude` for the base repo and every linked worktree, so `write_worktree_excludes` mutates that one shared file. Consequence: those entries persist in the base repo after the run and are NOT reclaimed by `worktree_gc`; however `info/exclude` only affects UNTRACKED paths, so it can never mask modifications to tracked files.
-- **Per-fan-out worktree override** — `fan_out.template.worktree` (`auto`/`isolated`/`off`, default inherit) overrides `settings.worktree` for one fan-out's branches, so a single workflow can mix an isolated build fan-out with a shared-base planner fan-out. Threaded two ways to match the two fan-out execution paths: subgraph templates gate isolation in `compile/subgraph.py::make_fan_out_subgraph_invoker` (new `template_worktree` arg overrides the `_isolate` computation); non-subgraph (`.md`/`.py`/script) templates set the synthetic child node's `worktree` in `compile/dynamic.py::_make_fan_out_node` so `effective_worktree` resolves it at the foreman gate. `off` runs branches in the base workdir (writes visible to a join node).
+- Promote compares the current base blob with the input snapshot before applying the result. The default conflict policy fails the node. `promote: false` retains the output ref and leaves the base alone.
 - **Bad-manifest fan-out fails the run (recoverable)** — the `_fan_<id>` dispatcher (`compile/graph.py::_make_fan_dispatcher`) FAILS the parent node with a `make_failure_update` `Command(goto=END)` — NOT a raise — on either (a) a `_read_manifest` `ManifestError` (unreadable / invalid-JSON / mis-shaped `manifest_path`, raised in `_read_manifest`) or (b) a DUPLICATE child id (literal duplicate, or the `::unknown` collapse of ≥2 id-less items; a dict item missing `id` also WARNs in `_normalize_items`). Failing the node (not raising) puts the parent in `failed_nodes` so bare `--resume` dirties it via `prior_failed` and re-fans once the manifest is fixed; a raise would leave the parent completed-but-not-failed (the gate committed one super-step earlier) and bare `--resume` would freeze it and re-fail deterministically. The parent can land in BOTH `completed_nodes` (gate committed) and `failed_nodes` (`_fan_` failed) in that checkpoint — `compile/resume.py::compute_skip_set`'s dirty subtraction handles it. (Note: `_read_manifest` still RAISES `ManifestError` when called directly, e.g. via `cli/main.py`; only the dispatcher converts it.)
 - **JSONL `gate_evaluated` precedes `node_completed`/`node_failed`** — the collapsed gate emits its EvaluationRecord and its outcome (completed / failed) in ONE super-step update, so `runtime/logging.py::_emit_update_events` orders `gate_evaluated` BEFORE both `node_completed` and `node_failed` ("gate ran, then the node settled"). For the pre-collapse split top-level pair the record already landed a super-step earlier, so this preserves that order; it is a VISIBLE JSONL order change for fan-out children and dynamic gated parents (whose single merged update previously emitted `node_completed` first). In-repo consumers (`terminal.py`, `view.py`) are order-insensitive.
 - `settings.defaults.agent.backend_max_retries` and `settings.defaults.llm.backend_max_retries`

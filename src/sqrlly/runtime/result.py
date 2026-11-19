@@ -7,7 +7,7 @@ protocols that produce them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from sqrlly.schema.models import Node, Settings
@@ -31,6 +31,7 @@ class ExecutionResult:
     # ran directly in the workdir. Used to validate output_contract
     # against where the node really wrote its files.
     worktree: str | None = None
+    retained_refs: set[str] = field(default_factory=set)
     # The CLI chooses its own model when the workflow leaves it unset.
     model: str | None = None
     provider: str | None = None

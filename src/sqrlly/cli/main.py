@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +15,6 @@ from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.compile.lint import collect_warnings
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.foreman import ForemanExecutor
-from sqrlly.runtime.promote import (
-    PromoteConflictError, PromoteHeadMovedError, fanout_branch_specs,
-    reconcile_promotions,
-)
 from sqrlly.runtime.runner import run_workflow
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import Graph, Settings, load_workflow
@@ -58,7 +55,7 @@ def load_config(config_file: str) -> Graph:
 
 def _thread_id_for(config: Graph, workdir: str) -> str:
     """Deterministic thread_id for a (workflow, workdir) pair."""
-    key = f"1.0:{config.settings.workflow_dir}:{config.name}:{Path(workdir).resolve()}"
+    key = f"1.0:{config.source_path or config.settings.workflow_dir}:{config.name}:{Path(workdir).resolve()}"
     return hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
@@ -327,7 +324,7 @@ async def _run_async(
     try:
         result = await _execute_workflow(
             config, workdir, dry_run, resume, resume_from, rerun_all,
-            thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode,
+            thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode, log_file=log_file,
         )
         return result
     finally:
@@ -399,6 +396,7 @@ async def _seed_state(
             "failed_nodes": set(), "retries": {}, "errors": [],
             "workdir": workdir, "dry_run": False, "_resume_skip": skip,
             "_fan_prior_children": fan_prior,
+            "_snapshot_reexecute": prior_failed | (prior_completed - skip),
         }
         if rerun_all:
             source = "all nodes (rerun-all)"
@@ -447,65 +445,6 @@ async def _seed_state(
     )
 
 
-async def _promote_and_gc(
-    config: Graph, executor_obj: Any, result: dict, workdir: str,
-) -> None:
-    """After a CLEAN run under a foreman, promote top-level + fan-out
-    branch worktree deltas to the base (BEFORE GC — reclaim would remove
-    the tree first), then GC if configured. A promote conflict/error
-    propagates (data-loss path), unlike reclaim's best-effort cleanup.
-    """
-    clean = not result.get("failed_nodes")
-    if not (clean and isinstance(executor_obj, ForemanExecutor)):
-        return
-    specs: list[tuple[str, str, list[str] | None]] = []
-    for node in config.nodes:
-        if not node.effective_promote(config.settings):
-            continue
-        tree = executor_obj.get_worktree(node.id)
-        if tree is None:
-            continue  # `off` node already wrote to the base workdir
-        # output_contract.required_files (base_directory-prepended)
-        # doubles as the promote pathspec filter when present;
-        # otherwise the full delta is promoted (discover mode).
-        globs = (
-            node.output_contract.required_paths()
-            if node.output_contract else None
-        )
-        specs.append((node.id, tree, globs))
-    # Fan-out branch worktrees opt in via fan_out.promote — route
-    # them through the same reconcile path (inherits conflict
-    # detection + promote_exclude + promote_include). They are recorded in
-    # node_worktrees keyed <parent>::<item>.
-    promote_parents = {
-        n.id for n in config.nodes
-        if n.fan_out is not None and n.fan_out.promote
-    }
-    specs.extend(fanout_branch_specs(
-        promote_parents, result.get("node_worktrees", {}),
-    ))
-    if specs:
-        try:
-            plan = reconcile_promotions(
-                specs, workdir,
-                config.settings.on_promote_conflict,
-                excludes=config.settings.promote_exclude or None,
-                includes=config.settings.promote_include or None,
-            )
-        except (PromoteConflictError, PromoteHeadMovedError) as e:
-            raise click.ClickException(str(e)) from e
-        if (plan.conflicts
-                and config.settings.on_promote_conflict == "warn"):
-            for path, nodes in sorted(plan.conflicts.items()):
-                click.echo(click.style(
-                    f"warning: promote conflict on {path!r} — "
-                    f"promoted by {', '.join(nodes)}; "
-                    f"last-write-wins",
-                    fg="yellow"), err=True)
-    if config.settings.worktree_gc == "on_success":
-        await executor_obj.reclaim()
-
-
 async def _execute_workflow(
     config: Graph,
     workdir: str,
@@ -518,6 +457,7 @@ async def _execute_workflow(
     logger: Any | None,
     entry: str | None = None,
     safe_mode: bool | None = None,
+    log_file: str | None = None,
 ) -> dict:
     if dry_run:
         compiled = build_workflow_graph(config, None, logger=logger)
@@ -535,18 +475,33 @@ async def _execute_workflow(
 
     async with AsyncSqliteSaver.from_conn_string(_db_path(workdir)) as cp:
         await cp.setup()
-        state = await _seed_state(
-            cp, config, workdir,
-            resume=resume, resume_from=resume_from, rerun_all=rerun_all,
-            entry=entry, thread_id=thread_id,
+        # Fresh invocations have independent checkpoints even when their workflow and workdir match.
+        workflow_key = thread_id
+        await cp.conn.execute(
+            "CREATE TABLE IF NOT EXISTS sqrlly_runs (workflow TEXT PRIMARY KEY, run TEXT NOT NULL)"
         )
-
+        if resume:
+            async with cp.conn.execute(
+                "SELECT run FROM sqrlly_runs WHERE workflow = ?", (workflow_key,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                raise click.ClickException(f"No saved state for this workflow at {_db_path(workdir)}")
+            run_id = row[0]
+        else:
+            run_id = uuid.uuid4().hex
+            await cp.conn.execute(
+                "INSERT OR REPLACE INTO sqrlly_runs VALUES (?, ?)", (workflow_key, run_id)
+            )
+            await cp.conn.commit()
+        thread_id = f"{workflow_key}:{run_id}"
         if _is_git_repo(workdir):
             executor_obj = ForemanExecutor(
                 inner=dispatch,
                 base_workdir=workdir,
                 max_parallel_jobs=config.settings.max_parallel_jobs,
-                rehydrate=dict(state.get("node_worktrees", {})),
+                workflow=f"{config.name}-{workflow_key}", run=run_id, recover=resume and not rerun_all,
+                exclude_paths=(str(Path(log_file).resolve()),) if log_file else (),
                 settings=config.settings,
             )
         else:
@@ -562,17 +517,31 @@ async def _execute_workflow(
                 )
             executor_obj = dispatch
 
-        compiled = build_workflow_graph(
-            config, executor_obj, checkpointer=cp, logger=logger,
-        )
+        clean = False
         try:
+            state = await _seed_state(
+                cp, config, workdir,
+                resume=resume, resume_from=resume_from, rerun_all=rerun_all,
+                entry=entry, thread_id=thread_id,
+            )
+
+            if isinstance(executor_obj, ForemanExecutor):
+                executor_obj.reexecute.update(state.pop("_snapshot_reexecute", set()))
+            compiled = build_workflow_graph(
+                config, executor_obj, checkpointer=cp, logger=logger,
+            )
             result = await run_workflow(
                 compiled, state, config,
                 thread_id=thread_id, logger=logger,
             )
-            await _promote_and_gc(config, executor_obj, result, workdir)
+            for ref in sorted(result.get("retained_refs", set())):
+                click.echo(f"Retained snapshot: {ref}")
+            clean = not result.get("failed_nodes")
         finally:
-            await executor_obj.close()
+            if isinstance(executor_obj, ForemanExecutor):
+                await executor_obj.close(clean=clean)
+            else:
+                await executor_obj.close()
 
         return result
 
@@ -675,6 +644,8 @@ def run(
         result = asyncio.run(
             _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file, quiet, entry, safe_mode)
         )
+    except BlockingIOError as exc:
+        raise click.ClickException("This workflow run is already active") from exc
     except (EvaluationError, ManifestError, RouteError) as e:
         # Infrastructure failures (broken validator / unreadable manifest
         # / unevaluable route predicate) halt the run loudly with a clean

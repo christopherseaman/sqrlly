@@ -160,98 +160,11 @@ sqrlly run path/to/workflow.yaml --log run.jsonl
 `validate` checks graph wiring and local prompt and child workflow paths.
 Run commands start in their node's working directory.
 
-**Controlling worktree isolation.** `worktree` (on `settings` or a
-node) picks the isolation mode: `auto` (default — isolate per node iff
-in a git repo), `isolated` (force a worktree), `off` (run in the shared
-base workdir — use this when nodes must see each other's files, or so a
-script gate can read the node's files directly). For a shared tree
-across *some* nodes, give them the same `worktree_group: <name>` — they
-write into one worktree (the feature-team pattern) with no merge step.
-`worktree` and `worktree_group` are mutually exclusive on one node;
-both inherit graph→subgraph and resolve by scope specificity (a node's
-setting beats the subgraph's beats the graph's). **Footgun:** a
-`worktree_group` on a *fan-out template* collapses all dynamic children
-into one shared tree — keep fan-out children on `auto`/`isolated`
-unless you intend that.
+**Worktree isolation.** In Git, an agent and each repeated command get separate worktrees. A serial command runs in the base directory. Dependents see promoted changes as soon as the producing node or fan-out settles. A node may commit its work. Use `worktree: off` on an agent or command that must share the base directory, and order shared writers with `depends_on`.
 
-**Getting results out + cleanup.** An isolated/group node's files live in
-its worktree, not the base workdir. Set `promote: true` on a top-level
-node to apply its worktree's git delta (adds/edits/**deletes**) back to
-the base workdir after a clean run — the change set is discovered from
-git, so it works for open-ended edits (bugfixes/refactors) you can't
-enumerate in advance; an `output_contract` (glob paths) narrows it.
-Promotion copies **uncommitted** changes only: tell a promoting node's
-agent not to `git commit`. A worktree holding commits fails the promote
-step (error names the node, nothing is written, the worktree is kept).
-Set `settings.worktree_gc: on_success` to remove worktrees after a clean
-run (default `never` keeps them for inspection / `--resume`). The full
-lifecycle is **fork → produce → read/share → promote → GC**.
+Set `promote: false` to keep a successful node’s result only in its output ref. The run prints that ref. Failed worktrees stay on disk. A changed base path fails promotion by default. File patterns in `outputs.files` narrow the changes a node promotes.
 
-A worktree-isolated **fan-out** merges its branch deltas back to base with
-`fan_out.promote: true` (routed through `on_promote_conflict` /
-`promote_exclude`, same as a top-level `promote: true`). Put `promote` on
-the `fan_out:` block, not the parent node — `node.promote` on a fan-out
-parent only promotes its manifest-only worktree (a `validate` lint warns).
-
-**Sharing base deps into worktrees.** A fresh worktree is a clean
-checkout — gitignored base dependencies (`node_modules`, generated
-clients) are not in it, so a node that needs them must get them. Two
-settings supply them without leaking them into the promote footprint.
-`settings.worktree_share: [<path>, …]` makes a read-only whole-dir
-**symlink** of each listed base path into every worktree (no install) —
-the cheap path, correct for read-only in-branch gates (`tsc --noEmit`,
-scoped tests). `settings.worktree_setup: [<cmd>, …]` runs ordered shell
-commands in each fresh worktree so the package manager builds its
-**own** real deps there (e.g. `["pnpm install --prefer-offline", "pnpm
-exec prisma generate"]`) — the rehydrate path, for branches that mutate
-deps or need write isolation; it is package-manager-agnostic,
-sentinel-gated (runs once per base state, not per node), and **fatal for
-that branch** on a non-zero exit (other branches proceed). Keep
-`worktree_setup` to pure base hydration — a branch that mutates
-`schema.prisma` should re-run `prisma generate` in its gate/build body,
-not in setup. If a setup command needs the package store on the same
-device as the worktree (pnpm's EXDEV/hardlink fix), pass the store
-location through the tool's own flag with an ABSOLUTE path (setup
-commands are exec'd without a shell), e.g.
-`pnpm install --store-dir=/abs/path/.pnpm-store`.
-
-**Keeping rehydrated deps out of promote.** Both mechanisms write the
-shared paths to the repo's shared `info/exclude` so they stay out of
-`git status` and therefore out of a `promote` delta. Rehydrate artifacts
-that `worktree_setup` creates are NOT inferred — list them explicitly in
-`settings.worktree_setup_exclude: [<path>, …]` (e.g. `node_modules`, an
-in-tree generated-client dir like `src/generated/prisma`). As a
-promote-layer backstop, `settings.promote_exclude: [<pathspec>, …]`
-filters those pathspecs out of **every** promoting node's footprint even
-if one slips past the `info/exclude` write — cheap defense-in-depth on
-the one operation (promote) you most can't afford to get wrong.
-
-To exclude a directory from a `promote` but keep one subpath, pair
-`settings.promote_exclude: ["log/"]` with `settings.promote_include:
-["log/phases/**"]` — the include is re-added after the exclude (git
-pathspecs can't negate in-list).
-
-**Subgraph fan-out isolation.** When a fan-out template is a subgraph
-(`.yaml`), each Send branch gets its own worktree (keyed by the branch
-id) and the subgraph's inner nodes all run *inside* that one branch tree
-— the **branch is the isolation unit**. Inner nodes share the branch
-tree (so a later inner node reads an earlier one's files for free; two
-inner nodes writing the *same* path race — give them distinct paths). An
-inner node's own `worktree`/`worktree_group` is neutralized — it can't
-escape the branch tree or join a cross-branch group. A fan-out nested
-*inside* a branch shares the outer branch tree (it isn't a second
-isolation level).
-
-A fan-out can override isolation per-block with `fan_out.template.worktree`
-(`auto`/`isolated`/`off`, default = inherit `settings.worktree`). Use
-`worktree: off` on the template when branches must write to the SHARED base
-workdir (a join node reads what they wrote); use `isolated` for a parallel
-build whose branch deltas you promote with `fan_out.promote`. Always give
-each manifest item a unique `id` — an id-less item WARNs and maps onto the
-single `<parent>::unknown` child, so two or more collide; a duplicate child
-id (or an unreadable/invalid `manifest_path`) **fails the parent node**
-before dispatch (run reports failure; fix the manifest and bare `--resume`
-re-fans the parent).
+Use `settings.worktree_share` for shared dependency directories and `settings.worktree_setup` for installation commands in each new tree. List generated directories in `settings.promote_exclude`.
 
 `run` flags: `--workdir/-w <dir>`, `--dry-run` (trace topology without
 executing),
@@ -359,21 +272,6 @@ large parallel build that loses one branch resumes cheaply.
   or purely additive re-fan never trips it; `validate`/`run` flag any
   runtime-manifest fan-out with an advisory.
 - Run trusted workflows only. A command runs with the host user's filesystem permissions.
-- **`prisma generate` in `worktree_setup` needs a matching exclude** —
-  a `prisma generate` command without its output path in
-  `worktree_setup_exclude` lets the generated client leak into the
-  promote footprint; `validate` warns about this. Add the output dir
-  (e.g. `src/generated/prisma`) and `node_modules` to
-  `worktree_setup_exclude`.
-- **The worktree exclude is the base repo's shared `info/exclude`** —
-  git has no per-worktree exclude file
-  (`git rev-parse --git-path info/exclude` resolves to the common git
-  dir), so the `worktree_share` / `worktree_setup_exclude` write mutates
-  the one `.git/info/exclude` shared by the base repo and all worktrees.
-  Those entries persist after the run and are not reclaimed by
-  `worktree_gc`; harmless because `info/exclude` only affects
-  **untracked** paths, so it can never mask edits to tracked files.
-
 ## Reference
 
 - Install this skill into a repo: `sqrlly init --skill` → writes

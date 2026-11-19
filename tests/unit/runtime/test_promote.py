@@ -1,67 +1,9 @@
 import subprocess
-from pathlib import Path
+
 import pytest
-from sqrlly.runtime.promote import (
-    PromoteConflictError,
-    PromoteHeadMovedError,
-    PromotionPlan,
-    apply_changes,
-    discover_changes,
-    plan_promotions,
-    reconcile_promotions,
-)
-from sqrlly.schema.models import OutputContract
 from helpers import init_git_repo
-
-
-def _repo(tmp):
-    init_git_repo(tmp, files={"a.txt": "orig"})
-
-def _wt(tmp, name="wt"):
-    dest = tmp/".sqrlly"/name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git","-C",str(tmp),"worktree","add","-q",str(dest),"HEAD"],check=True)
-    return dest
-
-
-def test_discover_add_and_edit(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"a.txt").write_text("changed")   # edit tracked file
-    (wt/"new.md").write_text("hi")        # add untracked file
-    changes = discover_changes(str(wt))
-    assert changes["new.md"] == "added"
-    assert changes["a.txt"] == "modified"
-
-
-def test_discover_captures_deletion(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"a.txt").unlink()
-    assert discover_changes(str(wt))["a.txt"] == "deleted"
-
-
-def test_glob_filter_pathspec(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"keep.md").write_text("x"); (wt/"skip.txt").write_text("y")
-    changes = discover_changes(str(wt), globs=["**/*.md"])
-    assert "keep.md" in changes and "skip.txt" not in changes
-
-
-def test_discover_path_with_spaces(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"has space.md").write_text("x")
-    changes = discover_changes(str(wt))
-    assert "has space.md" in changes          # no surrounding quotes
-    assert changes["has space.md"] == "added"
-
-
-def test_apply_changes_applies_only_the_given_paths(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt / "a.txt").write_text("changed"); (wt / "new.md").write_text("hi")
-    # Hand a subset: only new.md should land; a.txt must stay at base's original.
-    applied = apply_changes(str(wt), str(tmp_path), {"new.md": "added"})
-    assert (tmp_path / "new.md").read_text() == "hi"
-    assert (tmp_path / "a.txt").read_text() == "orig"   # NOT overwritten
-    assert applied == ["new.md"]
+from sqrlly.runtime.promote import PromoteConflictError, PromotionPlan, plan_promotions
+from sqrlly.runtime.snapshots import SnapshotRun
 
 
 def _footprints():
@@ -141,241 +83,201 @@ def test_plan_empty_footprints_no_conflict_any_mode():
         assert plan.conflicts == {}
 
 
-def _two_writers(tmp_path):
-    """Two worktrees: both write shared.txt (different content) + a unique file."""
-    _repo(tmp_path)
-    wa = _wt(tmp_path, "wa"); wb = _wt(tmp_path, "wb")
-    (wa/"shared.txt").write_text("AAA"); (wa/"a.txt").write_text("a")
-    (wb/"shared.txt").write_text("BBB"); (wb/"b.txt").write_text("b")
-    return [("writer_a", str(wa), None), ("writer_b", str(wb), None)]
+def test_snapshot_promotes_committed_and_uncommitted_without_touching_base_index(tmp_path):
+    def git(root, *args):
+        return subprocess.check_output(["git", "-C", root, *args])
+
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.email", "t@t")
+    git(tmp_path, "config", "user.name", "t")
+    file = tmp_path / "dirty"
+    file.write_text("staged")
+    git(tmp_path, "add", "dirty")
+    file.write_text("unstaged")
+    (tmp_path / "untracked").write_text("yes")
+    (tmp_path / ".sqrlly").mkdir()
+    (tmp_path / ".sqrlly" / "private").write_text("private")
+    run = SnapshotRun(str(tmp_path), "workflow", "first")
+    snapshot = run.capture_in("node")
+    wt = tmp_path / ".sqrlly" / "node"
+    git(tmp_path, "worktree", "add", "--detach", str(wt), snapshot)
+    assert (wt / "dirty").read_text() == "unstaged"
+    assert (wt / "untracked").read_text() == "yes"
+    assert not (wt / ".sqrlly").exists()
+    (wt / "dirty").rename(wt / "new\nname")
+    (wt / "untracked").unlink()
+    (wt / "link").symlink_to("new\nname")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "node commit")
+    (wt / "new\nname").chmod(0o755)
+    out = run.capture_out("node", str(wt))
+    assert git(tmp_path, "show", out + ":new\nname") == b"unstaged"
+    run.promote([("node", None)], "fail")
+    assert (tmp_path / "link").is_symlink()
+    assert (tmp_path / "link").read_text() == "unstaged"
+    assert (tmp_path / "new\nname").stat().st_mode & 0o111
+    assert not file.exists() and not (tmp_path / "untracked").exists()
+    assert git(tmp_path, "show", ":dirty") == b"staged"
+    (tmp_path / "new\nname").write_text("later")
+    run.promote([("node", None)], "fail")
+    assert (tmp_path / "new\nname").read_text() == "later"
+    run.close(True)
 
 
-def test_reconcile_warn_last_write_wins_and_reports(tmp_path):
-    specs = _two_writers(tmp_path)
-    plan = reconcile_promotions(specs, str(tmp_path), "warn")
-    assert (tmp_path/"shared.txt").read_text() == "BBB"   # later writer wins
-    assert (tmp_path/"a.txt").read_text() == "a"
-    assert (tmp_path/"b.txt").read_text() == "b"
-    assert plan.conflicts == {"shared.txt": ["writer_a", "writer_b"]}
+def test_snapshot_fails_before_writes_and_prunes_only_inactive_prior_runs(tmp_path):
+    init_git_repo(tmp_path, files={"a.txt": "orig"})
+    old = SnapshotRun(str(tmp_path), "flow", "old")
+    old.capture_in("x")
+    old.close(False)
+    active = SnapshotRun(str(tmp_path), "flow", "active")
+    active.capture_in("x")
+    run = SnapshotRun(str(tmp_path), "flow", "new")
+    sha = run.capture_in("x")
+    wt = tmp_path / ".sqrlly" / "x"
+    wt.parent.mkdir()
+    subprocess.run(["git", "-C", tmp_path, "worktree", "add", "--detach", wt, sha], check=True)
+    (wt / "a.txt").write_text("node")
+    (wt / "b.txt").write_text("new")
+    run.capture_out("x", str(wt))
+    (tmp_path / "a.txt").write_text("human")
+    with pytest.raises(PromoteConflictError) as err:
+        run.promote([("x", None)], "fail")
+    assert err.value.conflicts == {"a.txt": ["base", "x"]}
+    assert not (tmp_path / "b.txt").exists()
+    run.promote([("x", None)], "skip")
+    assert (tmp_path / "a.txt").read_text() == "human"
+    assert (tmp_path / "b.txt").read_text() == "new"
+    run.close(True)
+    refs = subprocess.check_output(["git", "-C", tmp_path, "for-each-ref", "--format=%(refname)"]).decode().splitlines()
+    assert old.ref("x", "in") not in refs
+    assert active.ref("x", "in") in refs and run.ref("x", "out") in refs
+    active.close(True)
 
 
-def test_reconcile_skip_first_writer_wins(tmp_path):
-    specs = _two_writers(tmp_path)
-    reconcile_promotions(specs, str(tmp_path), "skip")
-    assert (tmp_path/"shared.txt").read_text() == "AAA"   # first writer kept
-    assert (tmp_path/"a.txt").read_text() == "a"
-    assert (tmp_path/"b.txt").read_text() == "b"          # non-conflicting still lands
+@pytest.mark.parametrize("mode", ["warn", "overwrite"])
+def test_snapshot_nested_filter_respects_outputs_and_conflict_mode(tmp_path, mode):
+    (tmp_path / "sub").mkdir()
+    init_git_repo(tmp_path, files={"sub/a.txt": "original", "outside.txt": "base"})
+    run = SnapshotRun(str(tmp_path), "nested", "new")
+    sha = run.capture_in("node")
+    wt = tmp_path / ".sqrlly" / "wt"
+    wt.parent.mkdir()
+    subprocess.run(["git", "-C", tmp_path, "worktree", "add", "--detach", wt, sha], check=True)
+    (wt / "sub" / "a.txt").write_text("node")
+    (wt / "outside.txt").write_text("node")
+    (wt / "sub" / "ignored.txt").write_text("ignored")
+    (wt / "sub" / "other.md").write_text("other")
+    run.capture_out("node", wt)
+    (tmp_path / "sub" / "a.txt").write_text("human")
+    plan = run.promote([("node", ["**/*.txt"])], mode, excludes=["ignored.txt"], prefix="sub")
+    assert plan.conflicts == {"sub/a.txt": ["base", "node"]}
+    assert (tmp_path / "sub" / "a.txt").read_text() == "node"
+    assert (tmp_path / "outside.txt").read_text() == "base"
+    assert not (tmp_path / "sub" / "other.md").exists()
+    assert not (tmp_path / "sub" / "ignored.txt").exists()
+    run.close(True)
 
 
-def test_reconcile_fail_aborts_before_any_write(tmp_path):
-    specs = _two_writers(tmp_path)
+def test_snapshot_preserves_symlink_parent_and_unrelated_path(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    init_git_repo(base, files={"safe.txt": "orig"})
+    run = SnapshotRun(str(base), "workflow", "run")
+    sha = run.capture_in("x")
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "-C", base, "worktree", "add", "--detach", wt, sha], check=True)
+    (wt / "parent").mkdir()
+    (wt / "parent" / "file").write_text("node")
+    (wt / "safe.txt").write_text("node")
+    run.capture_out("x", wt)
+    external = tmp_path / "external"
+    external.mkdir()
+    (base / "parent").symlink_to(external)
     with pytest.raises(PromoteConflictError):
-        reconcile_promotions(specs, str(tmp_path), "fail")
-    # Nothing applied — discover-first means the raise precedes all copies.
-    # shared.txt and b.txt were never in the base repo.
-    # a.txt was in the base repo ("orig") and must not have been overwritten.
-    assert not (tmp_path/"shared.txt").exists()
-    assert (tmp_path/"a.txt").read_text() == "orig"
-    assert not (tmp_path/"b.txt").exists()
+        run.promote([("x", None)], "overwrite")
+    assert (base / "safe.txt").read_text() == "orig"
+    assert not (external / "file").exists()
+    run.close(False)
 
 
-def test_reconcile_fails_on_committed_worktree(tmp_path):
-    _repo(tmp_path)
-    committed = _wt(tmp_path, "committed"); dirty = _wt(tmp_path, "dirty")
-    (committed/"c.txt").write_text("c")
-    subprocess.run(["git", "-C", str(committed), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(committed), "commit", "-q", "-m", "work"],
-                   check=True)
-    (dirty/"d.txt").write_text("d")
-    dirty_spec = ("dirty_node", str(dirty), None)
-    with pytest.raises(PromoteHeadMovedError) as exc:
-        reconcile_promotions(
-            [dirty_spec, ("committed_node", str(committed), None)],
-            str(tmp_path), "warn",
-        )
-    assert exc.value.nodes == {"committed_node": str(committed)}
-    assert "committed_node" in str(exc.value)
-    # The raise precedes every copy, including the uncommitted sibling's.
-    assert not (tmp_path/"c.txt").exists()
-    assert not (tmp_path/"d.txt").exists()
-    # A worktree with only uncommitted edits still promotes.
-    reconcile_promotions([dirty_spec], str(tmp_path), "warn")
-    assert (tmp_path/"d.txt").read_text() == "d"
+def test_snapshot_recovers_interrupted_git_apply_without_losing_later_edits(tmp_path):
+    init_git_repo(tmp_path, files={"one": "base", "two": "base", "three": "base"})
+    run = SnapshotRun(str(tmp_path), "workflow", "run")
+    sha = run.capture_in("node")
+    wt = tmp_path / ".sqrlly" / "tree"
+    wt.parent.mkdir()
+    subprocess.run(["git", "-C", tmp_path, "worktree", "add", "--detach", wt, sha], check=True)
+    for path in ("one", "two", "three"):
+        (wt / path).write_text("node")
+    out = run.capture_out("node", wt)
+    # Recreate a crash after the first path was written, before marking the out ref settled.
+    subprocess.run(["git", "-C", tmp_path, "update-ref", out + "-pending", out], check=True)
+    (tmp_path / "one").write_text("node")
+    (tmp_path / "two").write_text("external")
+    with pytest.raises(PromoteConflictError) as err:
+        run.promote([("node", None)], "fail")
+    assert err.value.conflicts == {"two": ["base", "node"]}
+    assert (tmp_path / "three").read_text() == "base"
+    (tmp_path / "two").write_text("base")
+    run.promote([("node", None)], "fail")
+    assert [(tmp_path / p).read_text() for p in ("one", "two", "three")] == ["node"] * 3
+    run.close(True)
 
 
-def test_head_moved_advice_keeps_base_commits_made_after_the_fork(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (tmp_path/"a.txt").write_text("base-new")
-    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-am", "base"],
-                   check=True)
-    base_sha = subprocess.run(
-        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True).stdout.strip()
-    (wt/"new.txt").write_text("new")
-    subprocess.run(["git", "-C", str(wt), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "work"],
-                   check=True)
-    spec = [("committer", str(wt), None)]
-    with pytest.raises(PromoteHeadMovedError) as exc:
-        reconcile_promotions(spec, str(tmp_path), "warn")
-    advised = f"git reset --soft $(git merge-base HEAD {base_sha})"
-    assert f"`{advised}`" in str(exc.value)
-    assert "--resume" in str(exc.value)
-    subprocess.run(["bash", "-c", advised], cwd=wt, check=True)
-    reconcile_promotions(spec, str(tmp_path), "warn")
-    assert (tmp_path/"new.txt").read_text() == "new"
-    assert (tmp_path/"a.txt").read_text() == "base-new"
+def test_snapshot_preserves_fifo_at_destination(tmp_path):
+    import os
+    import stat
+
+    init_git_repo(tmp_path, files={"keep": "base"})
+    run = SnapshotRun(str(tmp_path), "workflow", "run")
+    sha = run.capture_in("node")
+    wt = tmp_path / ".sqrlly" / "tree"
+    wt.parent.mkdir()
+    subprocess.run(["git", "-C", tmp_path, "worktree", "add", "--detach", wt, sha], check=True)
+    (wt / "pipe").write_text("regular")
+    (wt / "keep").write_text("node")
+    run.capture_out("node", wt)
+    os.mkfifo(tmp_path / "pipe")
+    with pytest.raises(PromoteConflictError):
+        run.promote([("node", None)], "overwrite")
+    assert stat.S_ISFIFO((tmp_path / "pipe").lstat().st_mode)
+    assert (tmp_path / "keep").read_text() == "base"
+    run.close(False)
 
 
-def test_reconcile_propagates_deletion(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path)
-    (wt/"a.txt").unlink()
-    reconcile_promotions([("deleter", str(wt), None)], str(tmp_path), "warn")
-    assert not (tmp_path/"a.txt").exists()
-
-
-def test_reconcile_disjoint_promotes_both(tmp_path):
-    _repo(tmp_path)
-    wa = _wt(tmp_path, "wa"); wb = _wt(tmp_path, "wb")
-    (wa/"a.txt").write_text("a"); (wb/"b.txt").write_text("b")
-    specs = [("writer_a", str(wa), None), ("writer_b", str(wb), None)]
-    plan = reconcile_promotions(specs, str(tmp_path), "warn")
-    assert plan.conflicts == {}
-    assert (tmp_path/"a.txt").read_text() == "a"
-    assert (tmp_path/"b.txt").read_text() == "b"
-
-
-def test_reconcile_glob_honors_base_directory(tmp_path):
-    """#4: globs from required_paths() (base_directory prepended) promote the
-    subdir file; the raw-required_files glob would promote nothing."""
-    _repo(tmp_path)
-    wt = _wt(tmp_path, "wc")
-    (wt/"reference").mkdir()
-    (wt/"reference"/"prd-context-map.json").write_text("{}")
-    contract = OutputContract(
-        base_directory="reference", required_files=["prd-context-map.json"],
-    )
-    reconcile_promotions(
-        [("ref", str(wt), contract.required_paths())], str(tmp_path), "warn",
-    )
-    assert (tmp_path/"reference"/"prd-context-map.json").read_text() == "{}"
-
-
-def test_reconcile_raw_required_files_glob_promotes_nothing(tmp_path):
-    """Documents the bug #4 fixes: the raw (un-prepended) pathspec matches
-    only a root-level file, so the subdir file is excluded."""
-    _repo(tmp_path)
-    wt = _wt(tmp_path, "wd")
-    (wt/"reference").mkdir()
-    (wt/"reference"/"prd-context-map.json").write_text("{}")
-    reconcile_promotions(
-        [("ref", str(wt), ["prd-context-map.json"])], str(tmp_path), "warn",
-    )
-    assert not (tmp_path/"reference"/"prd-context-map.json").exists()
-
-
-def test_discover_changes_excludes_pathspec(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path, "wex")
-    (wt / "real.txt").write_text("keep")
-    (wt / "node_modules").mkdir()
-    (wt / "node_modules" / "dep.js").write_text("x")
-    assert "node_modules/dep.js" in discover_changes(str(wt))
-    changes = discover_changes(str(wt), excludes=["node_modules"])
-    assert "real.txt" in changes
-    assert not any(p.startswith("node_modules") for p in changes)
-
-
-def test_reconcile_threads_excludes(tmp_path):
-    _repo(tmp_path); wt = _wt(tmp_path, "wex2")
-    (wt / "real.txt").write_text("keep")
-    (wt / "node_modules").mkdir()
-    (wt / "node_modules" / "dep.js").write_text("x")
-    reconcile_promotions(
-        [("n", str(wt), None)], str(tmp_path), "warn", excludes=["node_modules"],
-    )
-    assert (tmp_path / "real.txt").read_text() == "keep"
-    assert not (tmp_path / "node_modules").exists()
-
-
-from sqrlly.runtime.promote import fanout_branch_specs
-
-
-def test_fanout_branch_specs_selects_promote_parents():
-    node_worktrees = {
-        "build::feat_a": "/wt/build__feat_a",
-        "build::feat_b": "/wt/build__feat_b",
-        "plan::v1": "/wt/plan__v1",     # parent not promoting
-        "toplevel_node": "/wt/toplevel", # not a branch (no ::)
-    }
-    specs = fanout_branch_specs({"build"}, node_worktrees)
-    assert specs == [
-        ("build::feat_a", "/wt/build__feat_a", None),
-        ("build::feat_b", "/wt/build__feat_b", None),
-    ]
-
-def test_fanout_branch_specs_empty_when_no_promote_parents():
-    assert fanout_branch_specs(set(), {"build::a": "/wt/a"}) == []
-
-
-def test_discover_changes_reinclude_keeps_subpath(tmp_path):
-    _repo(tmp_path)
-    wt = _wt(tmp_path, "wt-ri")
-    # Create changes: a kept subpath under an excluded dir, a dropped sibling,
-    # and an unrelated file.
-    (wt / "log" / "phases").mkdir(parents=True)
-    (wt / "log" / "phases" / "keep.txt").write_text("keep")
-    (wt / "log" / "noise.txt").write_text("noise")
-    (wt / "src").mkdir()
-    (wt / "src" / "main.py").write_text("x")
-
-    out = discover_changes(
-        str(wt), excludes=["log/"], includes=["log/phases/**"],
-    )
-    assert "src/main.py" in out                 # unrelated change kept
-    assert "log/phases/keep.txt" in out         # re-included by allow-list
-    assert "log/noise.txt" not in out           # excluded, not re-included
-
-
-def test_discover_changes_no_includes_unchanged(tmp_path):
-    _repo(tmp_path)
-    wt = _wt(tmp_path, "wt-noinc")
-    (wt / "log").mkdir()
-    (wt / "log" / "a.txt").write_text("a")
-    (wt / "src").mkdir(); (wt / "src" / "b.py").write_text("b")
-    out = discover_changes(str(wt), excludes=["log/"])  # includes default None
-    assert "src/b.py" in out
-    assert "log/a.txt" not in out               # excluded, no re-include
-
-
-def test_discover_changes_include_without_exclude(tmp_path):
-    """Re-include pass unions in extra files even with no base glob + no excludes."""
-    _repo(tmp_path)
-    wt = _wt(tmp_path, "wt-inc-no-exc")
-    (wt / "src").mkdir()
-    (wt / "src" / "main.py").write_text("x")
-    (wt / "extra").mkdir()
-    (wt / "extra" / "note.txt").write_text("note")
-    out = discover_changes(
-        str(wt), globs=["src/**"], includes=["extra/**"],
-    )
-    # Glob alone would exclude extra/; include re-adds it.
-    assert "src/main.py" in out
-    assert "extra/note.txt" in out
-
-
-def test_reconcile_promotions_reinclude(tmp_path):
-    _repo(tmp_path)
-    wt = _wt(tmp_path, "wt-rec")
-    (wt / "log" / "phases").mkdir(parents=True)
-    (wt / "log" / "phases" / "keep.txt").write_text("keep")
-    (wt / "log" / "noise.txt").write_text("noise")
-    plan = reconcile_promotions(
-        [("n", str(wt), None)], str(tmp_path), "warn",
-        excludes=["log/"], includes=["log/phases/**"],
-    )
-    # The re-included path is applied to base; the excluded sibling is not.
-    assert (tmp_path / "log" / "phases" / "keep.txt").exists()
-    assert not (tmp_path / "log" / "noise.txt").exists()
-    # Assert plan structure matches established pattern
-    assert "log/phases/keep.txt" in plan.allowed["n"]
-    assert "log/noise.txt" not in plan.allowed["n"]
+@pytest.mark.parametrize("obstruction", ["file", "symlink", "directory"])
+def test_skip_structural_conflict_promotes_independent_path(tmp_path, obstruction):
+    base = tmp_path / "base"
+    base.mkdir()
+    init_git_repo(base, files={"independent": "original"})
+    run = SnapshotRun(str(base), "workflow", "run")
+    sha = run.capture_in("node")
+    wt = tmp_path / "tree"
+    subprocess.run(["git", "-C", base, "worktree", "add", "--detach", wt, sha], check=True)
+    (wt / "independent").write_text("node")
+    if obstruction == "directory":
+        (wt / "slot").write_text("replacement")
+        (base / "slot").mkdir()
+        (base / "slot" / "external").write_text("human")
+        blocked = "slot"
+    else:
+        (wt / "slot").mkdir()
+        (wt / "slot" / "result").write_text("node")
+        blocked = "slot/result"
+        if obstruction == "file":
+            (base / "slot").write_text("human")
+        else:
+            (base / "slot").symlink_to(tmp_path)
+    run.capture_out("node", wt)
+    plan = run.promote([("node", None)], "skip")
+    assert blocked in plan.conflicts
+    assert plan.allowed == {"node": {"independent": "modified"}}
+    assert (base / "independent").read_text() == "node"
+    if obstruction == "directory":
+        assert (base / "slot" / "external").read_text() == "human"
+    elif obstruction == "file":
+        assert (base / "slot").read_text() == "human"
+    else:
+        assert (base / "slot").is_symlink()
+        assert not (tmp_path / "result").exists()
+    run.close(True)

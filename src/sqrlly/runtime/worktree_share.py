@@ -1,16 +1,4 @@
-"""Worktree dependency-sharing helpers (runtime layer, langgraph-free).
-
-The load-bearing piece is ``write_worktree_excludes``: it appends paths to the
-repository's SHARED ``info/exclude`` (the common git dir —
-``git rev-parse --git-path info/exclude`` returns the same file for the base
-repo and every linked worktree; git has no per-worktree exclude) so
-shared/generated artifacts (node_modules, build
-caches, in-tree generated clients) never appear in ``git status
---untracked-files=all`` — i.e. never enter ``promote.discover_changes``'
-footprint, so ``apply_changes`` can't follow them into base. A real
-``.gitignore`` rule cannot be trusted (a ``node_modules/`` dir-slash rule does
-NOT hide a symlink named ``node_modules``); writing the bare path here does.
-"""
+"""Share dependencies and initialize isolated worktrees."""
 from __future__ import annotations
 
 import asyncio
@@ -21,82 +9,29 @@ import subprocess
 from pathlib import Path
 
 
-def _info_exclude_path(worktree: str) -> Path:
-    """Resolve the repo's shared ``info/exclude`` (absolute). Note: in a linked
-    worktree ``git rev-parse --git-path info/exclude`` resolves to the COMMON
-    git dir — the same file for the base repo and every worktree."""
-    rel = subprocess.run(
-        ["git", "-C", worktree, "rev-parse", "--git-path", "info/exclude"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    p = Path(rel)
-    return p if p.is_absolute() else Path(worktree) / p
-
-
-def _ends_with_newline(p: Path) -> bool:
-    with p.open("rb") as fh:
-        try:
-            fh.seek(-1, 2)
-        except OSError:
-            return True  # empty file
-        return fh.read(1) == b"\n"
-
-
-def write_worktree_excludes(worktree: str, paths: list[str]) -> None:
-    """Append each path (trailing slash stripped) to the repo's shared
-    ``info/exclude`` if not already a line. Bare (slash-less) entries match a
-    symlink/dir of that name, which a ``foo/`` .gitignore rule does not.
-    Idempotent — safe to call on every worktree hand-back; because the file is
-    shared across all worktrees, the existing-line dedup keeps it from growing
-    on repeat calls."""
-    if not paths:
-        return
-    exclude_file = _info_exclude_path(worktree)
-    exclude_file.parent.mkdir(parents=True, exist_ok=True)
-    existing = (
-        set(exclude_file.read_text().splitlines())
-        if exclude_file.exists() else set()
-    )
-    to_add = [p.rstrip("/") for p in paths if p.rstrip("/") not in existing]
-    if not to_add:
-        return
-    with exclude_file.open("a") as fh:
-        if exclude_file.stat().st_size and not _ends_with_newline(exclude_file):
-            fh.write("\n")
-        for p in to_add:
-            fh.write(p + "\n")
-
-
 def materialize_shares(base: str, dest: str, shares: list[str]) -> None:
-    """Symlink each read-only share path from ``base`` into the worktree
-    ``dest`` (relative symlink), then write the shared exclude so the link
-    stays out of the promote footprint. Raises if a configured share path is
-    absent in ``base`` (fail fast — a dangling link makes in-branch tooling
-    fail confusingly). Idempotent: a correct existing symlink is left as-is."""
+    """Link each configured base path inside the engine-owned tree."""
     for share in shares:
-        src = Path(base) / share
+        rel = Path(share)
+        if not rel.parts or rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts:
+            raise RuntimeError(f"worktree_share requires a repository-relative path: {share!r}")
+        src = Path(base) / rel
+        link = Path(dest) / rel
+        if not link.parent.resolve().is_relative_to(Path(dest).resolve()):
+            raise RuntimeError(f"worktree_share escapes worktree: {share!r}")
         if not src.exists():
             raise RuntimeError(
                 f"worktree_share path {share!r} does not exist in base "
                 f"{base!r} — install/build it before the run."
             )
-        link = Path(dest) / share
         target = os.path.relpath(src, link.parent)
         if link.is_symlink():
             if os.readlink(link) != target:
-                link.unlink()
-                link.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(target, link)
-        elif link.exists():
-            # A real tracked path collides with the share name — leave it.
-            continue
-        else:
+                raise RuntimeError(f"Unexpected existing symlink at {link}")
+        elif not link.exists():
             link.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.symlink(target, link)
-            except FileExistsError:
-                pass  # race with a sibling acquiring the same group tree
-        write_worktree_excludes(dest, [share])
+            link.symlink_to(target)
+
 
 
 def setup_fingerprint(base: str, commands: list[str]) -> str:
@@ -116,26 +51,15 @@ def setup_fingerprint(base: str, commands: list[str]) -> str:
 
 
 async def ensure_setup(
-    *, base: str, dest: str, commands: list[str], excludes: list[str],
+    *, base: str, dest: str, commands: list[str],
     retries: int = 1,
 ) -> None:
-    """Idempotently run the worktree setup commands in ``dest``.
-
-    Sentinel-gated: skips the (expensive) commands when ``dest/.sqrlly/setup-ok``
-    matches the fingerprint. ``excludes`` are written BEFORE the sentinel gate —
-    i.e. reconciled on every call (cheap + idempotent), so a newly-added exclude
-    path lands even when the command sentinel already matches. On non-zero exit
-    after ``retries`` retries, raises ``RuntimeError`` (fatal for the branch — a
-    clear diagnosable failure, not a misleading downstream gate failure). Writes
-    the sentinel only on success. (GC registration of ``dest`` is the caller's
-    responsibility, before this is awaited.)"""
-    if not commands and not excludes:
+    """Run setup once per command list and base commit."""
+    if not commands:
         return
-    # Exclude write first — reconciled on every hand-back, independent of the
-    # command sentinel (cheap + idempotent), so an exclude-only change is not
-    # silently dropped and a crashed install can't leak artifacts.
-    write_worktree_excludes(dest, excludes)
     marker = Path(dest) / ".sqrlly" / "setup-ok"
+    if marker.resolve() != marker.absolute():
+        raise RuntimeError(f"Unexpected worktree setup marker symlink at {marker}")
     fp = setup_fingerprint(base, commands)
     if marker.exists() and marker.read_text().strip() == fp:
         return

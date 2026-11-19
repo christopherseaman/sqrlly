@@ -52,37 +52,9 @@ def test_route_target_of_failure_is_dirty():
     assert compute_skip_set(g, {"a", "b"}, {"a"}, set()) == set()
 
 
-def test_worktree_group_sibling_force_dirty():
-    # a,b share a worktree_group; a dirty => b force-dirty (shared mutable tree).
-    g = _g([
-        _exec("a", worktree_group="team"),
-        _exec("b", worktree_group="team"),
-    ])
-    assert compute_skip_set(g, {"a", "b"}, {"a"}, set()) == set()
-
-
 def test_empty_inputs():
     g = _g([_exec("a")])
     assert compute_skip_set(g, set(), set(), set()) == set()
-
-
-def test_settings_level_worktree_group_force_dirty():
-    # Graph-level settings.worktree_group shares one tree even without
-    # per-node groups; a dirty => b force-dirty (the false-skip guard).
-    g = Graph(name="T",
-              nodes=[_exec("a"), _exec("b")],
-              settings={"worktree_group": "shared"})
-    assert compute_skip_set(g, {"a", "b"}, {"a"}, set()) == set()
-
-
-def test_group_sibling_dependent_is_transitively_dirty():
-    # a,b share a group; b has dependent c. a dirty => b (group) => c (dep).
-    g = _g([
-        _exec("a", worktree_group="team"),
-        _exec("b", worktree_group="team"),
-        _exec("c", depends_on=["b"]),
-    ])
-    assert compute_skip_set(g, {"a", "b", "c"}, {"a"}, set()) == set()
 
 
 def test_cyclic_route_terminates():

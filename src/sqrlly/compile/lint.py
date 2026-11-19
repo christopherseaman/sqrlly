@@ -19,7 +19,7 @@ def collect_warnings(config: Graph) -> list[str]:
         _hyphenated_id_warnings(config)
         + _advisory_gate_warnings(config)
         + _worktree_setup_exclude_warnings(config)
-        + _fanout_parent_promote_warnings(config)
+        + _shared_worktree_warnings(config)
         + _fanout_resume_drift_warnings(config)
     )
 
@@ -81,39 +81,32 @@ def _advisory_gate_warnings(config: Graph) -> list[str]:
 
 
 def _worktree_setup_exclude_warnings(config: Graph) -> list[str]:
-    """Flag a worktree_setup that generates an in-tree artifact (prisma
-    generate) without a worktree_setup_exclude — the generated client would
-    leak into the promote footprint."""
-    s = config.settings
-    runs_prisma_generate = any("prisma generate" in cmd for cmd in s.worktree_setup)
-    if runs_prisma_generate and not s.worktree_setup_exclude:
-        return [
-            "settings.worktree_setup runs 'prisma generate' but "
-            "worktree_setup_exclude is empty — the generated client may leak "
-            "into the promote footprint. Add its output path (e.g. "
-            "'src/generated/prisma' or 'node_modules') to worktree_setup_exclude."
-        ]
+    if config.settings.worktree_setup and not config.settings.promote_exclude:
+        return ["settings.worktree_setup has no promote_exclude; generated files may be promoted"]
     return []
 
 
-def _fanout_parent_promote_warnings(config: Graph) -> list[str]:
-    """Flag ``node.promote: true`` on a fan-out parent.
-
-    A fan-out parent's OWN worktree holds only the manifest, not the branch
-    deltas. Setting ``node.promote`` there promotes the manifest-only tree,
-    not what the author almost certainly intends. ``fan_out.promote`` is the
-    correct knob — it promotes each Send branch's worktree through the same
-    reconcile path.
-    """
-    out: list[str] = []
-    for node in config.nodes:
-        if node.fan_out is not None and node.promote:
-            out.append(
-                f"node {node.id!r}: promote on a fan-out parent promotes only "
-                f"its (manifest-only) worktree, not the branch worktrees — set "
-                f"fan_out.promote to merge the branch deltas back to base."
-            )
-    return out
+def _shared_worktree_warnings(config: Graph) -> list[str]:
+    shared = [node.id for node in config.nodes if node.kind in ("agent", "run")
+              and node.effective_worktree(config.settings) == "off"]
+    if len(shared) < 2:
+        return []
+    dependencies = {node.id: node.depends_on for node in config.nodes}
+    ancestors = {}
+    for node_id in shared:
+        seen = set()
+        pending = list(dependencies[node_id])
+        while pending:
+            dep = pending.pop()
+            if dep not in seen:
+                seen.add(dep)
+                pending.extend(dependencies[dep])
+        ancestors[node_id] = seen
+    return [
+        f"{left} and {right} use worktree: off without a dependency path; both can write the base checkout"
+        for index, left in enumerate(shared) for right in shared[index + 1:]
+        if left not in ancestors[right] and right not in ancestors[left]
+    ]
 
 
 def _hyphenated_id_warnings(config: Graph) -> list[str]:

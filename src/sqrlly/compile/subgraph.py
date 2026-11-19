@@ -39,57 +39,6 @@ class SubgraphDepthError(ValueError):
     """Raised when subgraph nesting exceeds MAX_SUBGRAPH_DEPTH."""
 
 
-def _strip_worktree(node: Node) -> Node:
-    """Force a fan-out subgraph inner node onto the branch tree: clear its
-    own worktree directives to `off` (node fields win in effective_worktree),
-    so it runs in the branch worktree, not a per-inner-node tree."""
-    return node.model_copy(update={"worktree": "off", "worktree_group": None})
-
-
-class _BranchScopedExecutor:
-    """Wraps the shared executor for one fan-out subgraph branch: every inner
-    node is pinned to `branch_tree` (forced `off` + workdir). Duck-types the
-    NodeExecutor Protocol; passes backend / get_worktree / worktree_map /
-    reclaim / close through to the inner executor.
-
-    `acquire_branch_worktree` is intentionally NOT forwarded: a fan-out nested
-    inside a branch must share the outer branch tree (the outer branch is the
-    isolation unit), so its `use_branch` check fails here and it runs in-tree."""
-
-    def __init__(self, inner: "NodeExecutor", branch_tree: str) -> None:
-        self._inner = inner
-        self._branch_tree = branch_tree
-
-    async def execute(
-        self, node: Node, context: dict, workdir: str | None = None,
-        settings_override: "Settings | None" = None,
-    ) -> "ExecutionResult":
-        # A caller-supplied workdir is intentionally ignored — the branch
-        # tree always wins (that is the point of pinning the branch).
-        return await self._inner.execute(
-            _strip_worktree(node), context,
-            workdir=self._branch_tree, settings_override=settings_override,
-        )
-
-    def get_backend(self, settings: Settings | None = None) -> object:
-        return self._inner.get_backend(settings) if hasattr(self._inner, "get_backend") else None
-
-    def get_worktree(self, node_id: str) -> "str | None":
-        return self._inner.get_worktree(node_id) if hasattr(self._inner, "get_worktree") else None
-
-    def worktree_map(self) -> dict:
-        return self._inner.worktree_map() if hasattr(self._inner, "worktree_map") else {}
-
-    async def reclaim(self) -> list:
-        if hasattr(self._inner, "reclaim"):
-            return await self._inner.reclaim()
-        return []
-
-    async def close(self) -> None:
-        if hasattr(self._inner, "close"):
-            await self._inner.close()
-
-
 def load_graph(
     config_path: str, base_dir: str | Path = ".", parent_settings: Settings | None = None,
 ) -> Graph:
@@ -138,7 +87,7 @@ def make_subgraph_node(
     """
     sub_logger = SubgraphLogger(logger, parent_node.id) if logger else None
     sub_graph = compile_fn(
-        sub_config, executor=executor, _depth=depth + 1,
+        sub_config, executor=executor.scoped(parent_node.id) if hasattr(executor, "scoped") else executor, _depth=depth + 1,
         effective_settings=sub_config.settings, logger=sub_logger,
     )
 
@@ -173,6 +122,8 @@ def make_subgraph_node(
             sub_result = await sub_graph.ainvoke(sub_state)
 
         update: dict[str, Any] = {"completed_nodes": {parent_id}}
+        if sub_result.get("retained_refs"):
+            update["retained_refs"] = sub_result["retained_refs"]
         update["node_outputs"] = {parent_id: _terminal_node_output(sub_result, sub_config)}
 
         if sub_result.get("failed_nodes"):
@@ -225,7 +176,6 @@ def make_fan_out_subgraph_invoker(
     executor: "NodeExecutor | None",
     logger: Any | None = None,
     parent_settings: Settings | None = None,
-    template_worktree: str | None = None,
 ) -> Any:
     """Per-Send-branch subgraph invoker for fan-out templates.
 
@@ -233,23 +183,7 @@ def make_fan_out_subgraph_invoker(
     prefix) -> ExecutionResult`` that the fan-out node body calls in
     place of ``executor.execute(...)``.
 
-    When the effective worktree mode for this fan-out (per-fan-out
-    ``template_worktree`` override, or parent scope's ``worktree`` if None)
-    is not ``"off"`` and the executor has ``acquire_branch_worktree``,
-    each Send branch gets its own isolated git worktree keyed by
-    ``prefix`` (the child_id). Inner subgraph nodes are compiled against
-    a ``_BranchScopedExecutor`` that pins every node to that tree (forced
-    ``worktree: off`` + explicit workdir), so inner nodes never spin up
-    their own trees. The branch worktree path is returned as
-    ``ExecutionResult.worktree`` for upstream recording in
-    ``node_worktrees``.
-
-    Off/non-foreman paths fall through to ``workdir`` as before, and
-    ``ExecutionResult.worktree`` is None (inline parity).
-
-    The subgraph is compiled lazily inside ``invoke`` (not at factory
-    build time) so each branch gets its own compiled graph wired to its
-    own ``_BranchScopedExecutor``.
+    Each branch qualifies its inner node ids with the manifest item id.
 
     Inputs (``workflow.with``) render against the per-item
     context; the rendered map seeds the sub-invocation's
@@ -264,16 +198,6 @@ def make_fan_out_subgraph_invoker(
         detect_config_cycle(workflow_file, base_dir=base_dir, parent_settings=parent_settings)
     sub_config = load_graph(workflow_file, base_dir, parent_settings)
 
-    # Gate: isolate iff the effective worktree mode for THIS fan-out is not
-    # "off". A per-fan-out override (FanOutTemplate.worktree) wins over the
-    # parent scope's settings.worktree; None inherits the parent scope.
-    _effective_worktree = (
-        template_worktree
-        if template_worktree is not None
-        else (parent_settings or Settings()).worktree
-    )
-    _isolate = _effective_worktree != "off"
-
     async def invoke(
         context: dict[str, Any], workdir: str, dry_run: bool,
         prefix: str | None = None,
@@ -281,33 +205,8 @@ def make_fan_out_subgraph_invoker(
         """``prefix`` (typically the per-Send child_id like
         ``reviewer_pool::maverick``) names the per-branch subgraph in
         the parent JSONL when ``logger`` is set."""
-        # Determine branch worktree: acquire one per branch when isolated,
-        # else fall back to the caller-supplied workdir.
-        use_branch = prefix and _isolate and hasattr(executor, "acquire_branch_worktree")
-        if use_branch:
-            try:
-                branch_tree = await executor.acquire_branch_worktree(prefix)
-            except RuntimeError as e:
-                # A subgraph fan-out BRANCH acquires its worktree here, not via
-                # ForemanExecutor.execute — so the same transient-infra aborts
-                # (git worktree add / worktree_share / worktree_setup) must be
-                # caught here too, returned as this branch's `infra` failure
-                # (the dynamic fan-out funnel forwards error_kind), so the graph
-                # settles instead of the RuntimeError escaping as a traceback.
-                return ExecutionResult(
-                    success=False, error=str(e), error_kind="infra",
-                )
-        else:
-            branch_tree = workdir
-
-        # Wire the compiled subgraph to a branch-scoped executor that
-        # pins every inner node to branch_tree (forced worktree:off +
-        # explicit workdir), preventing inner nodes from spawning their
-        # own per-node trees.
-        branch_exec = (
-            _BranchScopedExecutor(executor, branch_tree)
-            if executor is not None else None
-        )
+        branch_tree = workdir
+        branch_exec = executor.scoped(prefix) if prefix and hasattr(executor, "scoped") else executor
         sub_logger = SubgraphLogger(logger, prefix) if logger and prefix else None
         sub_compiled = compile_fn(
             sub_config, executor=branch_exec, _depth=depth + 1,
@@ -352,11 +251,12 @@ def make_fan_out_subgraph_invoker(
                 ),
                 # An inner branch-subgraph node is the real failure.
                 error_kind="upstream_failed",
+                retained_refs=sub_result.get("retained_refs", set()),
             )
         return ExecutionResult(
             success=True,
             output=_terminal_node_output(sub_result, sub_config),
-            worktree=branch_tree if use_branch else None,
+            retained_refs=sub_result.get("retained_refs", set()),
         )
 
     return invoke

@@ -1,42 +1,21 @@
-import pytest
-from sqrlly.compile.subgraph import _strip_worktree, _BranchScopedExecutor
-from sqrlly.schema.models import Node, Settings
-from sqrlly.runtime.result import ExecutionResult
+"""Nested workflow names distinguish identical inner node ids in the same run."""
+
+from pathlib import Path
+
+from helpers import init_git_repo
+from sqrlly.runtime.executor.dispatch import DispatchExecutor
+from sqrlly.runtime.foreman import ForemanExecutor
 
 
-class _Recorder:
-    def __init__(self):
-        self.calls = []
-
-    async def execute(self, node, context, workdir=None, settings_override=None):
-        self.calls.append((node, workdir))
-        return ExecutionResult(success=True, output="ok")
-
-
-def test_strip_worktree_forces_off_for_explicit_and_inherit():
-    explicit = Node(id="a", name="a", worktree="isolated")
-    inherit = Node(id="b", name="b")
-    assert _strip_worktree(explicit).effective_worktree(Settings(worktree="isolated")) == ("off", None)
-    assert _strip_worktree(inherit).effective_worktree(Settings(worktree="auto")) == ("off", None)
-
-
-def test_strip_worktree_neutralizes_group():
-    """An inner node that declares a shared group must be pinned to the branch
-    tree (group cleared) — not allowed to join a cross-branch group."""
-    grouped = Node(id="c", name="c", worktree_group="team-x")
-    stripped = _strip_worktree(grouped)
-    assert stripped.worktree_group is None
-    assert stripped.effective_worktree(Settings(worktree="auto")) == ("off", None)
-
-
-@pytest.mark.asyncio
-async def test_wrapper_pins_workdir_and_neutralizes_node():
-    rec = _Recorder()
-    wrapped = _BranchScopedExecutor(rec, "/branch/tree")
-    node = Node(id="inner", name="inner", worktree="isolated",
-                run=["/bin/true"])
-    result = await wrapped.execute(node, {})
-    assert result.success
-    seen_node, seen_workdir = rec.calls[0]
-    assert seen_workdir == "/branch/tree"
-    assert seen_node.effective_worktree(Settings(worktree="isolated")) == ("off", None)
+async def test_nested_qualified_nodes_acquire_distinct_worktrees(tmp_path):
+    init_git_repo(tmp_path)
+    root = ForemanExecutor(DispatchExecutor(str(tmp_path)), str(tmp_path))
+    try:
+        first = root.scoped("outer").scoped("left")
+        second = root.scoped("outer").scoped("right")
+        a = await first.acquire_branch_worktree("inner")
+        b = await second.acquire_branch_worktree("inner")
+        assert Path(a).is_dir() and Path(b).is_dir() and a != b
+        assert await first.acquire_branch_worktree("inner") == a
+    finally:
+        await root.close()

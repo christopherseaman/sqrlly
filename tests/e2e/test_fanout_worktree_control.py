@@ -1,168 +1,33 @@
-"""Per-fan-out worktree override (FanOutTemplate.worktree) — the off-override
-makes branch writes land in the SHARED base workdir where global
-settings.worktree:isolated would have hidden them in per-branch trees.
-
-ONE workflow, global settings.worktree:isolated. A fan-out whose template
-sets worktree:off; each branch appends to a file in the base workdir; a
-downstream join node reads it. Proves the override for BOTH execution
-paths (subgraph .yaml template + non-subgraph /bin/sh template) and the
-default-isolation contrast. Pure /bin/sh nodes — no LLM, deterministic.
-Models tests/e2e/test_subgraph_fanout_worktree.py.
-"""
-from __future__ import annotations
+"""A node-level worktree override applies to every run branch."""
 
 import json
 from pathlib import Path
 
 import pytest
-import yaml
 
+from helpers import init_git_repo
 from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.foreman import ForemanExecutor
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import Graph, Settings
-from helpers import init_git_repo
-
-_PARENT_ID = "build"
-_ITEMS = [{"id": "alpha"}, {"id": "beta"}, {"id": "gamma"}]
+from sqrlly.schema.models import Graph
 
 
-def _init_git_repo(path):
-    init_git_repo(path)
-
-def _script_node(item_template: str) -> dict:
-    """A /bin/sh node that appends '<item>\\n' to shared.txt in its CWD.
-
-    `>>` append + a per-item line lets the join node count how many
-    branches wrote to the SAME shared.txt. In a branch worktree these
-    appends are invisible to base; with worktree:off they land in base.
-    """
-    return {
-        "id": "appender", "name": "appender",
-        "run": ["/bin/sh", "-c", f"echo {item_template} >> shared.txt"],
-    }
-
-
-def _build_config(
-    *, template_worktree, subgraph: bool, tmp_path: Path,
-) -> Graph:
-    """Fan-out over 3 items; join node reads shared.txt from base.
-
-    When `subgraph` is True the template is a one-node subgraph .yaml whose
-    node appends to shared.txt; else the template is the /bin/sh appender
-    directly. `template_worktree` is the per-fan-out override (None inherits).
-    """
-    template: dict
-    if subgraph:
-        sub = {
-            "name": "appender-sub",
-            "nodes": [_script_node("{{item_id}}")],
-        }
-        (tmp_path / "appender_sub.yaml").write_text(yaml.safe_dump(sub))
-        template = {
-            "workflow": {"file": "appender_sub.yaml", "with": {"item_id": "{{id}}"}},
-        }
-    else:
-        template = {
-            "run": ["/bin/sh", "-c", "echo {{id}} >> shared.txt"],
-        }
-
-    if template_worktree is not None:
-        template["worktree"] = template_worktree
-
-    return Graph(
-        name="fanout-worktree-control",
-        nodes=[
-            {
-                "id": _PARENT_ID, "name": "Build",
-                "run": ["/bin/sh", "-c",
-                                         f"printf '%s' '{json.dumps({'items': _ITEMS})}'"],
-                "fan_out": {"template": template},
-            },
-            {
-                "id": "join", "name": "Join",
-                "depends_on": [_PARENT_ID],
-                "run": ["/bin/sh", "-c",
-                                         "cat shared.txt 2>/dev/null || true"],
-            },
-        ],
-        settings=Settings(worktree="isolated"),
-    )
-
-
-async def _run(config: Graph, tmp_path: Path) -> dict:
-    inner = DispatchExecutor(workdir=str(tmp_path))
-    foreman = ForemanExecutor(inner, base_workdir=str(tmp_path), max_parallel_jobs=4)
-    graph = build_workflow_graph(config, foreman, _base_dir=tmp_path)
-    state = make_initial_state(workdir=str(tmp_path))
-    return await graph.ainvoke(state)
-
-
-class TestFanOutWorktreeControl:
-    @pytest.mark.asyncio
-    async def test_subgraph_template_off_writes_to_base(self, tmp_path):
-        """Subgraph template + worktree:off → branch appends land in base."""
-        _init_git_repo(tmp_path)
-        config = _build_config(
-            template_worktree="off", subgraph=True, tmp_path=tmp_path,
-        )
-        final = await _run(config, tmp_path)
-
-        for item in _ITEMS:
-            assert f"{_PARENT_ID}::{item['id']}" in final["completed_nodes"]
-
-        # The off-override sent every branch's append to the shared base file.
-        shared = tmp_path / "shared.txt"
-        assert shared.exists(), "shared.txt missing from base — off-override failed"
-        lines = sorted(shared.read_text().split())
-        assert lines == ["alpha", "beta", "gamma"], (
-            f"expected all 3 branch appends in base, got {lines!r}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_script_template_off_writes_to_base(self, tmp_path):
-        """Non-subgraph /bin/sh template + worktree:off → appends land in base."""
-        _init_git_repo(tmp_path)
-        config = _build_config(
-            template_worktree="off", subgraph=False, tmp_path=tmp_path,
-        )
-        final = await _run(config, tmp_path)
-
-        for item in _ITEMS:
-            assert f"{_PARENT_ID}::{item['id']}" in final["completed_nodes"]
-
-        shared = tmp_path / "shared.txt"
-        assert shared.exists(), "shared.txt missing from base — off-override failed"
-        lines = sorted(shared.read_text().split())
-        assert lines == ["alpha", "beta", "gamma"]
-
-    @pytest.mark.asyncio
-    async def test_default_isolated_hides_branch_writes_from_base(self, tmp_path):
-        """Contrast: NO override → inherits settings.worktree:isolated → branch
-        appends land in per-branch trees, NOT base. (subgraph template.)"""
-        _init_git_repo(tmp_path)
-        config = _build_config(
-            template_worktree=None, subgraph=True, tmp_path=tmp_path,
-        )
-        final = await _run(config, tmp_path)
-
-        for item in _ITEMS:
-            assert f"{_PARENT_ID}::{item['id']}" in final["completed_nodes"]
-
-        # Isolation hid the writes: nothing in base. The branch worktrees
-        # under .sqrlly/ each hold their own shared.txt.
-        assert not (tmp_path / "shared.txt").exists(), (
-            "branch writes leaked into base under isolated — isolation broken"
-        )
-        sqrlly_dir = tmp_path / ".sqrlly"
-        branch_trees = list(sqrlly_dir.glob(f"wt-{_PARENT_ID}__*"))
-        assert len(branch_trees) == 3, (
-            f"expected 3 branch worktrees, got {[d.name for d in branch_trees]}"
-        )
-        # Each branch tree holds its own one-line shared.txt.
-        per_tree = sorted(
-            (t / "shared.txt").read_text().strip()
-            for t in branch_trees if (t / "shared.txt").exists()
-        )
-        assert per_tree == ["alpha", "beta", "gamma"]
+@pytest.mark.parametrize("worktree", ["off", "isolated"])
+async def test_run_children_obey_worktree_override(tmp_path, worktree):
+    init_git_repo(tmp_path)
+    node = {"id": "build", "worktree": worktree, "run": ["echo", json.dumps([{"id": "a"}])],
+            "fan_out": {"template": {"run": ["pwd"]}}}
+    executor = ForemanExecutor(DispatchExecutor(str(tmp_path)), str(tmp_path))
+    try:
+        graph = build_workflow_graph(Graph(nodes=[node]), executor, _base_dir=tmp_path)
+        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+        path = Path(result["node_outputs"]["build::a"].strip())
+        assert result["failed_nodes"] == set(), result["errors"]
+        if worktree == "off":
+            assert path == tmp_path
+        else:
+            assert path.parent == tmp_path / ".sqrlly"
+            assert not path.exists()
+    finally:
+        await executor.close()

@@ -1,161 +1,56 @@
-"""Worktree-control schema — v1 fields + v2 (kind, group) resolution.
-
-Covers the inherited isolation field (`auto`/`isolated`/`off`), the
-per-node override accessor, and named shared-worktree groups (v2).
-"""
-from __future__ import annotations
-
 import pytest
 from pydantic import ValidationError
 
-from sqrlly.schema.models import Node, Settings
+from sqrlly.schema.models import Graph, Node, Settings
 
 
-def test_settings_worktree_defaults_to_auto():
-    assert Settings().worktree == "auto"
+@pytest.mark.parametrize(("node", "serial", "fan_child", "promote"), [
+    ({"agent": {"text": "edit"}}, "isolated", "isolated", True),
+    ({"run": "pwd"}, "off", "isolated", True),
+    ({"llm": {"text": "read"}}, "off", "off", False),
+    ({"workflow": "child.yaml"}, "off", "off", False),
+    ({}, "off", "off", False),
+])
+def test_kind_defaults(node, serial, fan_child, promote):
+    node = Node(id="step", **node)
+    assert node.effective_worktree(Settings()) == serial
+    assert node.effective_worktree(Settings(), fan_child=True) == fan_child
+    assert node.effective_promote(Settings()) == promote
 
 
-def test_node_worktree_defaults_to_none():
-    assert Node(id="a", name="a").worktree is None
+def test_node_overrides_kind_default():
+    settings = Settings(defaults={"agent": {"worktree": "off", "promote": False}})
+    node = Node(id="edit", agent={"text": "edit"})
+    assert node.effective_worktree(settings) == "off"
+    assert node.effective_promote(settings) is False
+    node = Node(id="edit", agent={"text": "edit"}, worktree="isolated", promote=True)
+    assert node.effective_worktree(settings) == "isolated"
+    assert node.effective_promote(settings) is True
 
 
-@pytest.mark.parametrize(
-    "value,normalized",
-    [("auto", "auto"), ("isolated", "isolated"), ("off", "off"), ("none", "off")],
-)
-def test_settings_worktree_accepts_reserved_and_normalizes_none(value, normalized):
-    assert Settings(worktree=value).worktree == normalized
+@pytest.mark.parametrize(("key", "graph"), [
+    ("worktree", {"settings": {"worktree": "off"}}),
+    ("worktree_group", {"settings": {"worktree_group": "team"}}),
+    ("worktree_group", {"nodes": [{"id": "n", "worktree_group": "team"}]}),
+    ("worktree_gc", {"settings": {"worktree_gc": "never"}}),
+    ("promote_include", {"settings": {"promote_include": []}}),
+    ("worktree_setup_exclude", {"settings": {"worktree_setup_exclude": []}}),
+    ("promote", {"nodes": [{"id": "n", "fan_out": {"promote": True}}]}),
+    ("worktree", {"nodes": [{"id": "n", "fan_out": {"template": {"worktree": "isolated"}}}]}),
+])
+def test_removed_controls_raise(key, graph):
+    with pytest.raises(ValidationError, match=key):
+        Graph.model_validate({"nodes": [{"id": "n"}], **graph})
 
 
-def test_settings_worktree_rejects_group_token_in_v1():
-    with pytest.raises(ValidationError) as exc:
-        Settings(worktree="team-a")
-    msg = str(exc.value)
-    assert "auto" in msg and "isolated" in msg and "off" in msg
+@pytest.mark.parametrize("kind", [{"llm": {"text": "read"}}, {"workflow": "child.yaml"}, {}])
+@pytest.mark.parametrize("control", [{"worktree": "off"}, {"promote": False}])
+def test_other_kinds_reject_explicit_controls(kind, control):
+    with pytest.raises(ValidationError, match="only applies to agent and run"):
+        Node(id="n", **kind, **control)
 
 
-def test_node_worktree_override_wins_over_settings():
-    s = Settings(worktree="isolated")
-    n = Node(id="a", name="a", worktree="off")
-    assert n.effective_worktree(s) == ("off", None)
-
-
-def test_node_worktree_inherits_settings_when_unset():
-    s = Settings(worktree="off")
-    n = Node(id="a", name="a")
-    assert n.effective_worktree(s) == ("off", None)
-
-
-def test_node_worktree_none_alias_normalizes_to_off():
-    n = Node(id="a", name="a", worktree="none")
-    assert n.worktree == "off"
-    assert n.effective_worktree(Settings()) == ("off", None)
-
-
-def test_effective_group_on_node_wins():
-    s = Settings(worktree="isolated")
-    n = Node(id="a", name="a", worktree_group="team-a")
-    assert n.effective_worktree(s) == ("group", "team-a")
-
-
-def test_effective_node_mode_beats_settings_group():
-    s = Settings(worktree_group="prd")
-    n = Node(id="a", name="a", worktree="off")
-    assert n.effective_worktree(s) == ("off", None)
-
-
-def test_effective_inherits_settings_group():
-    s = Settings(worktree_group="prd")
-    n = Node(id="a", name="a")
-    assert n.effective_worktree(s) == ("group", "prd")
-
-
-def test_effective_default_is_auto():
-    assert Node(id="a", name="a").effective_worktree(Settings()) == ("auto", None)
-
-
-@pytest.mark.parametrize("yaml_bool,expected", [(False, "off"), (True, "isolated")])
-def test_worktree_coerces_yaml_booleans(yaml_bool, expected):
-    """Bare `worktree: off`/`on` parse as YAML booleans (the Norway problem).
-    `off`/`no`/`false` → False → "off"; `on`/`yes`/`true` → True → "isolated"."""
-    assert Settings(worktree=yaml_bool).worktree == expected
-    assert Node(id="a", name="a", worktree=yaml_bool).worktree == expected
-
-
-def test_settings_worktree_group_defaults_none():
-    assert Settings().worktree_group is None
-
-
-def test_node_worktree_group_defaults_none():
-    assert Node(id="a", name="a").worktree_group is None
-
-
-def test_settings_group_alone_is_valid():
-    s = Settings(worktree_group="prd")
-    assert s.worktree_group == "prd"
-    assert s.worktree == "auto"  # neutral default, no conflict
-
-
-def test_node_group_with_auto_is_valid():
-    n = Node(id="a", name="a", worktree="auto", worktree_group="team-a")
-    assert n.worktree_group == "team-a"
-    assert n.worktree == "auto"
-
-
-@pytest.mark.parametrize("mode", ["isolated", "off"])
-def test_group_with_explicit_mode_is_rejected(mode):
-    with pytest.raises(ValidationError) as exc:
-        Node(id="a", name="a", worktree=mode, worktree_group="team-a")
-    assert "worktree_group" in str(exc.value)
-
-
-@pytest.mark.parametrize("mode", ["isolated", "off"])
-def test_settings_group_with_explicit_mode_is_rejected(mode):
-    with pytest.raises(ValidationError) as exc:
-        Settings(worktree=mode, worktree_group="grp")
-    assert "worktree_group" in str(exc.value)
-
-
-def test_worktree_gc_defaults_never():
-    assert Settings().worktree_gc == "never"
-
-
-def test_worktree_gc_accepts_on_success():
-    assert Settings(worktree_gc="on_success").worktree_gc == "on_success"
-
-
-def test_worktree_gc_rejects_unknown():
-    with pytest.raises(ValidationError):
-        Settings(worktree_gc="always")
-
-
-def test_node_promote_defaults_false():
-    assert Node(id="a", name="a").promote is False
-
-
-def test_node_promote_accepts_true():
-    assert Node(id="a", name="a", promote=True).promote is True
-
-
-def test_fan_out_template_worktree_defaults_to_none():
-    from sqrlly.schema.models import FanOutTemplate
-    t = FanOutTemplate(workflow="w.yaml")
-    assert t.worktree is None
-
-
-@pytest.mark.parametrize(
-    "value,normalized",
-    [("auto", "auto"), ("isolated", "isolated"), ("off", "off"), ("none", "off")],
-)
-def test_fan_out_template_worktree_accepts_modes_and_normalizes_none(value, normalized):
-    from sqrlly.schema.models import FanOutTemplate
-    t = FanOutTemplate(workflow="w.yaml", worktree=value)
-    assert t.worktree == normalized
-
-
-def test_fan_out_template_worktree_rejects_group_token():
-    from sqrlly.schema.models import FanOutTemplate
-    with pytest.raises(ValidationError) as exc:
-        FanOutTemplate(workflow="w.yaml", worktree="team-a")
-    msg = str(exc.value)
-    assert "auto" in msg and "isolated" in msg and "off" in msg
+@pytest.mark.parametrize("value", ["auto", "none", False])
+def test_removed_node_worktree_modes_raise(value):
+    with pytest.raises(ValidationError, match="worktree"):
+        Node(id="n", run="true", worktree=value)

@@ -30,34 +30,8 @@ def _cmd_phase(node_id: str, command: str = "pwd", args=None) -> Node:
     binary = shutil.which(command) or f"/bin/{command}"
     return Node(
         id=node_id, name=node_id,
-        run=[binary, *(args or [])],
+        run=[binary, *(args or [])], worktree="isolated",
     )
-
-
-class _InstrumentedForeman(ForemanExecutor):
-    """ForemanExecutor that records `_create_worktree` concurrency.
-
-    Not a mock — a real subclass overriding one method to add a small
-    delay plus an in-flight counter, so a test can observe whether two
-    creations overlapped (lock released across the subprocess) or
-    serialized (lock held). The delay makes the overlap deterministic.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.create_calls = 0
-        self._in_flight = 0
-        self.max_in_flight = 0
-
-    async def _create_worktree(self, pool_key: str, group: str | None = None) -> str:
-        self.create_calls += 1
-        self._in_flight += 1
-        self.max_in_flight = max(self.max_in_flight, self._in_flight)
-        try:
-            await asyncio.sleep(0.05)
-            return await super()._create_worktree(pool_key, group)
-        finally:
-            self._in_flight -= 1
 
 
 class TestOutputContractWorktree:
@@ -75,7 +49,7 @@ class TestOutputContractWorktree:
         script.chmod(0o755)
         node = Node(
             id="writer", name="writer",
-            run=[str(script)],
+            run=[str(script)], worktree="isolated",
             output_contract=OutputContract(
                 base_directory=".", required_files=["report.md"]
             ),
@@ -203,8 +177,7 @@ class TestWorktreePool:
 
     @pytest.mark.asyncio
     async def test_worktree_isolated_runs_in_its_worktree(self, tmp_path):
-        """`worktree: isolated` matches the `auto`-in-repo default: the node
-        runs in its own worktree and the path is recorded."""
+        """A serial run can opt into an isolated worktree."""
         _init_git_repo(tmp_path)
         inner = DispatchExecutor(workdir=str(tmp_path))
         foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
@@ -223,73 +196,15 @@ class TestWorktreePool:
         finally:
             await foreman.close()
 
-    @pytest.mark.asyncio
-    async def test_concurrent_same_node_creates_one_worktree(self, tmp_path):
-        """E3: two acquisitions racing for the same node_id share one
-        creation task — exactly one worktree, both callers get its path."""
+    async def test_concurrent_acquisitions_reuse_only_matching_node(self, tmp_path):
         _init_git_repo(tmp_path)
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = _InstrumentedForeman(inner=inner, base_workdir=str(tmp_path))
+        foreman = ForemanExecutor(DispatchExecutor(str(tmp_path)), str(tmp_path))
         try:
-            first, second = await asyncio.gather(
-                foreman._acquire_worktree("p"),
-                foreman._acquire_worktree("p"),
-            )
-            assert first == second
-            assert foreman.create_calls == 1
-        finally:
-            await foreman.close()
-
-    @pytest.mark.asyncio
-    async def test_concurrent_different_nodes_create_in_parallel(self, tmp_path):
-        """E3: acquisitions for distinct node_ids run their
-        `git worktree add` subprocesses concurrently — the global lock
-        is released before the subprocess, so both _create_worktree
-        bodies are in flight at once."""
-        _init_git_repo(tmp_path)
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = _InstrumentedForeman(inner=inner, base_workdir=str(tmp_path))
-        try:
-            wa, wb = await asyncio.gather(
-                foreman._acquire_worktree("a"),
-                foreman._acquire_worktree("b"),
-            )
-            assert wa != wb
-            assert foreman.max_in_flight == 2
-        finally:
-            await foreman.close()
-
-
-    @pytest.mark.asyncio
-    async def test_group_nodes_share_one_tree(self, tmp_path):
-        _init_git_repo(tmp_path)
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
-        try:
-            a = Node(id="a", name="a", run=[_PWD],
-                     worktree_group="team")
-            b = Node(id="b", name="b", run=[_PWD],
-                     worktree_group="team")
-            ra = await foreman.execute(a, {})
-            rb = await foreman.execute(b, {})
-            assert ra.output.strip() == rb.output.strip()       # same tree
-            assert foreman.get_worktree("a") == foreman.get_worktree("b")
-            assert foreman.get_worktree("a").endswith("/.sqrlly/wt-group-team")
-        finally:
-            await foreman.close()
-
-    @pytest.mark.asyncio
-    async def test_group_separate_from_other_group_and_isolated(self, tmp_path):
-        _init_git_repo(tmp_path)
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
-        try:
-            a = Node(id="a", name="a", run=[_PWD], worktree_group="team-a")
-            b = Node(id="b", name="b", run=[_PWD], worktree_group="team-b")
-            c = Node(id="c", name="c", run=[_PWD], worktree="isolated")
-            await foreman.execute(a, {}); await foreman.execute(b, {}); await foreman.execute(c, {})
-            paths = {foreman.get_worktree(x) for x in ("a", "b", "c")}
-            assert len(paths) == 3
+            a, other_a, b = await asyncio.gather(*[
+                foreman.acquire_branch_worktree(key) for key in ("a", "a", "b")
+            ])
+            assert a == other_a and a != b
+            assert foreman.worktree_map() == {"a": a, "b": b}
         finally:
             await foreman.close()
 
@@ -342,63 +257,6 @@ class TestWorktreePool:
             await foreman.close()
 
     @pytest.mark.asyncio
-    async def test_orphaned_group_dir_is_not_silently_reused(self, tmp_path):
-        """A non-empty directory at wt-group-<name> that is NOT a live git worktree
-        (no .git entry) must NOT be silently returned as a valid worktree path.
-        A partial prior run may have mkdir'd the dest and written files but never
-        completed 'git worktree add'; reusing it silently leads to obscure downstream
-        git failures. With the fix, the liveness check (requiring a .git entry) falls
-        through to 'git worktree add', which refuses the non-empty existing dir and
-        RuntimeError surfaces loudly instead of the bogus path being returned.
-        """
-        _init_git_repo(tmp_path)
-        # Create a non-empty plain dir at the group path (simulates partial prior run:
-        # dir was created and files were written, but 'git worktree add' never ran).
-        orphan = tmp_path / ".sqrlly" / "wt-group-team"
-        orphan.mkdir(parents=True)
-        (orphan / "leftover.txt").write_text("from crashed run")
-        # Confirm it is a plain dir, not a live worktree.
-        assert not (orphan / ".git").exists()
-
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
-        try:
-            node = Node(
-                id="worker", name="worker",
-                run=[_PWD],
-                worktree_group="team",
-            )
-            # The orphan is not silently reused: the worktree-add refusal now
-            # surfaces as a classified `infra` failure (caught + returned) rather
-            # than a raw RuntimeError traceback.
-            result = await foreman.execute(node, {})
-            assert result.success is False
-            assert result.error_kind == "infra"
-        finally:
-            await foreman.close()
-
-
-    @pytest.mark.asyncio
-    async def test_reclaim_removes_distinct_trees(self, tmp_path):
-        _init_git_repo(tmp_path)
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
-        try:
-            a = Node(id="a", name="a", run=[_PWD], worktree_group="team")
-            b = Node(id="b", name="b", run=[_PWD], worktree_group="team")
-            c = Node(id="c", name="c", run=[_PWD])  # auto -> per-node
-            for n in (a, b, c):
-                await foreman.execute(n, {})
-            grp = foreman.get_worktree("a"); iso = foreman.get_worktree("c")
-            assert foreman.get_worktree("b") == grp  # shared
-            removed = await foreman.reclaim()
-            assert not Path(grp).exists() and not Path(iso).exists()
-            assert sorted(removed) == sorted({grp, iso})  # shared tree counted once
-        finally:
-            await foreman.close()
-
-
-    @pytest.mark.asyncio
     async def test_acquire_branch_worktree_distinct_and_reused(self, tmp_path):
         _init_git_repo(tmp_path)
         inner = DispatchExecutor(workdir=str(tmp_path))
@@ -415,77 +273,21 @@ class TestWorktreePool:
             await foreman.close()
 
 
-class TestRehydration:
-    @pytest.mark.asyncio
-    async def test_rehydrate_populates_worktree_map(self, tmp_path):
-        """After --resume, foreman is initialized with existing worktree paths."""
-        _init_git_repo(tmp_path)
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        existing = tmp_path / "pre-existing-wt"
-        foreman = ForemanExecutor(
-            inner=inner,
-            base_workdir=str(tmp_path),
-            rehydrate={"old_phase": str(existing)},
-        )
-        try:
-            assert foreman.get_worktree("old_phase") == str(existing)
-        finally:
-            await foreman.close()
-
-    @pytest.mark.asyncio
-    async def test_rehydrated_worktree_reused_on_execute(self, tmp_path):
-        """If the rehydrated path exists on disk, execute() uses it."""
-        _init_git_repo(tmp_path)
-        # Pre-create a real worktree
-        pre = tmp_path / "wt-pre"
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "worktree", "add", "-q",
-             str(pre), "HEAD"],
-            check=True,
-        )
-        (pre / "retained.txt").write_text("from-earlier-run")
-
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(
-            inner=inner,
-            base_workdir=str(tmp_path),
-            rehydrate={"resumed": str(pre)},
-        )
-        try:
-            await foreman.execute(_cmd_phase("resumed", "pwd"), {})
-            assert foreman.get_worktree("resumed") == str(pre)
-            # File from "previous run" still there — nothing was recreated.
-            assert (pre / "retained.txt").read_text() == "from-earlier-run"
-        finally:
-            await foreman.close()
-
-    @pytest.mark.asyncio
-    async def test_rehydrated_but_deleted_worktree_is_recreated(self, tmp_path):
-        """If the rehydrated path no longer exists on disk (user `git worktree
-        remove`d it, or the .sqrlly dir was wiped), --resume must not
-        crash — `_acquire_worktree` re-creates a fresh tree under .sqrlly/."""
-        _init_git_repo(tmp_path)
-        gone = tmp_path / "nonexistent-gone"
-        assert not gone.exists()
-
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(
-            inner=inner,
-            base_workdir=str(tmp_path),
-            rehydrate={"resumed": str(gone)},
-        )
-        try:
-            result = await foreman.execute(_cmd_phase("resumed", "pwd"), {})
-            assert result.success
-            new_path = foreman.get_worktree("resumed")
-            assert new_path != str(gone)
-            assert Path(new_path).is_dir()
-            # Newly-created worktrees live under .sqrlly/.
-            assert ".sqrlly" in new_path
-            # And `pwd` ran inside the recreated tree, not the dead path.
-            assert Path(result.output.strip()).resolve() == Path(new_path).resolve()
-        finally:
-            await foreman.close()
+async def test_resume_reuses_owned_worktree(tmp_path):
+    _init_git_repo(tmp_path)
+    node = _cmd_phase("resumed")
+    original = ForemanExecutor(DispatchExecutor(str(tmp_path)), str(tmp_path), run="previous")
+    result = await original.execute(node, {})
+    tree = Path(result.worktree)
+    (tree / "retained.txt").write_text("earlier run")
+    await original.close()
+    resumed = ForemanExecutor(DispatchExecutor(str(tmp_path)), str(tmp_path), run="previous")
+    try:
+        next_result = await resumed.execute(node, {})
+        assert Path(next_result.worktree) == tree
+        assert (tree / "retained.txt").read_text() == "earlier run"
+    finally:
+        await resumed.close()
 
 
 class TestConcurrencyCap:
@@ -548,38 +350,6 @@ class TestConcurrencyCap:
             assert all(r.success for r in results)
             # Fully parallel: one sleep duration + overhead
             assert elapsed < sleep_s * 2, f"elapsed {elapsed:.3f}s too long"
-        finally:
-            await foreman.close()
-
-
-class TestWorktreeCreationFailure:
-    @pytest.mark.asyncio
-    async def test_non_git_workdir_returns_infra_kind(self, tmp_path):
-        """base_workdir is not a git repo → `git worktree add` fails; foreman
-        surfaces it as a classified `infra` failure (node_failed) rather than a
-        raw traceback or a silent degrade."""
-        # NOT calling _init_git_repo — tmp_path is a plain directory.
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
-        try:
-            result = await foreman.execute(_cmd_phase("alpha"), {})
-            assert result.success is False
-            assert result.error_kind == "infra"
-            assert "git worktree add" in result.error
-            assert "alpha" in result.error
-        finally:
-            await foreman.close()
-
-    @pytest.mark.asyncio
-    async def test_bad_base_workdir_returns_infra_kind(self, tmp_path):
-        """base_workdir doesn't exist at all → same classified `infra` failure."""
-        missing = tmp_path / "does-not-exist"
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(inner=inner, base_workdir=str(missing))
-        try:
-            result = await foreman.execute(_cmd_phase("beta"), {})
-            assert result.success is False
-            assert result.error_kind == "infra"
         finally:
             await foreman.close()
 
@@ -718,7 +488,7 @@ async def test_foreman_worktree_share_symlinks_into_new_tree(tmp_path):
     (tmp_path / "node_modules" / "d.js").write_text("lib")
     fm = ForemanExecutor(
         MockExecutor(), str(tmp_path),
-        settings=Settings(worktree="isolated", worktree_share=["node_modules"]),
+        settings=Settings( worktree_share=["node_modules"]),
     )
     wt = await fm.acquire_branch_worktree("b1")
     assert (Path(wt) / "node_modules").is_symlink()
@@ -740,7 +510,7 @@ async def test_foreman_runs_worktree_setup_once_and_resume_reuses(tmp_path):
     (tmp_path / "f.txt").write_text("x")
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "i"], check=True)
-    settings = Settings(worktree="isolated",
+    settings = Settings(
                         worktree_setup=["sh -c 'echo x >> $PWD/ran.txt'"])
     fm = ForemanExecutor(MockExecutor(), str(tmp_path), settings=settings)
     wt = await fm.acquire_branch_worktree("b1")
@@ -751,8 +521,8 @@ async def test_foreman_runs_worktree_setup_once_and_resume_reuses(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_foreman_reclaims_tree_even_if_setup_fails(tmp_path):
-    """A setup failure raises but the created tree is still GC-registered."""
+async def test_foreman_retains_tree_when_setup_fails(tmp_path):
+    """A failed setup preserves its tree for diagnosis."""
     import subprocess, pytest
     from pathlib import Path
     from sqrlly.runtime.foreman import ForemanExecutor
@@ -766,12 +536,12 @@ async def test_foreman_reclaims_tree_even_if_setup_fails(tmp_path):
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "i"], check=True)
     fm = ForemanExecutor(
         MockExecutor(), str(tmp_path),
-        settings=Settings(worktree="isolated", worktree_setup=["sh -c 'exit 4'"]),
+        settings=Settings( worktree_setup=["sh -c 'exit 4'"]),
     )
     with pytest.raises(RuntimeError, match="setup failed"):
         await fm.acquire_branch_worktree("b1")
-    removed = await fm.reclaim()
-    assert any(".sqrlly" in p for p in removed)  # the half-built tree was reclaimed
+    await fm.close()
+    assert Path(fm.get_worktree("b1")).is_dir()
 
 
 class TestInfraKind:
@@ -787,7 +557,7 @@ class TestInfraKind:
         foreman = ForemanExecutor(
             inner, str(tmp_path),
             settings=Settings(
-                worktree="isolated", worktree_setup=["sh -c 'exit 4'"],
+                worktree_setup=["sh -c 'exit 4'"],
             ),
         )
         result = await foreman.execute(_cmd_phase("n1"), {})

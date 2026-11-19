@@ -22,5 +22,4 @@ nodes:
       threshold: 1.0
       blocking: true
 settings:
-  worktree: 'off'
   prompts: ../prompts

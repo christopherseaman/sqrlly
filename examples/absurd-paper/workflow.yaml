@@ -87,7 +87,6 @@ nodes:
     run: [uv, run, --script, '{{workflow_dir}}/scripts/render_pdf.py', output/paper.md, output/paper.pdf]
 settings:
   preamble_file: preamble.md
-  worktree: 'off'
   max_retries: 2
   default_timeout: 180.0
   retry_backoff:

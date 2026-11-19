@@ -13,61 +13,13 @@ from pydantic import (
     PositiveInt,
     PrivateAttr,
     ValidationInfo,
-    field_validator,
     model_validator,
 )
 
 from sqrlly.schema.v1 import (
-    KINDS, Agent, Defaults, Name, Prompt, Run, Workflow, WorkflowLoader,
+    KINDS, Agent, Defaults, Name, Prompt, Run, Workflow, WorkflowLoader, Worktree,
     repository_root, require_reference,
 )
-
-
-# Worktree isolation modes. `none` is an accepted alias for `off`.
-# This field is a MODE selector — a group name belongs in `worktree_group`,
-# not here; non-mode tokens are rejected to catch misplaced group names.
-_WORKTREE_MODES = ("auto", "isolated", "off")
-
-
-def _normalize_worktree(value: Any) -> Any:
-    """Normalize a worktree-mode value: ``None`` passes through (inherit);
-    ``"none"`` aliases to ``"off"``; one of ``auto``/``isolated``/``off``
-    is accepted; anything else raises."""
-    if value is None:
-        return None
-    # Bare `worktree: off`/`on` parse as YAML booleans (off/no/false →
-    # False, on/yes/true → True). Map the toggle to the isolation modes
-    # so the ergonomic `worktree: off` opt-out works unquoted.
-    if isinstance(value, bool):
-        return "isolated" if value else "off"
-    if not isinstance(value, str):
-        raise ValueError(
-            f"worktree must be a string, got {type(value).__name__}"
-        )
-    mode = value.strip().lower()
-    if mode == "none":
-        return "off"
-    if mode not in _WORKTREE_MODES:
-        raise ValueError(
-            f"worktree must be one of auto/isolated/off "
-            f"(named shared-worktree groups are not yet supported), "
-            f"got {value!r}"
-        )
-    return mode
-
-
-def _check_worktree_group_exclusive(
-    worktree: str | None, worktree_group: str | None
-) -> None:
-    """A ``worktree_group`` already implies a shared tree, so pairing it with
-    an explicit ``isolated``/``off`` mode is contradictory. Shared by the
-    Settings and Node after-validators."""
-    if worktree_group is not None and worktree in ("isolated", "off"):
-        raise ValueError(
-            "worktree_group cannot be combined with worktree="
-            f"{worktree!r}: a group already implies a shared tree "
-            "(omit worktree, or set it to auto)"
-        )
 
 
 class RouteCase(BaseModel):
@@ -239,19 +191,6 @@ class FanOutTemplate(KindStep):
     """Template for nodes spawned during fan-out over a manifest."""
     model_config = ConfigDict(extra="forbid")
     evaluation: Evaluation | None = None
-    # Per-fan-out worktree-isolation override. None (default) inherits
-    # settings.worktree — same optional-override semantics as Node.worktree.
-    # Lets one workflow run an isolated build fan-out AND a shared-base
-    # planner fan-out under a single top-level settings.worktree: the value
-    # here overrides settings.worktree at the per-branch isolation gate
-    # (subgraph templates: make_fan_out_subgraph_invoker; non-subgraph
-    # templates: the synthetic child node's effective_worktree).
-    worktree: Literal["auto", "isolated", "off"] | None = None
-
-    @field_validator("worktree", mode="before")
-    @classmethod
-    def _normalize_worktree_override(cls, v: Any) -> Any:
-        return _normalize_worktree(v)
 
 
 class FanOutFinalNode(KindStep):
@@ -280,12 +219,6 @@ class FanOut(BaseModel):
     manifest_path: str | None = None
     template: FanOutTemplate | None = None
     final_nodes: list[FanOutFinalNode] = []
-    # When true, each Send branch's worktree delta is promoted back to base
-    # at the end of a clean run (top-level nodes only, before GC), routed
-    # through reconcile_promotions + on_promote_conflict + promote_exclude.
-    # Distinct from Node.promote (which promotes a node's OWN worktree —
-    # for a fan-out parent that is the manifest-only tree; see the lint).
-    promote: bool = False
 
 
 class Settings(BaseModel):
@@ -325,18 +258,12 @@ class Settings(BaseModel):
     # jobs are never aborted; only new acquisitions wait.
     memory_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
 
-    # Worktree isolation default for the graph; inherits graph→subgraph via
-    # `merge_settings`. `auto` = isolate per-node iff in a git repo (today's
-    # implicit behavior, made explicit). Per-node override: `Node.worktree`.
-    worktree: Literal["auto", "isolated", "off"] = "auto"
-    worktree_group: str | None = None
-    worktree_gc: Literal["never", "on_success"] = "never"
     # Cross-node promote reconciliation when two same-wave promoting nodes
-    # touch the same path. `warn` (default): log the overlap, last-write-wins
+    # touch the same path. `warn`: log the overlap, last-write-wins
     # (run stays green). `fail`: abort before any write. `overwrite`: silent
     # last-write-wins. `skip`: the first promoting node (in `nodes` order)
     # keeps the path; later nodes drop it (their other paths still promote).
-    on_promote_conflict: Literal["fail", "warn", "overwrite", "skip"] = "warn"
+    on_promote_conflict: Literal["fail", "warn", "overwrite", "skip"] = "fail"
     # Fan-out `--resume` manifest-drift policy. On resume, a fan-out parent
     # re-reads its manifest and re-fans; if that manifest DROPS a prior branch
     # id (the dispatcher minted non-deterministic ids, e.g. uuid/counter), the
@@ -348,43 +275,12 @@ class Settings(BaseModel):
     # trips it. Only fires on `--resume` / `--resume-from` (not fresh / --entry /
     # --rerun-all).
     on_manifest_drift: Literal["fail", "warn"] = "fail"
-    # Git pathspecs filtered out of EVERY promoting node's footprint (promote
-    # layer). Defense-in-depth beneath worktree-level excludes: keeps generated
-    # artifacts (node_modules, build caches) from being promoted into base even
-    # if they slip past a worktree's .git/info/exclude. Prefix-match, e.g.
-    # ["node_modules", ".next/cache"].
     promote_exclude: list[str] = []
-    # Git pathspecs RE-INCLUDED into the promote footprint after
-    # `promote_exclude` removes them — the allow-list half of exclude. Lets
-    # you drop a directory but keep a subpath (e.g. promote_exclude=["log/"]
-    # + promote_include=["log/phases/**"] keeps log/phases/** and drops the
-    # rest of log/). Git `:(exclude)` pathspecs have no in-list negation, so
-    # this is a second pass unioned back in. Applies to every promoting node.
-    promote_include: list[str] = []
-    # Read-only sharing: whole-dir symlinks of these base paths into each
-    # worktree (no in-worktree install). For read-only in-branch gates
-    # (tsc --noEmit, scoped tests). Each shared path also gets the
-    # info/exclude write so it stays out of the promote footprint.
     worktree_share: list[str] = []
     # Rehydrate path: ordered shell commands run in each fresh worktree so the
     # package manager builds its own real node_modules there (e.g.
     # ["pnpm install --prefer-offline", "pnpm exec prisma generate"]). PM-agnostic.
     worktree_setup: list[str] = []
-    # Paths written to each worktree's info/exclude before promote can run, so
-    # generated artifacts (node_modules, in-tree prisma output=) stay out of the
-    # footprint. Explicit — sqrlly does not infer generator output paths.
-    worktree_setup_exclude: list[str] = []
-
-    @field_validator("worktree", mode="before")
-    @classmethod
-    def _normalize_worktree_setting(cls, v: Any) -> Any:
-        return _normalize_worktree(v)
-
-    @model_validator(mode="after")
-    def _worktree_group_exclusive(self) -> "Settings":
-        _check_worktree_group_exclusive(self.worktree, self.worktree_group)
-        return self
-
 
 
 class Node(KindStep):
@@ -397,21 +293,17 @@ class Node(KindStep):
     fan_out: FanOut | None = None
     route: Route | None = None
     timeout: float | None = None
-    worktree: Literal["auto", "isolated", "off"] | None = None
-    worktree_group: str | None = None
-    # Apply this node's worktree git delta to the base workdir after a clean
-    # run. Wired for top-level nodes only (not fan-out children / subgraph
-    # inner nodes). See cli/main.py run flow.
-    promote: bool = False
-
-    @field_validator("worktree", mode="before")
-    @classmethod
-    def _normalize_worktree_override(cls, v: Any) -> Any:
-        return _normalize_worktree(v)
+    worktree: Worktree | None = None
+    promote: bool | None = None
 
     @model_validator(mode="after")
-    def _worktree_group_exclusive(self) -> "Node":
-        _check_worktree_group_exclusive(self.worktree, self.worktree_group)
+    def _worktree_kind(self) -> Self:
+        for field in ("worktree", "promote"):
+            if field in self.model_fields_set:
+                if self.kind not in ("agent", "run"):
+                    raise ValueError(f"{field} only applies to agent and run")
+                if getattr(self, field) is None:
+                    raise ValueError(f"{field} requires a value")
         return self
 
     @model_validator(mode="after")
@@ -437,26 +329,18 @@ class Node(KindStep):
         # The legacy dispatch deadline applies to each leaf inside a workflow.
         return None if self.workflow else settings.default_timeout
 
-    def effective_worktree(self, settings: Settings) -> tuple[str, str | None]:
-        """Resolve isolation by scope specificity. Returns (kind, group):
-        kind in {auto, isolated, off, group}; group is the shared-tree name
-        when kind == "group", else None."""
-        if self.worktree_group is not None:
-            return ("group", self.worktree_group)
-        if self.worktree is not None:
-            return (self.worktree, None)
-        if self.kind in ("agent", "run"):
-            mode = getattr(settings.defaults, self.kind).worktree
-            if mode is not None:
-                return (mode, None)
-        if settings.worktree_group is not None:
-            return ("group", settings.worktree_group)
-        return (settings.worktree, None)
+    def effective_worktree(self, settings: Settings, *, fan_child: bool = False) -> Worktree:
+        if self.kind not in ("agent", "run"):
+            return "off"
+        default = getattr(settings.defaults, self.kind).worktree
+        return self.worktree or default or ("isolated" if self.agent or fan_child else "off")
 
     def effective_promote(self, settings: Settings) -> bool:
-        if "promote" not in self.model_fields_set and self.kind in ("run", "agent"):
-            return bool(getattr(settings.defaults, self.kind).promote)
-        return self.promote
+        if self.kind not in ("agent", "run"):
+            return False
+        if self.promote is not None:
+            return self.promote
+        return getattr(settings.defaults, self.kind).promote is not False
 
     def effective_max_retries(self, settings: Settings) -> int:
         if self.evaluation and self.evaluation.max_retries is not None:
@@ -465,6 +349,12 @@ class Node(KindStep):
 
 
 class Graph(BaseModel):
+    _source_path: Path | None = PrivateAttr(default=None)
+
+    @property
+    def source_path(self) -> Path | None:
+        return self._source_path
+
     model_config = ConfigDict(extra="forbid")
 
     name: Name = "workflow"
@@ -484,6 +374,7 @@ class Graph(BaseModel):
         if resolve_settings := context.get("resolve_settings"):
             self.settings = resolve_settings(self.settings)
         if path:
+            self._source_path = path.resolve()
             self.settings._workflow_dir = path.parent.resolve()
             if "name" not in self.model_fields_set:
                 self.name = path.stem

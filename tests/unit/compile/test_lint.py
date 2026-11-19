@@ -154,58 +154,20 @@ class TestAdvisoryGateWarnings:
         assert any("fan" in w and "0.7" in w for w in collect_warnings(config))
 
 
-class TestFanoutParentPromoteWarnings:
-    def test_fanout_parent_promote_warns(self):
-        from sqrlly.compile.lint import collect_warnings
-        from sqrlly.schema.models import Graph
-        cfg = Graph(**{
-            "name": "t",
-            "nodes": [{
-                "id": "build", "name": "build", "promote": True,
-                "fan_out": {"manifest_path": "m.json",
-                            "template": {"workflow": "w.yaml"}},
-            }],
-            "settings": {},
-        })
-        warns = collect_warnings(cfg)
-        assert any("fan_out.promote" in w and "build" in w for w in warns)
-
-    def test_fanout_promote_no_warn(self):
-        from sqrlly.compile.lint import collect_warnings
-        from sqrlly.schema.models import Graph
-        cfg = Graph(**{
-            "name": "t",
-            "nodes": [{
-                "id": "build", "name": "build",
-                "fan_out": {"manifest_path": "m.json",
-                            "template": {"workflow": "w.yaml"},
-                            "promote": True},
-            }],
-            "settings": {},
-        })
-        assert not any("fan_out.promote" in w for w in collect_warnings(cfg))
+def test_setup_commands_require_promotion_excludes():
+    config = make_config([_node("n")], worktree_setup=["make generated"])
+    assert any("promote_exclude" in warning for warning in collect_warnings(config))
+    config.settings.promote_exclude = ["generated/"]
+    assert collect_warnings(config) == []
 
 
-class TestWorktreeSetupExcludeWarnings:
-    def test_warns_prisma_generate_without_exclude(self):
-        config = make_config(
-            [_node("n")],
-            worktree_setup=["pnpm exec prisma generate"],
-        )
-        warnings = collect_warnings(config)
-        assert any("prisma generate" in w and "worktree_setup_exclude" in w for w in warnings)
-
-    def test_no_warn_when_exclude_present(self):
-        config = make_config(
-            [_node("n")],
-            worktree_setup=["pnpm exec prisma generate"],
-            worktree_setup_exclude=["src/generated/prisma"],
-        )
-        assert not any("prisma generate" in w for w in collect_warnings(config))
-
-    def test_no_warn_when_no_prisma_generate(self):
-        config = make_config(
-            [_node("n")],
-            worktree_setup=["pnpm install --prefer-offline"],
-        )
-        assert not any("prisma generate" in w for w in collect_warnings(config))
+def test_unordered_shared_nodes_warn_once_per_pair():
+    config = make_config([
+        {"id": "first", "run": "true"},
+        {"id": "unrelated", "agent": {"text": "write"}, "worktree": "off"},
+        {"id": "middle", "depends_on": ["first"]},
+        {"id": "last", "run": "true", "depends_on": ["middle"]},
+        {"id": "isolated", "agent": {"text": "edit"}},
+    ])
+    warnings = collect_warnings(config)
+    assert [warning.split(" use ")[0] for warning in warnings] == ["first and unrelated", "unrelated and last"]

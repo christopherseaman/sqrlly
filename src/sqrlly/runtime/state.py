@@ -12,6 +12,11 @@ def _merge_dicts(left: dict, right: dict) -> dict:
     return merged
 
 
+def _merge_worktrees(left: dict, right: dict) -> dict:
+    """Remove settled paths after their worktrees are reclaimed."""
+    return {key: path for key, path in (left | right).items() if path is not None}
+
+
 def _merge_evaluations(
     left: dict[str, list[dict[str, Any]]],
     right: dict[str, list[dict[str, Any]]],
@@ -40,13 +45,16 @@ def _merge_sets(left: set[str], right: set[str]) -> set[str]:
 # fan-out node accumulates state inline across its retry loop).
 REDUCERS: dict[str, Callable[[Any, Any], Any]] = {
     "completed_nodes": _merge_sets,
+    "fan_children": _merge_dicts,
+    "fan_ready": _merge_dicts,
+    "retained_refs": _merge_sets,
     "failed_nodes": _merge_sets,
     "errors": operator.add,
     "node_outputs": _merge_dicts,
     "node_structured_outputs": _merge_dicts,
     "retries": _merge_dicts,
     "child_outputs": _merge_dicts,
-    "node_worktrees": _merge_dicts,
+    "node_worktrees": _merge_worktrees,
     "node_models": _merge_dicts,
     "evaluations": _merge_evaluations,
 }
@@ -54,6 +62,9 @@ REDUCERS: dict[str, Callable[[Any, Any], Any]] = {
 
 class WorkflowState(TypedDict):
     workflow_name: str
+    fan_ready: Annotated[dict[str, bool], REDUCERS["fan_ready"]]
+    fan_children: Annotated[dict[str, list[str]], REDUCERS["fan_children"]]
+    retained_refs: Annotated[set[str], REDUCERS["retained_refs"]]
     completed_nodes: Annotated[set[str], REDUCERS["completed_nodes"]]
     failed_nodes: Annotated[set[str], REDUCERS["failed_nodes"]]
     node_outputs: Annotated[dict[str, Any], REDUCERS["node_outputs"]]

@@ -101,9 +101,9 @@ async def test_infra_abort_settles_as_node_failed_not_traceback(tmp_path):
     ok = _script(tmp_path, "ok.py", "print('ok')\n")
     config = Graph(
         name="infra-kind",
-        nodes=[{"id": "build", "name": "build",
+        nodes=[{"id": "build", "name": "build", "worktree": "isolated",
                 "run": [_PYTHON, ok]}],
-        settings={"worktree": "isolated", "worktree_setup": ["sh -c 'exit 7'"]},
+        settings={"worktree_setup": ["sh -c 'exit 7'"]},
     )
     buf = StringIO()
     logger = JsonlLogger(buf)
@@ -123,17 +123,12 @@ async def test_infra_abort_settles_as_node_failed_not_traceback(tmp_path):
         and e["kind"] == "infra"
         for e in events
     ), events
+    await foreman.close()
 
 
 @pytest.mark.asyncio
 async def test_subgraph_fanout_child_infra_abort_settles(tmp_path):
-    """An ISOLATED subgraph-template fan-out BRANCH whose worktree acquisition
-    aborts (worktree_setup exits non-zero) settles as that child's
-    node_failed(kind=infra). The branch worktree is acquired directly in the
-    subgraph invoker (not through ForemanExecutor.execute), so this pins that
-    the invoker catches the abort and the run RETURNS instead of escaping as a
-    raw traceback (0/0). The parent runs worktree:off so only the isolated
-    children hit the failing setup."""
+    """Each workflow branch reports its own isolated member setup failure."""
     import yaml
     from sqrlly.runtime.foreman import ForemanExecutor
     from helpers import init_git_repo
@@ -142,7 +137,7 @@ async def test_subgraph_fanout_child_infra_abort_settles(tmp_path):
     ok = _script(tmp_path, "ok.py", "print('ok')\n")
     (tmp_path / "member.yaml").write_text(yaml.safe_dump({
         "name": "member",
-        "nodes": [{"id": "step", "name": "step",
+        "nodes": [{"id": "step", "name": "step", "worktree": "isolated",
                    "run": [_PYTHON, ok]}],
     }))
     manifest = json.dumps({"items": [{"id": "alpha"}, {"id": "beta"}]})
@@ -154,11 +149,10 @@ async def test_subgraph_fanout_child_infra_abort_settles(tmp_path):
             "fan_out": {
                 "template": {
                     "workflow": {"file": "member.yaml", "with": {"x": "{{id}}"}},
-                    "worktree": "isolated",
                 },
             },
         }],
-        settings={"worktree": "off", "worktree_setup": ["sh -c 'exit 1'"]},
+        settings={"worktree_setup": ["sh -c 'exit 1'"]},
     )
     buf = StringIO()
     logger = JsonlLogger(buf)
@@ -167,16 +161,15 @@ async def test_subgraph_fanout_child_infra_abort_settles(tmp_path):
         settings=config.settings,
     )
     compiled = build_workflow_graph(
-        config, foreman, _base_dir=tmp_path, checkpointer=None,
+        config, foreman, _base_dir=tmp_path, checkpointer=None, logger=logger,
     )
     state = make_initial_state(workdir=str(tmp_path), dry_run=False)
     result = await run_workflow(compiled, state, config, logger=logger)
 
-    # The run SETTLED despite the branch worktree abort (no traceback).
-    events = [json.loads(l) for l in buf.getvalue().strip().split("\n") if l]
-    infra = [
-        e for e in events
-        if e.get("event") == "node_failed" and e.get("kind") == "infra"
-        and str(e.get("node", "")).startswith("cfan::")
-    ]
-    assert infra, events
+    events = [json.loads(line) for line in buf.getvalue().splitlines()]
+    kinds = {e["node"]: e["kind"] for e in events if e["event"] == "node_failed"}
+    for branch in ("cfan::alpha", "cfan::beta"):
+        assert branch in result["failed_nodes"]
+        assert kinds[branch] == "upstream_failed"
+        assert kinds[f"{branch}::step"] == "infra"
+    await foreman.close()

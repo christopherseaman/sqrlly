@@ -1,14 +1,4 @@
-"""Fan-out children must record node_worktrees (parity with static nodes).
-
-When ForemanExecutor is wired and a fan-out child runs under worktree
-isolation, each child's worktree path must appear in the final state's
-``node_worktrees`` dict keyed by ``<parent>::<item_id>``.
-
-The plain fan-out e2e tests (test_dynamic.py) use bare DispatchExecutor
-— no foreman — so exec_result.worktree is None there and this check is
-inert for those tests. This test wires ForemanExecutor + a real git repo
-to exercise the code path.
-"""
+"""Fan-out children execute in distinct worktrees and clear their paths at settlement."""
 from __future__ import annotations
 
 import json
@@ -21,7 +11,7 @@ from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.foreman import ForemanExecutor
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import Graph, Settings
+from sqrlly.schema.models import Graph
 from helpers import init_git_repo
 
 _ECHO = shutil.which("echo") or "/bin/echo"
@@ -31,11 +21,7 @@ def _init_git_repo(path):
     init_git_repo(path)
 
 def _build_fan_out_config(workdir: Path) -> Graph:
-    """2-leaf fan-out: parent echoes a 2-item manifest; children echo their id.
-
-    Uses worktree="isolated" — ForemanExecutor allocates a per-node worktree
-    for any non-off mode, so exec_result.worktree is set for children.
-    """
+    """The manifest contains two distinct run branches."""
     manifest = json.dumps({"items": [{"id": "0"}, {"id": "1"}]})
     return Graph(
         name="fanout-worktree-test",
@@ -46,23 +32,18 @@ def _build_fan_out_config(workdir: Path) -> Graph:
                 "run": [_ECHO, "-n", manifest],
                 "fan_out": {
                     "template": {
-                        "run": [_ECHO, "-n", "child-{{id}}"],
+                        "run": ["pwd"],
                     },
                 },
             },
         ],
-        settings=Settings(worktree="isolated"),
     )
 
 
 class TestFanOutWorktrees:
     @pytest.mark.asyncio
-    async def test_children_record_node_worktrees(self, tmp_path):
-        """Fan-out children with ForemanExecutor must populate node_worktrees.
-
-        Each child id (parent::0, parent::1) must appear as a key in the
-        final state's node_worktrees, and the value must be an existing directory.
-        """
+    async def test_settlement_clears_child_worktrees(self, tmp_path):
+        """Both child processes report their actual working directories."""
         _init_git_repo(tmp_path)
 
         config = _build_fan_out_config(tmp_path)
@@ -84,14 +65,8 @@ class TestFanOutWorktrees:
         assert "parent::0" in final_state["completed_nodes"]
         assert "parent::1" in final_state["completed_nodes"]
 
-        # Each child must have recorded its worktree
-        wts = final_state["node_worktrees"]
-        child_keys = [k for k in wts if k.startswith("parent::")]
-        assert len(child_keys) == 2, (
-            f"Expected 2 child worktree entries, got {len(child_keys)}. "
-            f"node_worktrees keys: {list(wts.keys())}"
-        )
-        for k in child_keys:
-            assert Path(wts[k]).is_dir(), (
-                f"Worktree for {k!r} is not an existing directory: {wts[k]!r}"
-            )
+        paths = {Path(final_state["node_outputs"][f"parent::{i}"].strip()) for i in (0, 1)}
+        assert len(paths) == 2
+        assert all(path.parent == tmp_path / ".sqrlly" and not path.exists() for path in paths)
+        assert final_state["node_worktrees"] == {}
+        await foreman.close()

@@ -16,11 +16,12 @@ from sqrlly.compile._manifest import (
     find_terminal_nodes,
     manifest_drift,
 )
-from sqrlly.compile.dynamic import _make_final_fan_out_node, _make_fan_out_node
+from sqrlly.compile.dynamic import _make_final_fan_out_node, _make_fan_out_node, fan_child_node
 from sqrlly.compile.nodes import (
     _make_execution_node,
     _make_gate_node,
     make_failure_update,
+    settle_nodes,
 )
 from sqrlly.compile.route import build_route_namespace, evaluate_case
 from sqrlly.compile.subgraph import node_subgraph_path
@@ -325,7 +326,7 @@ def _make_fan_dispatcher(
             # Emit the concrete-id list as-is (may contain END). Returning a
             # list — not an unwrapped scalar — is what lets an empty manifest
             # fan to EVERY dependent.
-            return Command(goto=list(no_items_targets))
+            return Command(update={"fan_ready": {node.id: True}}, goto=list(no_items_targets))
 
         # 4. Fail loud on colliding child ids. Each branch's child id is
         #    `<parent>::<item_id>` (matching dynamic._make_fan_out_node). Two
@@ -362,7 +363,7 @@ def _make_fan_dispatcher(
 
         # 5. Dispatch one Send per item. state is committed post-gate state,
         #    so children see merged completed_nodes / evaluations directly.
-        return Command(goto=[
+        return Command(update={"fan_children": {node.id: [f"{node.id}::{item.get('id', 'unknown')}" for item in items]}}, goto=[
             Send(template_node_id, {**state, "_fan_out_item": item})
             for item in items
         ])
@@ -577,7 +578,7 @@ def build_workflow_graph(
                     else last_final_id
                 )
             else:
-                exit_node[node.id] = f"_sub_{node.id}"
+                exit_node[node.id] = f"_settle_{node.id}"
             needs_conditional.add(node.id)
         elif node.id in gated_node_ids:
             exit_node[node.id] = f"_eval_{node.id}"
@@ -654,11 +655,27 @@ def build_workflow_graph(
         template_id = f"_sub_{node.id}"
         fan_id = f"_fan_{node.id}"
 
+        settle_id = f"_settle_{node.id}"
+
+        def settle_fan(state: WorkflowState, parent=node):
+            children = state.get("fan_children", {}).get(parent.id, [])
+            failed = state.get("failed_nodes", set())
+            if any(child in failed for child in children):
+                return make_failure_update(parent.id, "Fan-out child failed", kind="upstream_failed")
+            if not all(child in state.get("completed_nodes", set()) for child in children):
+                return {}
+            update = settle_nodes(executor, fan_child_node(parent, settings), settings, children)
+            if not update.get("failed_nodes"):
+                update["fan_ready"] = {parent.id: True}
+            return update
+
+        builder.add_node(settle_id, settle_fan)
+        builder.add_edge(template_id, settle_id)
         # _sub_ → first_final (child evaluates inline per branch).
         # Final chain: each gated final is followed by its eval with retry
         # self-loop; ungated finals get a plain edge to the next in line.
         if dsc.final_nodes:
-            builder.add_edge(template_id, final_node_ids[(node.id, dsc.final_nodes[0].id)])
+            builder.add_edge(settle_id, final_node_ids[(node.id, dsc.final_nodes[0].id)])
             for i in range(len(dsc.final_nodes) - 1):
                 cur = final_node_ids[(node.id, dsc.final_nodes[i].id)]
                 nxt = final_node_ids[(node.id, dsc.final_nodes[i + 1].id)]

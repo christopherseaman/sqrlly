@@ -1,9 +1,4 @@
-"""The non-subgraph fan-out synthetic child node inherits the template's
-worktree override, so ForemanExecutor.effective_worktree resolves it.
-
-Uses MockExecutor (the sanctioned NodeExecutor double) to capture the
-Node object handed to execute(); no LLM, no git.
-"""
+"""Synthetic run children honor their parent worktree policy."""
 from __future__ import annotations
 
 import pytest
@@ -18,13 +13,12 @@ from sqrlly.schema.models import (
 from mock_executor import MockExecutor
 
 
-def _parent(template_worktree):
+def _parent(worktree):
     return Node(
-        id="build", name="build",
+        id="build", name="build", run=["true"], **({"worktree": worktree} if worktree else {}),
         fan_out=FanOut(
             template=FanOutTemplate(
                 run=["/bin/sh", "-c", "true"],
-                worktree=template_worktree,
             ),
         ),
     )
@@ -42,11 +36,11 @@ class _CapturingExecutor(MockExecutor):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("template_worktree", ["off", "isolated", None])
-async def test_synthetic_child_inherits_template_worktree(template_worktree):
-    parent = _parent(template_worktree)
+@pytest.mark.parametrize("worktree", ["off", "isolated", None])
+async def test_synthetic_child_inherits_worktree(worktree):
+    parent = _parent(worktree)
     config = Graph(name="t", nodes=[parent],
-                   settings=Settings(worktree="isolated"))
+                   settings=Settings())
     executor = _CapturingExecutor()
     node_fn = _make_fan_out_node(
         parent, config, executor,
@@ -60,7 +54,4 @@ async def test_synthetic_child_inherits_template_worktree(template_worktree):
     assert len(executor.captured) == 1
     synthetic = executor.captured[0]
     assert synthetic.id == "build::x"
-    assert synthetic.worktree == template_worktree
-    # effective_worktree resolves the per-fan-out override over settings.
-    expected = (template_worktree or "isolated", None)
-    assert synthetic.effective_worktree(config.settings) == expected
+    assert synthetic.worktree == (worktree or "isolated")
