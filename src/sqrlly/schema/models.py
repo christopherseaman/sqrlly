@@ -17,8 +17,9 @@ from pydantic import (
     model_validator,
 )
 
+from sqrlly.schema.references import assign_ancestors, validate_references
 from sqrlly.schema.v1 import (
-    KINDS, Agent, Defaults, Name, Prompt, Run, Workflow, WorkflowLoader,
+    KINDS, Agent, Defaults, Name, Outputs, Prompt, Run, Workflow, WorkflowLoader,
     repository_root, require_reference,
 )
 
@@ -194,22 +195,9 @@ class Evaluation(BaseModel):
     dimensions: list[DimensionCheck] | None = None
 
 
-class OutputContract(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    base_directory: str
-    required_files: list[str] = []
-
-    def required_paths(self) -> list[str]:
-        """Required files as workdir-relative POSIX paths, with
-        ``base_directory`` prepended. A single derivation so every consumer
-        constructs these paths identically (used by the existence check in
-        ``gates.validate_output_contract``). A ``base_directory`` of ``"."``
-        collapses to the bare filename."""
-        return [(Path(self.base_directory) / f).as_posix()
-                for f in self.required_files]
-
-
 class KindStep(BaseModel):
+    outputs: Outputs | None = None
+
     model_config = ConfigDict(extra="forbid")
     agent: Agent | None = None
     llm: Prompt | None = None
@@ -261,10 +249,6 @@ class FanOutFinalNode(KindStep):
     name: Name = Field(default_factory=lambda data: data["id"])
     description: str | None = None
     evaluation: Evaluation | None = None
-    # Enforced via the standard execution-node path (the final node runs
-    # through `_make_execution_node`), so it scaffolds + validates just
-    # like a top-level node's contract.
-    output_contract: OutputContract | None = None
 
 
 class FanOut(BaseModel):
@@ -388,12 +372,12 @@ class Settings(BaseModel):
 
 
 class Node(KindStep):
+    _ancestors: list[str] = PrivateAttr(default_factory=list)
     id: Name
     name: Name = Field(default_factory=lambda data: data["id"])
     description: str | None = None
     depends_on: list[str] = []
     evaluation: Evaluation | None = None
-    output_contract: OutputContract | None = None
     fan_out: FanOut | None = None
     route: Route | None = None
     timeout: float | None = None
@@ -505,6 +489,17 @@ class Graph(BaseModel):
                     tools = defaults.tools if step.agent.tools is None else step.agent.tools
                     if isinstance(tools, list) and (step.agent.provider or defaults.provider) != "anthropic":
                         raise ValueError(f"{node.id}: agent tool-name lists require provider: anthropic")
+                if step.outputs:
+                    if step.llm and "files" in step.outputs.model_fields_set:
+                        raise ValueError(f"{node.id}: llm cannot declare outputs.files")
+                    if step.workflow and step.outputs.schema_file:
+                        raise ValueError(f"{node.id}: workflow cannot declare outputs.schema")
+                    if not step.kind:
+                        raise ValueError(f"{node.id}: outputs requires an executable kind")
+                    if directory and step.outputs.schema_file:
+                        schema_path = directory / step.outputs.schema_file
+                        require_reference(root, schema_path, f"{node.id}.outputs.schema")
+                        step.outputs.load_schema(schema_path, root or directory)
                 if directory:
                     prompt = step.agent or step.llm
                     if prompt and prompt.prompt:
@@ -583,14 +578,19 @@ class Graph(BaseModel):
                         f"routes dispatch via Command(goto=), so they "
                         f"cannot appear in another node's depends_on"
                     )
+        assign_ancestors(self)
         return self
 
 
 
 def load_workflow(
     path: str | Path, *, resolve_settings: Callable[[Settings], Settings] | None = None,
+    inputs: frozenset[str] | None = frozenset(),
 ) -> Graph:
     path = Path(path)
     with path.open(encoding="utf-8") as stream:
         raw = yaml.load(stream, Loader=WorkflowLoader)
-    return Graph.model_validate(raw, context={"workflow_path": path, "resolve_settings": resolve_settings})
+    graph = Graph.model_validate(raw, context={"workflow_path": path, "resolve_settings": resolve_settings})
+    if inputs is not None:
+        validate_references(graph, inputs)
+    return graph

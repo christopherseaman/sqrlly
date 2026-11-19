@@ -67,7 +67,7 @@ async def test_fan_out_promote_merges_branch_deltas(tmp_path):
 
     # Replicate the CLI promote step the test is proving end-to-end.
     promote_parents = {n.id for n in cfg.nodes if n.fan_out and n.fan_out.promote}
-    specs = fanout_branch_specs(promote_parents, result.get("node_worktrees", {}))
+    specs = fanout_branch_specs(dict.fromkeys(promote_parents), result.get("node_worktrees", {}))
     assert len(specs) == 2, f"expected 2 branch specs, got {specs}"
     reconcile_promotions(specs, str(base), cfg.settings.on_promote_conflict, excludes=None)
     await executor.close()

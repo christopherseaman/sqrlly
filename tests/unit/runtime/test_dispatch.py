@@ -36,7 +36,7 @@ async def test_prompt_directory_defaults_and_argv(tmp_path, monkeypatch):
     from sqrlly.schema.models import load_workflow
     workflow = tmp_path / "flow.yaml"
     workflow.write_text("settings:\n  model: top\n  defaults: {agent: {model: writer}}"
-                        "\nnodes:\n  - {id: write, agent: body.txt}\n")
+                        "\nnodes:\n  - {id: person, run: echo Ada}\n  - {id: write, agent: body.txt, depends_on: [person]}\n")
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts/body.txt").write_text("Hello {{ person }}")
     graph = load_workflow(workflow)
@@ -46,7 +46,7 @@ async def test_prompt_directory_defaults_and_argv(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     child = tmp_path / "child"
     child.mkdir()
-    result = await DispatchExecutor(str(child), graph.settings).execute(graph.nodes[0], {"person": "Ada"})
+    result = await DispatchExecutor(str(child), graph.settings).execute(graph.nodes[1], {"person": "Ada"})
     assert result.success, result.error
     args, prompt = json.loads(result.output)
     assert args == ["exec", "--skip-git-repo-check", "--model", "writer", "--sandbox", "workspace-write", "-"]

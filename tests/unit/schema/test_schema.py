@@ -8,7 +8,7 @@ from sqrlly.schema.models import (
     FanOutTemplate,
     Graph,
     Node,
-    OutputContract,
+    Outputs,
     Route,
     RouteElse,
     Settings,
@@ -109,17 +109,16 @@ class TestEffectiveMaxRetries:
         assert node.effective_max_retries(settings) == 7
 
 
-class TestOutputContract:
+class TestOutputs:
     def test_basic_contract(self):
-        contract = OutputContract(
-            base_directory="output/", required_files=["result.json"]
+        contract = Outputs(
+            files=['output/result.json']
         )
-        assert contract.base_directory == "output/"
-        assert contract.required_files == ["result.json"]
+        assert contract.files == ["output/result.json"]
 
     def test_empty_required_files(self):
-        contract = OutputContract(base_directory="output/", required_files=[])
-        assert contract.required_files == []
+        contract = Outputs(files=[])
+        assert contract.files == []
 
 
 class TestSettingsMemoryGates:
@@ -438,15 +437,14 @@ class TestFanOut:
                     "id": "summary",
                     "name": "Summary",
                     "agent": "s.md",
-                    "output_contract": {
-                        "base_directory": ".",
-                        "required_files": ["summary.md"],
+                    "outputs": {
+                        "files": ['summary.md'],
                     },
                 }
             ],
         )
         fn = config.final_nodes[0]
-        assert fn.output_contract.required_files == ["summary.md"]
+        assert fn.outputs.files == ["summary.md"]
 
     def test_empty_block_is_well_formed(self):
         """A bare `FanOut()` is structurally valid (template is optional

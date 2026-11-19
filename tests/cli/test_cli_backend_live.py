@@ -141,3 +141,59 @@ async def test_codex_llm_disables_configured_mcp(tmp_path, monkeypatch):
     assert [(server["name"], server["enabled"]) for server in json.loads(configured)] == [
         ("test.server", False)
     ]
+
+
+@pytest.mark.cli
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_schema_field_reaches_route_and_template(tmp_path, provider):
+    from sqrlly.schema.models import load_workflow
+
+    (tmp_path / "field.json").write_text('{"type":"integer"}')
+    (tmp_path / "count.json").write_text(json.dumps({
+        "type": "object", "additionalProperties": False,
+        "properties": {"count": {"$ref": "field.json"}}, "required": ["count"],
+    }))
+    workflow = tmp_path / "workflow.yaml"
+    workflow.write_text("""
+name: Structured count
+nodes:
+  - id: count_items
+    llm:
+      text: Return a count of exactly seven.
+      provider: PROVIDER
+    timeout: 90
+    outputs: {schema: count.json}
+  - id: choose
+    depends_on: [count_items]
+    run: [echo, '{{count_items.count}}']
+    route:
+      cases:
+        - when: count_items.count == 7
+          goto: show
+      else: wrong
+  - id: show
+    run: [echo, correct]
+  - id: wrong
+    run: ['false']
+""".replace("PROVIDER", provider))
+    config = load_workflow(workflow)
+    executor = DispatchExecutor(workdir=str(tmp_path), settings=config.settings)
+    graph = build_workflow_graph(config, executor)
+    state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+    assert state["node_structured_outputs"]["count_items"] == {"count": 7}
+    assert state["node_outputs"]["choose"].strip() == "7"
+    assert state["node_outputs"]["show"].strip() == "correct"
+    assert "wrong" not in state["completed_nodes"]
+
+
+@pytest.mark.cli
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_provider_returns_array_schema(tmp_path, provider):
+    schema = tmp_path / "array.json"
+    schema.write_text(json.dumps({"type": "array", "items": {"type": "integer"}}))
+    backend = create_backend(provider, output_schema=schema)
+    result = await backend.send_prompt("Return the single-item array [7].", None, str(tmp_path), timeout=90)
+    assert result.structured_output == [7]
+    assert json.loads(result.output) == [7]

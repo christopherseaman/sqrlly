@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import glob
+from fnmatch import fnmatchcase
 import json
 import sys
 from dataclasses import dataclass, field
@@ -10,7 +10,7 @@ from typing import Any
 
 from sqrlly.runtime._json import extract_json
 from sqrlly.runtime.result import EvaluationBackendError, EvaluationError
-from sqrlly.schema.models import Evaluation, OutputContract, Settings
+from sqrlly.schema.models import Evaluation, Outputs, Settings
 
 
 def build_eval_preamble(
@@ -459,29 +459,48 @@ async def run_evaluation(
 
 
 
-def scaffold_output_directory(contract: OutputContract, workdir: str) -> None:
-    """Pre-create the output directory tree for a node's output contract."""
-    base = Path(workdir) / contract.base_directory
-    base.mkdir(parents=True, exist_ok=True)
+def matching_output_files(pattern: str, workdir: str):
+    root = Path(workdir).resolve()
+    internal = {".git", ".sqrlly"}
+
+    def inside(path):
+        try:
+            parts = path.resolve().relative_to(root).parts
+        except (ValueError, OSError, RuntimeError):
+            return False
+        return not internal.intersection(parts)
+
+    def matches(directory, parts, visited):
+        part, *rest = parts
+        recursive = part == "**"
+        if recursive and rest:
+            yield from matches(directory, rest, visited)
+        if recursive or any(c in part for c in "*?["):
+            candidates = directory.iterdir()
+        else:
+            candidates = [directory / part]
+        for candidate in candidates:
+            if candidate.name in internal or not inside(candidate):
+                continue
+            if not recursive and not fnmatchcase(candidate.name, part):
+                continue
+            if not rest and candidate.is_file():
+                yield candidate
+            if candidate.is_dir() and (recursive or rest):
+                real = candidate.resolve()
+                if real not in visited:
+                    yield from matches(candidate, parts if recursive else rest, visited | {real})
+
+    parts = Path(pattern).parts
+    literal = root / pattern
+    if inside(literal) and literal.is_file():
+        yield literal
+    if parts:
+        for match in matches(root, parts, {root}):
+            if match != literal:
+                yield match
 
 
-def validate_output_contract(
-    contract: OutputContract,
-    workdir: str,
-) -> list[str]:
-    """Check each required entry as a glob that needs at least one match
-    (a literal path matches itself). Returns the unmatched entries
-    (workdir-relative, ``base_directory`` prepended)."""
-    # Follows the promote filter's ``:(glob)`` pathspec: the literal path is
-    # tried first (so ``x[1].txt`` matches a file of that name), then ``**``
-    # spans directories and ``*`` stays in one segment and matches dotfiles.
-    # Glob matches under ``.git`` or ``.sqrlly`` (other nodes' worktrees) are
-    # ignored: promote never carries them, so they cannot satisfy a contract.
-    missing = []
-    for rel in contract.required_paths():
-        if not ((Path(workdir) / rel).exists() or any(
-                not {".git", ".sqrlly"} & set(Path(match).parts)
-                for match in glob.iglob(
-                    rel, root_dir=workdir, recursive=True, include_hidden=True))):
-            missing.append(rel)
-    return missing
+def validate_output_contract(contract: Outputs, workdir: str) -> list[str]:
+    """Return each declared file pattern with no match in the execution tree."""
+    return [pattern for pattern in contract.files if not next(matching_output_files(pattern, workdir), None)]

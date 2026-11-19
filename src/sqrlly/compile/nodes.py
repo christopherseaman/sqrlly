@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from langgraph.graph import END
 from langgraph.types import Command
 
+from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.compile.evaluation import (
     EvaluationRecord,
     build_eval_context,
@@ -20,11 +21,10 @@ from sqrlly.compile.evaluation import (
     evaluation_to_routes,
     walk_routes,
 )
+from sqrlly.runtime._json import bind_json
 from sqrlly.runtime.gates import (
     EvaluationResult,
     build_eval_preamble,
-    scaffold_output_directory,
-    validate_output_contract,
 )
 from sqrlly.runtime.executor.prompt import retry_delay
 from sqrlly.runtime.gates import run_evaluation
@@ -91,6 +91,26 @@ def check_dry_run(node: Node, state: WorkflowState) -> dict | None:
     return update
 
 
+class _TemplateOutput:
+    """Jinja renders the original text and indexes the validated JSON value."""
+
+    def __init__(self, text, value):
+        self._text = text
+        self._value = bind_json(value)
+
+    def __str__(self):
+        return self._text
+
+    def __getitem__(self, key):
+        return self._value[key]
+
+
+def bind_output(state: WorkflowState, node_id: str):
+    text = state.get("node_outputs", {}).get(node_id, "")
+    structured = state.get("node_structured_outputs", {})
+    return _TemplateOutput(text, structured[node_id]) if node_id in structured else text
+
+
 def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     import json as _json
 
@@ -105,9 +125,9 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     # alongside their own dep outputs. Top-level graphs have no inputs.
     inputs = state.get("node_inputs", {}) or {}
     context.update(inputs)
-    for dep in node.depends_on:
+    for dep in node._ancestors or node.depends_on:
         if dep in outputs:
-            context[dep] = outputs[dep]
+            context[dep] = bind_output(state, dep)
         if dep in structured:
             context[f"{dep}_structured"] = structured[dep]
         if dep in worktrees:
@@ -256,7 +276,7 @@ def assemble_success_update(node: Node, result: ExecutionResult) -> dict[str, An
     update: dict[str, Any] = {
         "node_outputs": {node.id: result.output},
     }
-    if result.structured_output is not None:
+    if result.structured_output is not None or (node.outputs and node.outputs.schema_file):
         update["node_structured_outputs"] = {node.id: result.structured_output}
     if result.model is not None or result.provider is not None:
         update["node_models"] = {
@@ -623,16 +643,11 @@ def _make_execution_node(
                 await asyncio.sleep(delay)
         context = inject_retry_reason(context, node, state, max_retries)
 
-        if node.output_contract:
-            scaffold_output_directory(
-                node.output_contract, state.get("workdir", ".")
-            )
-
-        exec_result = await run_with_timeout(
-            executor.execute(
-                node, context, settings_override=effective_settings,
+        exec_result = await execute_with_outputs(
+            lambda ctx: run_with_timeout(
+                executor.execute(node, ctx, settings_override=effective_settings), timeout,
             ),
-            timeout,
+            context, node.outputs, state.get("workdir", "."),
         )
         if not exec_result.success:
             # Carry the classification the executor set (overload / backend_error
@@ -641,32 +656,6 @@ def _make_execution_node(
                 node.id, exec_result.error,
                 kind=exec_result.error_kind or "node_error",
             )
-
-        if node.output_contract:
-            # Validate where the node actually ran — its foreman worktree
-            # when active, else the workdir. Checking the workdir alone
-            # reports worktree-written files as missing.
-            contract_dir = exec_result.worktree or state.get("workdir", ".")
-            missing = validate_output_contract(
-                node.output_contract, contract_dir
-            )
-            if missing:
-                return {
-                    "failed_nodes": {node.id},
-                    "errors": [
-                        {
-                            "node": node.id,
-                            "error": (
-                                f"Output contract violated: missing files: "
-                                f"{', '.join(missing)}"
-                            ),
-                            # Deterministic: the node ran but didn't produce
-                            # its required files.
-                            "kind": "node_error",
-                        }
-                    ],
-                    "node_outputs": {node.id: exec_result.output},
-                }
 
         update = assemble_success_update(node, exec_result)
         if hasattr(executor, "get_worktree"):

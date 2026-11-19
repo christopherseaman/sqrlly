@@ -15,7 +15,7 @@ from sqrlly.compile.nodes import _make_execution_node
 from sqrlly.runtime.result import ExecutionResult
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
-    OutputContract,
+    Outputs,
     Node,
     Evaluation,
     Settings,
@@ -135,8 +135,8 @@ class TestExecutionNodeClosure:
         """Successful execution + missing required file → failed_nodes, no retry."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            output_contract=OutputContract(
-                base_directory="out", required_files=["expected.md"],
+            outputs=Outputs(
+                files=['out/expected.md'],
             ),
         )
         node = _make_execution_node(node, _config_with(node), MockExecutor())
@@ -151,8 +151,8 @@ class TestExecutionNodeClosure:
         """Required file present post-execution → completion proceeds."""
         node = Node(
             id="p1", name="P1", agent={"text": "test"},
-            output_contract=OutputContract(
-                base_directory="out", required_files=["expected.md"],
+            outputs=Outputs(
+                files=['out/expected.md'],
             ),
         )
         (tmp_path / "out").mkdir()

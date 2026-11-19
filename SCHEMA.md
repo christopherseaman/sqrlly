@@ -80,13 +80,13 @@ acquisitions wait.
 | `description` | `str \| None` | `None` | Free text. |
 | `depends_on` | `list[str]` | `[]` | Static DAG edges. Cannot reference an inline-route node. |
 | `evaluation` | `Evaluation \| None` | `None` | Quality gate. |
-| `output_contract` | `OutputContract \| None` | `None` | Required-files check after execution. |
+| `outputs` | mapping | optional | Validate files and structured results after execution. |
 | `fan_out` | `FanOut \| None` | `None` | Manifest-driven `Send` fan-out. |
 | `route` | `Route \| None` | `None` | Inline forward-edge routing block. |
 | `timeout` | `float \| None` | `None` | Per-node timeout; falls back to `settings.default_timeout`. |
 | `worktree` | `Literal["auto","isolated","off"] \| None` | `None` | Per-node isolation **mode** override; `None` inherits. Values: `auto` / `isolated` / `off` (alias `none`); bare YAML `off`/`on` booleans accepted. `off` runs the node in the shared base workdir (so e.g. a script gate, which runs at the base workdir, can read the node's files). See `settings.worktree`. |
 | `worktree_group` | `str \| None` | `None` | Per-node shared-tree name; mutually exclusive with an explicit `worktree` mode. Nodes sharing a name share one worktree. See `settings.worktree_group`. |
-| `promote` | `bool` | `False` | After a **clean** run, apply this node's worktree git delta (adds/edits/deletes vs the fork point) to the base workdir. Discovers the footprint from git — no need to predict which files changed — so it handles open-ended work (bugfixes/refactors) including deletions. If `output_contract.required_files` is set, those entries (git pathspec; `*`/`**`/`?`/`[…]`) filter what's promoted; otherwise the whole delta is promoted. Only UNCOMMITTED changes are promoted: a node that commits inside its worktree fails the promote step with an error naming the node, before any file is written. Runs before GC. Top-level nodes only. An `off` node already writes to the base workdir, so `promote` is a no-op there. Multi-source reconciliation of *overlapping* isolated trees (3-way merge) is out of scope. |
+| `promote` | `bool` | `False` | After a **clean** run, apply this node's worktree git delta (adds/edits/deletes vs the fork point) to the base workdir. Discovers the footprint from git — no need to predict which files changed — so it handles open-ended work (bugfixes/refactors) including deletions. If `outputs.files` is set, those entries (git pathspec; `*`/`**`/`?`/`[…]`) filter what's promoted; otherwise the whole delta is promoted. Only UNCOMMITTED changes are promoted: a node that commits inside its worktree fails the promote step with an error naming the node, before any file is written. Runs before GC. Top-level nodes only. An `off` node already writes to the base workdir, so `promote` is a no-op there. Multi-source reconciliation of *overlapping* isolated trees (3-way merge) is out of scope. |
 
 The node schema rejects unknown keys.
 
@@ -173,16 +173,15 @@ prompt template as `{{_retry_reason}}`.
 
 ---
 
-## OutputContract
+## Outputs
 
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `base_directory` | `str` | required | Directory checked after the node runs. |
-| `required_files` | `list[str]` | `[]` | Paths or globs (`*`/`**`/`?`/`[…]`) checked under `base_directory` in the node's run dir (its worktree in a git repo). Each entry needs at least one match for the node to succeed; a literal path matches itself. `*` stays within one directory, `**` spans directories. |
+`outputs.files` lists file paths or globs relative to the execution worktree. Each entry must match a file. The same patterns limit which files the node promotes. Agents, commands and workflows can declare files.
 
-> `required_files` are interpreted relative to `base_directory` for **both** the existence check and the promote glob filter. A node with `base_directory: reference` and `required_files: [x.json]` validates and promotes `reference/x.json`; `required_files: ["*.json"]` validates when at least one `reference/*.json` exists and promotes every changed match.
+`outputs.schema` names a JSON Schema file relative to the workflow YAML. Agents and LLMs pass it to their provider CLI. A command must print a single matching JSON document. Workflows can declare files, and LLMs can declare a schema.
 
----
+A missing file or invalid result reruns the node with the validation error as feedback. After three unsuccessful attempts the node fails. Commands can include `{{_output_retry_reason}}` in an argv token to receive the feedback.
+
+Templates can use ancestor results. `{{plan}}` renders its text, and `{{plan.count}}` reads a field when the ancestor declares a schema. Validation rejects references to a node outside the dependency or route path, field access on a node without a schema, and a route that compares a schema-less prompt node's entire text.
 
 ## Route — inline forward-edge dispatch
 

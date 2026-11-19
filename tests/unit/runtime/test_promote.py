@@ -10,7 +10,7 @@ from sqrlly.runtime.promote import (
     plan_promotions,
     reconcile_promotions,
 )
-from sqrlly.schema.models import OutputContract
+from sqrlly.schema.models import Outputs
 from helpers import init_git_repo
 
 
@@ -252,11 +252,11 @@ def test_reconcile_glob_honors_base_directory(tmp_path):
     wt = _wt(tmp_path, "wc")
     (wt/"reference").mkdir()
     (wt/"reference"/"prd-context-map.json").write_text("{}")
-    contract = OutputContract(
-        base_directory="reference", required_files=["prd-context-map.json"],
+    contract = Outputs(
+        files=['reference/prd-context-map.json'],
     )
     reconcile_promotions(
-        [("ref", str(wt), contract.required_paths())], str(tmp_path), "warn",
+        [("ref", str(wt), contract.files)], str(tmp_path), "warn",
     )
     assert (tmp_path/"reference"/"prd-context-map.json").read_text() == "{}"
 
@@ -307,14 +307,14 @@ def test_fanout_branch_specs_selects_promote_parents():
         "plan::v1": "/wt/plan__v1",     # parent not promoting
         "toplevel_node": "/wt/toplevel", # not a branch (no ::)
     }
-    specs = fanout_branch_specs({"build"}, node_worktrees)
+    specs = fanout_branch_specs({"build": None}, node_worktrees)
     assert specs == [
         ("build::feat_a", "/wt/build__feat_a", None),
         ("build::feat_b", "/wt/build__feat_b", None),
     ]
 
 def test_fanout_branch_specs_empty_when_no_promote_parents():
-    assert fanout_branch_specs(set(), {"build::a": "/wt/a"}) == []
+    assert fanout_branch_specs({}, {"build::a": "/wt/a"}) == []
 
 
 def test_discover_changes_reinclude_keeps_subpath(tmp_path):

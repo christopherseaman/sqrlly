@@ -12,7 +12,7 @@ from sqrlly.cli.main import CHECKPOINT_DB, _run_artifact_summary
 from sqrlly.schema.models import (
     Graph,
     Node,
-    OutputContract,
+    Outputs,
     Settings,
 )
 
@@ -29,8 +29,8 @@ def test_output_contract_files_listed_when_present(tmp_path):
         Node(
             id="write", name="Write",
             run=["echo", "x"],
-            output_contract=OutputContract(
-                base_directory="output", required_files=["paper.md"],
+            outputs=Outputs(
+                files=['output/paper.md'],
             ),
             promote=True,
         ),
@@ -49,8 +49,8 @@ def test_declared_output_not_yet_written_falls_back_to_run_state(tmp_path):
         Node(
             id="write", name="Write",
             run=["echo", "x"],
-            output_contract=OutputContract(
-                base_directory="output", required_files=["missing.md"],
+            outputs=Outputs(
+                files=['output/missing.md'],
             ),
         ),
     ])

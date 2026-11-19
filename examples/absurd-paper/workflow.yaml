@@ -80,10 +80,8 @@ nodes:
   - id: render_pdf
     name: Render Paper to PDF
     depends_on: [paper]
-    output_contract:
-      base_directory: output
-      required_files:
-      - paper.pdf
+    outputs:
+      files: [output/paper.pdf]
     run: [uv, run, --script, '{{workflow_dir}}/scripts/render_pdf.py', output/paper.md, output/paper.pdf]
 settings:
   preamble_file: preamble.md

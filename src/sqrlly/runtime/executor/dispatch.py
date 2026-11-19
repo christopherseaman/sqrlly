@@ -54,13 +54,21 @@ class DispatchExecutor:
                     body = (workflow_dir / settings.prompts / prompt.prompt).read_text()
                 body = apply_preamble(body, settings=settings, base_workdir=str(workflow_dir))
                 rendered = prepend_eval_preamble(render_template(body, context), context)
+                if feedback := context.get("_output_retry_reason"):
+                    rendered = f"{feedback}\n\n{rendered}"
                 tools = None
                 cli_args = None
                 if node.agent is not None:
                     tools = node.agent.tools if node.agent.tools is not None else defaults.tools
                     cli_args = (node.agent.cli_args if "cli_args" in node.agent.model_fields_set
                                 else defaults.cli_args)
-                backend = create_backend(provider, tools=tools, cli_args=cli_args, safe_mode=self._safe_mode)
+                schema = node.outputs.schema_document if node.outputs else None
+                if schema is None and node.outputs and node.outputs.schema_file:
+                    schema = workflow_dir / node.outputs.schema_file
+                backend = create_backend(
+                    provider, tools=tools, cli_args=cli_args, safe_mode=self._safe_mode,
+                    output_schema=schema,
+                )
                 result = await execute_with_downgrade(
                     backend, rendered, model, cwd, timeout=node.effective_timeout(settings),
                     settings=settings, max_retries=defaults.backend_max_retries,

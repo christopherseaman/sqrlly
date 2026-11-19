@@ -18,6 +18,7 @@ from typing import Any
 
 from simpleeval import EvalWithCompoundTypes
 
+from sqrlly.runtime._json import bind_json
 from sqrlly.runtime.state import WorkflowState
 
 _BASE_SAFE_FUNCS = {
@@ -47,7 +48,7 @@ def build_route_namespace(
     structured = state.get("node_structured_outputs", {}) or {}
     outputs = state.get("node_outputs", {}) or {}
     for dep in deps:
-        ns[dep] = structured.get(dep, outputs.get(dep))
+        ns[dep] = bind_json(structured[dep]) if dep in structured else outputs.get(dep)
     ns["history"] = state.get("evaluations", {}) or {}
     ns["state"] = dict(state)
 

@@ -208,13 +208,12 @@ def reconcile_promotions(
 
 
 def fanout_branch_specs(
-    promote_parents: set[str], node_worktrees: dict[str, str],
+    promote_parents: dict[str, list[str] | None], node_worktrees: dict[str, str],
 ) -> list[tuple[str, str, list[str] | None]]:
     """Promote specs for the branch worktrees of the given fan-out parents.
 
     ``node_worktrees`` (workflow state) records each Send branch's worktree
-    keyed ``<parent_id>::<item_id>``. Each branch promotes its FULL delta
-    (``None`` globs — a fan-out template has no ``output_contract``);
+    keyed ``<parent_id>::<item_id>``. Template files narrow each branch delta.
     ``promote_exclude`` / ``promote_include`` still apply downstream. Returned sorted by child
     id for deterministic conflict ordering. Empty when no parent opts in.
     """
@@ -222,7 +221,7 @@ def fanout_branch_specs(
     for child_id in sorted(node_worktrees):
         parent = child_id.split("::", 1)[0]
         if "::" in child_id and parent in promote_parents:
-            specs.append((child_id, node_worktrees[child_id], None))
+            specs.append((child_id, node_worktrees[child_id], promote_parents[parent]))
     return specs
 
 

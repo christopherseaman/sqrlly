@@ -152,7 +152,10 @@ class TestBuildContext:
         ctx = build_context(node, state)
         # `evals` is always-bound (Stage 5c) — empty dict when no
         # evaluations have run.
-        assert ctx == {"a": "out-a", "a_structured": {"k": "v"}, "evals": {}}
+        assert str(ctx["a"]) == "out-a"
+        assert ctx["a"]["k"] == "v"
+        assert ctx["a_structured"] == {"k": "v"}
+        assert ctx["evals"] == {}
 
     def test_no_matching_deps(self):
         node = _phase(depends_on=["b"])

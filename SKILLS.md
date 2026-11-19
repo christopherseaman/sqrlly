@@ -90,18 +90,15 @@ For per-worker worktrees, gates and logs, use fan-out.
    **can't produce a score** (crashes, exits non-zero, or emits no
    parseable score) halts the run loudly — distinct from a valid score
    below threshold.
-2. **Node options** (any node): `timeout: 30` (seconds; the node is
-   killed and fails if it overruns) and `output_contract:` to assert a
-   node wrote files —
+2. Declare the results each node must produce. Every glob must match a file in its worktree. A command with a schema prints one JSON document. LLM and agent nodes pass their schema to the provider CLI.
+
    ```yaml
-   output_contract:
-     base_directory: "."                  # base for required_files (required)
-     required_files: ["report.md"]        # node fails if missing after it runs
+   outputs:
+     files: ["reports/*.md"]
+     schema: schemas/plan.json
    ```
-   In a git repo, files are checked in the node's worktree (where it
-   wrote them), so write paths relative to the run, not absolute.
-   `required_files` entries are paths or globs (`out_*.md`, `**/*.json`);
-   each entry needs at least one match, and a literal path matches itself.
+
+   Downstream nodes can render the text with `{{plan}}` or read a schema field with `{{plan.title}}`. A missing file or invalid result gives the node feedback and another attempt, up to three runs.
 3. **Branch** with a `route:` block — an unconditional `goto:`, or a
    `cases:` / `else:` ladder of `when:` predicates:
    ```yaml
@@ -133,7 +130,7 @@ For per-worker worktrees, gates and logs, use fan-out.
          llm: summarize.md
    ```
    Each inline final node has an id and a kind. Optional fields include
-   `evaluation` and `output_contract`. Each
+   `evaluation` and `outputs`. Each
    manifest item is a JSON **object**; its fields become template
    variables (`{{id}}`, `{{name}}`, …). A bare string item is treated
    as `{"id": "<string>"}`. The manifest may instead be produced at run
@@ -179,7 +176,7 @@ its worktree, not the base workdir. Set `promote: true` on a top-level
 node to apply its worktree's git delta (adds/edits/**deletes**) back to
 the base workdir after a clean run — the change set is discovered from
 git, so it works for open-ended edits (bugfixes/refactors) you can't
-enumerate in advance; an `output_contract` (glob paths) narrows it.
+enumerate in advance; an `outputs` (glob paths) narrows it.
 Promotion copies **uncommitted** changes only: tell a promoting node's
 agent not to `git commit`. A worktree holding commits fails the promote
 step (error names the node, nothing is written, the worktree is kept).
@@ -269,7 +266,7 @@ start (upstream never ran). Distinct from `--resume-from`, which requires a
 checkpoint.
 
 On completion `run` prints a `where to find things` summary — the
-produced `output_contract` files, the `--log` path (or how to capture
+produced `outputs` files, the `--log` path (or how to capture
 one), and run artifacts (checkpoint DB + foreman worktree pool, when
 present). The live renderer shows only per-node status, so this epilogue
 is where a terminal run tells you where output / logs / artifacts

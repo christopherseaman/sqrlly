@@ -724,7 +724,7 @@ class TestDimensionGateExecution:
         assert int(counter.read_text().strip()) == 2
 
 
-class TestOutputContract:
+class TestOutputs:
     @pytest.mark.asyncio
     async def test_contract_pass_continues_to_gate(self, tmp_path):
         """Files exist → gate runs → node completes."""
@@ -738,7 +738,7 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["result.txt"]},
+                outputs={"files": ['out/result.txt']},
                 evaluation={"validator": str(script), "threshold": 0.8},
             ),
         ])
@@ -754,7 +754,7 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
+                outputs={"files": ['out/missing.txt']},
                 evaluation={"validator": "never_called.py", "threshold": 0.8},
             ),
         ])
@@ -771,7 +771,7 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "a", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
+                outputs={"files": ['out/missing.txt']},
             ),
             cmd_phase("b", output="ok", depends_on=["a"]),
         ])
@@ -787,7 +787,7 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
+                outputs={"files": ['out/missing.txt']},
             ),
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -801,7 +801,7 @@ class TestOutputContract:
         config = make_config([
             cmd_phase(
                 "p1", output="data",
-                output_contract={"base_directory": "out", "required_files": ["missing.txt"]},
+                outputs={"files": ['out/missing.txt']},
                 evaluation={
                     "validator": "never_called.py", "threshold": 0.8,
                     "blocking": True, "max_retries": 3,

@@ -343,13 +343,8 @@ def extract_node_config(node: Node) -> dict[str, Any]:
                 "include_eval": node.route.else_.include_eval,
             }
         cfg["route"] = rt
-    if node.output_contract:
-        oc: dict[str, Any] = {}
-        if node.output_contract.base_directory:
-            oc["base_directory"] = node.output_contract.base_directory
-        if node.output_contract.required_files:
-            oc["required_files"] = list(node.output_contract.required_files)
-        cfg["output_contract"] = oc
+    if node.outputs:
+        cfg["outputs"] = node.outputs.model_dump(by_alias=True, exclude_unset=True)
     return cfg
 
 

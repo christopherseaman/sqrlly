@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.compile.nodes import (
+    assemble_success_update,
     _make_execution_node,
     build_context,
+    bind_output,
     run_evaluation_and_outcome,
     run_with_timeout,
     inject_retry_reason,
@@ -130,6 +133,7 @@ def _make_fan_out_node(
             id=child_id,
             name=f"{parent_node.name} - {item.get('name', item_id)}",
             evaluation=template.evaluation,
+            outputs=template.outputs,
             **({template.kind: getattr(template, template.kind)} if template.kind else {}),
             # Per-fan-out worktree override (FanOutTemplate.worktree). None
             # inherits settings.worktree — identical to a top-level node with
@@ -141,8 +145,7 @@ def _make_fan_out_node(
         # Build context up front — dep outputs + per-item manifest fields
         # do not change across retries within this node invocation.
         base_context = build_context(parent_node, state)
-        parent_output = state.get("node_outputs", {}).get(parent_node.id, "")
-        base_context[parent_node.id] = parent_output
+        base_context[parent_node.id] = bind_output(state, parent_node.id)
         for key, value in item.items():
             base_context[key] = str(value)
 
@@ -176,33 +179,21 @@ def _make_fan_out_node(
                     max_retries, node_id=child_id,
                 )
 
-            if sub_invoker is not None:
-                # Subgraph template: each Send branch runs the subgraph
-                # with rendered inputs and surfaces its terminal output
-                # the same way an executor would surface stdout / prompt
-                # text. Timeout enforcement on the per-child subgraph
-                # uses asyncio.wait_for at the same boundary as the
-                # executor case for symmetry. The branch's child_id
-                # (e.g. ``reviewer_pool::maverick``) becomes the JSONL
-                # prefix so each per-Send subgraph's internals surface
-                # under their own namespace.
-                exec_result = await run_with_timeout(
-                    sub_invoker(
-                        context,
-                        state.get("workdir", "."),
-                        state.get("dry_run", False),
+            def execute(ctx):
+                if sub_invoker is not None:
+                    invocation = sub_invoker(
+                        ctx, state.get("workdir", "."), state.get("dry_run", False),
                         prefix=child_id,
-                    ),
-                    timeout,
-                )
-            else:
-                exec_result = await run_with_timeout(
-                    executor.execute(
-                        synthetic_node, context,
-                        settings_override=effective_settings,
-                    ),
-                    timeout,
-                )
+                    )
+                else:
+                    invocation = executor.execute(
+                        synthetic_node, ctx, settings_override=effective_settings,
+                    )
+                return run_with_timeout(invocation, timeout)
+
+            exec_result = await execute_with_outputs(
+                execute, context, template.outputs, state.get("workdir", "."),
+            )
             if not exec_result.success:
                 return _merge_updates(update, make_failure_update(
                     child_id, exec_result.error,
@@ -210,7 +201,7 @@ def _make_fan_out_node(
                 ))
 
             exec_update: dict[str, Any] = {
-                "node_outputs": {child_id: exec_result.output},
+                **assemble_success_update(synthetic_node, exec_result),
                 "child_outputs": {child_id: exec_result.output},
             }
             if exec_result.worktree:
@@ -309,9 +300,10 @@ def _make_final_fan_out_node(
         evaluation=final_node.evaluation,
         depends_on=[parent_node.id],
         **({final_node.kind: getattr(final_node, final_node.kind)} if final_node.kind else {}),
-        output_contract=final_node.output_contract,
+        outputs=final_node.outputs,
     )
 
+    synthetic._ancestors = [*parent_node._ancestors, parent_node.id]
     inner = build_subgraph(synthetic) if synthetic.workflow else _make_execution_node(
         synthetic, config, executor,
         effective_settings=effective_settings,

@@ -18,12 +18,16 @@ import asyncio
 import json
 import os
 import signal
+from contextlib import ExitStack
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from sqrlly.runtime.executor.backends._overload import (
     OVERLOAD_SUBSTRINGS,
     maybe_raise_overload,
 )
+from sqrlly.schema.json_schema import load_validator, provider_envelope
 from sqrlly.runtime.result import ExecutionResult
 
 
@@ -77,7 +81,9 @@ class CLIBackend:
         cli_args: list[str] | None = None,
         env: dict[str, str] | None = None,
         disable_codex_mcp: bool = False,
+        output_schema: Path | dict | bool | None = None,
     ):
+        self._output_schema = output_schema
         self._argv_prefix = argv_prefix
         self._prompt_arg = prompt_arg
         self._permission_mode = permission_mode
@@ -109,14 +115,48 @@ class CLIBackend:
         if model is not None:
             argv.extend(["--model", model])
         argv.extend(self._tool_argv())
-        async with asyncio.timeout(timeout):
-            if self._disable_codex_mcp:
-                if workdir not in self._mcp_args:
-                    self._mcp_args[workdir] = await self._disabled_mcp_args(workdir)
-                argv.extend(self._mcp_args[workdir])
-            if self._prompt_arg is not None:
-                argv.append(self._prompt_arg)
-            return ExecutionResult(output=await self._invoke(argv, prompt, workdir))
+        claude = self._argv_prefix[0] == "claude"
+        wrapped = False
+        with ExitStack() as files:
+            if self._output_schema is not None:
+                schema = self._output_schema
+                if isinstance(schema, Path):
+                    schema, _ = load_validator(schema, schema.parent)
+                # Both provider APIs require an object at the root.
+                wrapped = not isinstance(schema, dict) or schema.get("type") != "object"
+                if wrapped:
+                    schema = provider_envelope(schema)
+                if claude:
+                    argv.extend(["--output-format", "json", "--json-schema", json.dumps(schema)])
+                else:
+                    file = files.enter_context(NamedTemporaryFile(mode="w", suffix=".json"))
+                    json.dump(schema, file)
+                    file.flush()
+                    argv.extend(["--output-schema", file.name])
+            async with asyncio.timeout(timeout):
+                if self._disable_codex_mcp:
+                    if workdir not in self._mcp_args:
+                        self._mcp_args[workdir] = await self._disabled_mcp_args(workdir)
+                    argv.extend(self._mcp_args[workdir])
+                if self._prompt_arg is not None:
+                    argv.append(self._prompt_arg)
+                output = await self._invoke(argv, prompt, workdir)
+        if self._output_schema is None:
+            return ExecutionResult(output=output)
+        try:
+            value = json.loads(output)
+        except json.JSONDecodeError:
+            return ExecutionResult(output=output)
+        if claude:
+            if not isinstance(value, dict) or "structured_output" not in value:
+                text = value.get("result", "") if isinstance(value, dict) else ""
+                return ExecutionResult(output=text)
+            output = value.get("result") or json.dumps(value["structured_output"])
+            value = value["structured_output"]
+        if wrapped and isinstance(value, dict) and "value" in value:
+            value = value["value"]
+            output = json.dumps(value)
+        return ExecutionResult(output=output, structured_output=value)
 
     async def _disabled_mcp_args(self, workdir: str) -> list[str]:
         servers = await self._invoke(

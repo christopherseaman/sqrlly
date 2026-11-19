@@ -13,6 +13,7 @@ from sqrlly.cli.init import (
 from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.compile.lint import collect_warnings
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
+from sqrlly.runtime.gates import matching_output_files
 from sqrlly.runtime.foreman import ForemanExecutor
 from sqrlly.runtime.promote import (
     PromoteConflictError, PromoteHeadMovedError, fanout_branch_specs,
@@ -73,7 +74,7 @@ def _run_artifact_summary(
     artifacts. The live renderer shows only per-node status, so this
     epilogue is the one place a normal terminal run surfaces locations.
 
-    - output: promoted files declared via top-level `output_contract`s that
+    - output: promoted files declared via top-level `outputs`s that
       actually exist on disk; otherwise a pointer to run state + `--log`.
     - log: the resolved `--log` path, or how to capture one.
     - artifacts: the checkpoint DB and the foreman worktree pool, each
@@ -89,15 +90,14 @@ def _run_artifact_summary(
     seen: set[Path] = set()
     produced: list[Path] = []
     for node in config.nodes:
-        if node.output_contract is None:
+        if node.outputs is None:
             continue
-        for rel in node.output_contract.required_paths():
-            p = (wd / rel).resolve()
-            if p in seen:
-                continue
-            seen.add(p)
-            if p.exists():
-                produced.append(p)
+        for rel in node.outputs.files:
+            for path in sorted(matching_output_files(rel, str(wd))):
+                p = path.resolve()
+                if p not in seen:
+                    seen.add(p)
+                    produced.append(p)
     lines = ["where to find things:"]
     if produced:
         lines.append(row("output:", ", ".join(str(p) for p in produced)))
@@ -465,21 +465,15 @@ async def _promote_and_gc(
         tree = executor_obj.get_worktree(node.id)
         if tree is None:
             continue  # `off` node already wrote to the base workdir
-        # output_contract.required_files (base_directory-prepended)
-        # doubles as the promote pathspec filter when present;
-        # otherwise the full delta is promoted (discover mode).
-        globs = (
-            node.output_contract.required_paths()
-            if node.output_contract else None
-        )
+        globs = node.outputs.files if node.outputs else None
         specs.append((node.id, tree, globs))
     # Fan-out branch worktrees opt in via fan_out.promote — route
     # them through the same reconcile path (inherits conflict
     # detection + promote_exclude + promote_include). They are recorded in
     # node_worktrees keyed <parent>::<item>.
     promote_parents = {
-        n.id for n in config.nodes
-        if n.fan_out is not None and n.fan_out.promote
+        n.id: n.fan_out.template.outputs.files if n.fan_out.template and n.fan_out.template.outputs else None
+        for n in config.nodes if n.fan_out is not None and n.fan_out.promote
     }
     specs.extend(fanout_branch_specs(
         promote_parents, result.get("node_worktrees", {}),

@@ -118,7 +118,7 @@ def _make_inline_route_node(node: Node):
 
     async def node_fn(state: WorkflowState) -> Command:
         from sqrlly.compile.route import build_safe_funcs
-        ns = build_route_namespace(state, node.depends_on)
+        ns = build_route_namespace(state, [*(node._ancestors or node.depends_on), node.id])
         funcs = build_safe_funcs(state)
 
         def _build_preamble(include_eval: bool) -> str:
@@ -483,7 +483,7 @@ def build_workflow_graph(
         )
 
     def build_subgraph(node):
-        child = load_graph(node.workflow.file, base_dir, settings)
+        child = load_graph(node.workflow.file, base_dir, settings, inputs=frozenset(node.workflow.inputs))
         return make_subgraph_node(
             node, child, compile_fn, executor, _depth, logger,
             timeout=node.effective_timeout(settings),

@@ -30,7 +30,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sqrlly.runtime.gates import scaffold_output_directory
 from sqrlly.runtime.memory_gate import POLL_INTERVAL_S, wait_for_memory
 from sqrlly.runtime.result import ExecutionResult, NodeExecutor, PromptBackend
 from sqrlly.runtime.worktree_share import ensure_setup, materialize_shares
@@ -112,8 +111,6 @@ class ForemanExecutor:
                 return ExecutionResult(
                     success=False, error=str(e), error_kind="infra",
                 )
-        if node.output_contract:
-            scaffold_output_directory(node.output_contract, run_dir)
         result = await self._inner.execute(
             node, context, workdir=run_dir,
             settings_override=settings_override,

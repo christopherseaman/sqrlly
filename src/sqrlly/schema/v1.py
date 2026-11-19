@@ -7,9 +7,10 @@ from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
+from sqrlly.schema.json_schema import load_validator
 import yaml
 from pydantic import (
-    BaseModel, ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt,
+    BaseModel, ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt, PrivateAttr,
     ValidationInfo, field_validator, model_validator,
 )
 
@@ -116,10 +117,34 @@ def require_reference(root: Path | None, path: Path, key: str, hint: str = "") -
 
 class SchemaOutput(Record):
     schema_file: Name | None = Field(None, alias="schema")
+    _schema_document: dict | bool | None = PrivateAttr(default=None)
+
+    @property
+    def schema_document(self) -> dict | bool | None:
+        return self._schema_document
+
+    _validator: Any = PrivateAttr(default=None)
+
+    def load_schema(self, path: Path, root: Path | None = None) -> None:
+        self._schema_document, self._validator = load_validator(
+            path, root or repository_root(path.parent.resolve()) or path.parent,
+        )
+
+    def validate_value(self, value: Any) -> None:
+        self._validator.validate(value)
 
 
 class Outputs(SchemaOutput):
     files: list[Name] = []
+
+    @field_validator("files")
+    @classmethod
+    def _relative_files(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            path = Path(pattern)
+            if path.is_absolute() or ".." in path.parts or {".git", ".sqrlly"}.intersection(path.parts):
+                raise ValueError(f"outputs.files requires a path inside the node tree: {pattern}")
+        return patterns
 
 
 class Eval(Record):

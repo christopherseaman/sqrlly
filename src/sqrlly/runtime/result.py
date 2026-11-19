@@ -25,7 +25,7 @@ class ExecutionResult:
     # failure, which the failure funnel defaults to `node_error` (fail-safe
     # toward halt). See SCHEMA.md for the kind vocabulary + dispositions.
     error_kind: str | None = None
-    structured_output: dict[str, Any] | None = None
+    structured_output: Any = None
     # The directory the node actually executed in (a foreman git
     # worktree, when active). Set by ForemanExecutor; None means the node
     # ran directly in the workdir. Used to validate output_contract
