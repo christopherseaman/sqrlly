@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from sqrlly.schema.params import validate_authored_params
+
 
 # Worktree isolation modes. `none` is an accepted alias for `off`.
 # This field is a MODE selector — a group name belongs in `worktree_group`,
@@ -596,6 +598,25 @@ class Graph(BaseModel):
     version: str
     nodes: list[Node]
     settings: Settings = Settings()
+
+    @model_validator(mode="after")
+    def _validate_execute_params(self) -> Self:
+        for node in self.nodes:
+            steps: list[Node | FanOutTemplate | FanOutFinalNode] = [node]
+            if node.fan_out:
+                if node.fan_out.template:
+                    steps.append(node.fan_out.template)
+                steps.extend(node.fan_out.final_nodes)
+            for step in steps:
+                execute = step.execute
+                if execute and execute.url is not None and execute.params:
+                    try:
+                        validate_authored_params(
+                            execute.url, execute.params, execute.mode, self.settings.base_url,
+                        )
+                    except ValueError as exc:
+                        raise ValueError(f"Node {node.id!r} execute.params: {exc}") from exc
+        return self
 
     @model_validator(mode="after")
     def _validate_unique_ids(self) -> Self:

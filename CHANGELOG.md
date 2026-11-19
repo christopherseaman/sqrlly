@@ -3,6 +3,13 @@
 All notable changes to sqrlly are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- `sqrlly validate` checks `execute.params` against the selected mode when
+  loading a workflow. Prompt nodes now reject the unused `params.agent` key.
+
 ## [0.10.0] - 2026-11-14
 
 ### Removed

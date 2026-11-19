@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from sqrlly.schema.models import Graph
 from sqrlly.schema.params import (
     PromptParams,
     SubgraphParams,
@@ -23,15 +24,13 @@ from sqrlly.schema.params import (
 
 class TestPromptParams:
     def test_parses_known_keys(self):
-        p = PromptParams(preset="smart", agent="claude", timeout=30.0)
+        p = PromptParams(preset="smart", timeout=30.0)
         assert p.preset == "smart"
-        assert p.agent == "claude"
         assert p.timeout == 30.0
 
     def test_defaults_to_none(self):
         p = PromptParams()
         assert p.preset is None
-        assert p.agent is None
         assert p.timeout is None
 
     def test_rejects_args_key(self):
@@ -141,3 +140,50 @@ class TestCoerceParams:
     def test_coerce_empty_dict(self):
         p = coerce_params("file:///x.md", {})
         assert isinstance(p, PromptParams)
+
+
+@pytest.mark.parametrize(("url", "params", "key"), [
+    ("prompt.md", {"args": ["wrong"]}, "args"),
+    ("prompt.md", {"agent": "claude"}, "agent"),
+    ("script.sh", {"model": "opus"}, "model"),
+    ("child.yaml", {"input": {"x": "y"}}, "input"),
+    ("?rev=2", {"timout": 2}, "timout"),
+])
+def test_graph_rejects_invalid_params_at_load(minimal_config_dict, url, params, key):
+    minimal_config_dict["nodes"][0]["execute"] = {"url": url, "params": params}
+    with pytest.raises(ValidationError, match=key):
+        Graph.model_validate(minimal_config_dict)
+
+
+@pytest.mark.parametrize("ref", ["", "?rev=2", "#section"])
+def test_pathless_ref_uses_prompt_base(minimal_config_dict, ref):
+    execute = {"url": ref, "params": {"timeout": 2}}
+    minimal_config_dict["settings"] = {"base_url": "https://example.org/template.md"}
+    minimal_config_dict["nodes"][0]["execute"] = execute
+    graph = Graph.model_validate(minimal_config_dict)
+    assert graph.nodes[0].execute.params == {"timeout": 2}
+    execute["params"] = {"args": ["wrong"]}
+    with pytest.raises(ValidationError, match="args"):
+        Graph.model_validate(minimal_config_dict)
+    execute["mode"] = "exec"
+    assert Graph.model_validate(minimal_config_dict).nodes[0].execute.mode == "exec"
+
+
+@pytest.mark.parametrize("location", ["template", "final_nodes"])
+def test_fan_out_checks_params_against_base(minimal_config_dict, location):
+    step = {"execute": {"url": "?rev=2", "params": {"args": []}}}
+    fan_out = {"template": step} if location == "template" else {
+        "final_nodes": [{"id": "final", "name": "Final", **step}]
+    }
+    minimal_config_dict["settings"] = {"base_url": "/prompts/template.md"}
+    minimal_config_dict["nodes"][0]["fan_out"] = fan_out
+    with pytest.raises(ValidationError, match="args"):
+        Graph.model_validate(minimal_config_dict)
+
+
+def test_absolute_double_slash_ignores_prompt_base(minimal_config_dict):
+    node = minimal_config_dict["nodes"][0]
+    node["execute"] = {"url": "//hostname", "params": {"args": ["ok"]}}
+    minimal_config_dict["settings"] = {"base_url": "/template.md"}
+    graph = Graph.model_validate(minimal_config_dict)
+    assert graph.nodes[0].execute.params == {"args": ["ok"]}

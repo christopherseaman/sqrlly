@@ -6,17 +6,17 @@ specific `params:` shape. Defining them as Pydantic models means typos
 rather than silently dropping into a generic dict.
 
 The resolver `params_for_url` picks the right model based on the
-resolved URL's extension/scheme. Schema validation on `Execute.params`
-(in models.py) coerces the raw dict into the matching model.
+resolved URL's extension/scheme. Graph loading checks the authored params
+without replacing their raw mapping.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 
 class _StrictParams(BaseModel):
@@ -27,7 +27,6 @@ class _StrictParams(BaseModel):
 class PromptParams(_StrictParams):
     """Params for prompt mode (`*.md`, `*.txt`, `*.prompt`)."""
     preset: str | None = None
-    agent: str | None = None
     timeout: float | None = None
 
 
@@ -52,6 +51,9 @@ class SubprocessParams(_StrictParams):
     preset: str | None = None
 
 
+_ANY_PARAMS = TypeAdapter(PromptParams | SubgraphParams | SubprocessParams)
+
+
 _PROMPT_EXTS = {".md", ".txt", ".prompt"}
 _SUBGRAPH_EXTS = {".yaml", ".yml"}
 SCRIPT_EXTS = {".py", ".js", ".mjs", ".ts", ".sh"}
@@ -63,10 +65,6 @@ _MODE_TO_PARAMS: dict[str, type[_StrictParams]] = {
     "prompt": PromptParams,
     "subgraph": SubgraphParams,
     "exec": SubprocessParams,
-    "python": SubprocessParams,
-    "node": SubprocessParams,
-    "tsx": SubprocessParams,
-    "bash": SubprocessParams,
 }
 
 
@@ -105,3 +103,19 @@ def coerce_params(
     Raises pydantic.ValidationError on mode-mismatched keys.
     """
     return params_for_url(resolved_url, mode=mode)(**raw)
+
+
+def validate_authored_params(
+    url: str, raw: dict[str, Any], mode: str | None, base_url: str | None,
+) -> None:
+    if mode is None and "://" not in url:
+        if url.startswith("/"):
+            url = f"file://{url}"
+        elif base_url:
+            base = base_url if "://" in base_url else f"file://{base_url}"
+            url = urljoin(base, url)
+        elif not urlsplit(url).path:
+            # A child workflow can inherit its handler from the parent's base URL.
+            _ANY_PARAMS.validate_python(raw)
+            return
+    coerce_params(url, raw, mode=mode)

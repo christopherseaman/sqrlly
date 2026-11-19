@@ -254,16 +254,20 @@ execute:
 ### Per-mode params
 
 Each mode's `params:` is validated by a Pydantic model with
-`extra="forbid"` — a typo like `arg:` for `args:` fails at compile time.
+`extra="forbid"` — a typo like `arg:` for `args:` fails when `sqrlly validate` loads the workflow.
 
 | Mode (URL extension) | Model | Fields |
 |---|---|---|
-| Prompt (`.md`, `.txt`, `.prompt`) | `PromptParams` | `preset: str?`, `agent: str?`, `timeout: float?` |
+| Prompt (`.md`, `.txt`, `.prompt`) | `PromptParams` | `preset: str?`, `timeout: float?` |
 | Subgraph (`.yaml`, `.yml`) | `SubgraphParams` | `inputs: dict[str,str]`, `outputs: dict[str,str]` |
 | Script / binary (everything else) | `SubprocessParams` | `args: list[str]`, `env: dict[str,str]`, `preset: str?` |
 
 `PromptParams.preset` names an `LlmPreset`; `SubprocessParams.preset`
 names a `CommandPreset`. `mode:` overrides the extension-driven choice.
+An empty, query-only or fragment-only URL can inherit its path from
+`settings.base_url`. When the current file omits that base, validation accepts
+any one complete parameter shape for these references. Dispatch checks the
+resolved mode after applying inherited settings.
 
 ### URL dispatch table
 

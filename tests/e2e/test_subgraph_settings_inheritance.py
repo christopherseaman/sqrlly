@@ -137,6 +137,24 @@ class TestScopeCapture:
         assert child_seen.default_timeout == 60.0
         assert child_seen.preamble_file == "x.md"
 
+    async def test_pathless_prompt_timeout_with_inherited_base(self, tmp_path):
+        _yaml(tmp_path / "sub.yaml", {
+            "name": "sub", "version": "1.0",
+            "nodes": [{"id": "child", "name": "Child", "execute": {
+                "url": "?rev=2", "params": {"timeout": 2},
+            }}],
+        })
+        base_url = "https://example.org/template.md"
+        config = Graph.model_validate({
+            "name": "wf", "version": "1.0", "settings": {"base_url": base_url},
+            "nodes": [{"id": "ref", "name": "Ref", "execute": {"url": "sub.yaml"}}],
+        })
+        executor = MockExecutor()
+        graph = build_workflow_graph(config, executor=executor, _base_dir=tmp_path)
+        state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+        assert "ref" in state["completed_nodes"]
+        assert executor.received_settings["child"].base_url == base_url
+
     async def test_three_level_inheritance(self, tmp_path):
         """top → mid → bot. Each layer can override; merges compose."""
         _yaml(tmp_path / "bot.yaml", {
