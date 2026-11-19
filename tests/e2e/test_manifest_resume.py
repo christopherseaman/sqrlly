@@ -9,8 +9,6 @@ import yaml
 
 
 def test_resume_then_back_route_starts_a_fresh_manifest_wave(tmp_path):
-
-
     nodes = [
         {"id": "dispatch", "run": ["sh", "-c", """if test -e next; then echo '["b"]'; else echo '["a"]'; fi"""]},
         {"id": "work", "for_each": "dispatch", "depends_on": ["dispatch"], "worktree": "off",
@@ -32,8 +30,6 @@ def test_resume_then_back_route_starts_a_fresh_manifest_wave(tmp_path):
 
 
 def test_warn_shrink_prunes_checkpoint_and_readdition_runs_again(tmp_path):
-
-
     manifest, config = tmp_path / "items.json", tmp_path / "flow.yaml"
     config.write_text(yaml.safe_dump({"settings": {"on_manifest_drift": "warn"}, "nodes": [
         {"id": "work", "for_each": {"file": "items.json"}, "worktree": "off",
@@ -51,8 +47,6 @@ def test_warn_shrink_prunes_checkpoint_and_readdition_runs_again(tmp_path):
 
 
 def test_interrupt_repeated_child_id_keeps_current_wave_tree(tmp_path):
-
-
     base = tmp_path / "repo"
     base.mkdir()
     def git(*args):

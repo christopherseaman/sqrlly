@@ -85,23 +85,32 @@ def check_dry_run(node: Node, state: WorkflowState) -> dict | None:
 
 
 class _TemplateOutput:
-    """Jinja renders the original text and indexes the validated JSON value."""
+    """Keep the producer's text for direct rendering of a JSON container."""
 
-    def __init__(self, text, value):
-        self._text = text
-        self._value = value
+    def __init__(self, value, text):
+        super().__init__(value)
+        self._raw_text = text
 
     def __str__(self):
-        return self._text
+        return self._raw_text
 
-    def __getitem__(self, key):
-        return self._value[key]
+
+class _TemplateList(_TemplateOutput, list):
+    pass
+
+
+class _TemplateDict(_TemplateOutput, dict):
+    pass
 
 
 def bind_output(state: WorkflowState, node_id: str):
     text = state.get("node_outputs", {}).get(node_id, "")
-    structured = state.get("node_structured_outputs", {})
-    return _TemplateOutput(text, structured[node_id]) if node_id in structured else text
+    value = state.get("node_structured_outputs", {}).get(node_id)
+    if isinstance(value, list):
+        return _TemplateList(value, text)
+    if isinstance(value, dict):
+        return _TemplateDict(value, text)
+    return text
 
 
 def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:

@@ -162,13 +162,14 @@ def test_for_each_serializes_item_with_json_method_names(tmp_path):
          "run": [sys.executable, "-c",
                  "import json,pathlib,sys; pathlib.Path('observed').write_text(json.dumps(sys.argv[1:]))",
                  "{{plan}}", "{{plan.items[0].keys.values[0]}}", "{{item|tojson}}",
-                 "{{item.items[0].keys.values[0]}}"]},
+                 "{{item.items[0].keys.values[0]}}", "{{plan|length}}", "{{plan|tojson}}"]},
     ]}))
     run(workflow, tmp_path)
-    text, plan_field, encoded, item_field = json.loads((tmp_path / "observed").read_text())
+    text, plan_field, encoded, item_field, length, plan_json = json.loads((tmp_path / "observed").read_text())
     assert text == raw
     assert plan_field == item_field == "1"
-    assert json.loads(encoded) == item
+    assert json.loads(encoded) == json.loads(plan_json) == item
+    assert length == "2"
 
 
 @pytest.mark.parametrize("suffix", ["branches", "branch_worktrees", "branch_map"])
@@ -200,3 +201,24 @@ def test_repeated_eval_reads_current_child_by_authored_id(tmp_path):
         label, output, item = json.loads((tmp_path / name).read_text())
         assert label == item == value
         assert json.loads(output) == {"label": value}
+
+
+def test_aggregate_supports_native_jinja_list_operations(tmp_path):
+    items = [{"id": "second", "items": [2]}, {"id": "first", "items": [1]}]
+    (tmp_path / "items.json").write_text(json.dumps(items))
+    (tmp_path / "object.json").write_text('{"type":"object"}')
+    config = tmp_path / "workflow.yaml"
+    config.write_text(yaml.safe_dump({"nodes": [
+        {"id": "build", "for_each": {"file": "items.json"}, "run": ["printf", "%s", "{{item|tojson}}"],
+         "outputs": {"schema": "object.json"}},
+        {"id": "collect", "depends_on": ["build"], "run": [
+            sys.executable, "-c",
+            "import json,pathlib,sys; pathlib.Path('observed').write_text(json.dumps(sys.argv[1:]))",
+            "{{build|length}}", "{{build[0].items[0]}}", "{% for part in build %}{{part.id}} {% endfor %}",
+            "{{build|tojson}}", "{{build}}",
+        ]},
+    ]}))
+    run(config, tmp_path)
+    length, first, labels, encoded, text = json.loads((tmp_path / "observed").read_text())
+    assert (length, first, labels) == ("2", "2", "second first ")
+    assert json.loads(encoded) == json.loads(text) == items

@@ -19,8 +19,12 @@ async def test_frozen_child_ids_are_never_dispatched(tmp_path, skip, expected):
                            "for_each": {"file": "items.json"}}])
     executor = MockExecutor()
     compiled = build_workflow_graph(config, executor, _base_dir=tmp_path)
-    state = make_initial_state(workdir=str(tmp_path), completed_nodes=skip, _resume_skip=skip,
-                               node_outputs={node: node for node in skip})
+    prior = ["write::a", "write::b"]
+    state = make_initial_state(
+        workdir=str(tmp_path), completed_nodes=skip, _resume_skip=skip,
+        fan_children={"write": prior}, attempts={"write": 1}, _fan_resume_attempts={"write": 1},
+        _fan_prior_children={"write": set(prior)}, node_outputs={node: node for node in skip},
+    )
     result = await compiled.ainvoke(state)
     assert set(executor.execution_order) == expected
     assert result["failed_nodes"] == set(), result["errors"]

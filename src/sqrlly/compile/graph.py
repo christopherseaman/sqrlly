@@ -156,7 +156,9 @@ def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_di
                   "attempts": {node.id: generation},
                   "fan_child_attempts": dict.fromkeys(inherited, generation)}
         previous = state.get("fan_children", {}).get(node.id, ())
-        invalidated = set(previous) - inherited
+        # A resumed edit retires dropped children. A new loop wave keeps earlier, distinct completions.
+        invalidated = (set(previous) - inherited if recovering else
+                       set(children).intersection(state.get("completed_nodes", set())))
         if invalidated:
             update["completed_nodes"] = dict.fromkeys(invalidated, False)
         sends = [
