@@ -15,8 +15,8 @@ Work the issues in this order. Each issue body has `Known`, `Where` and `Done wh
 | Order | Issue | Work | Status |
 |---|---|---|---|
 | 1 | #36 | Spike the 1.0 schema models and a draft skill doc | complete |
-| 1 | #37 | Delete dead surface, validate params at load (ships on 0.10.x) | ready |
-| 2 | #38 | Replace execute and presets with kind keys | next engine change |
+| 1 | #37 | Delete dead surface, validate params at load (pending a 0.10.x release) | complete |
+| 2 | #38 | Replace execute and presets with kind keys | ready |
 | 3 | #39 | Replace gates with eval and the route case list | blocked by #38 |
 | 3 | #40 | Add `outputs.files` and `outputs.schema` | blocked by #38 |
 | 3 | #41 | Snapshot refs, settle-time promote, new worktree defaults | blocked by #38 |
@@ -39,6 +39,10 @@ nodes:
     agent: build.md            # CLI agent, tools, own worktree
     for_each: plan.tasks
     depends_on: [plan]
+
+  - id: integrate
+    agent: integrate.md
+    depends_on: [build]
     eval:
       run: [uv, run, pytest, -q]
     route:
@@ -49,7 +53,7 @@ nodes:
         then: escalate
       - else: review
 
-  - {id: lint, run: uv run ruff check ., depends_on: [build]}
+  - {id: escalate, agent: diagnose.md}
   - {id: review, workflow: flows/review.yaml}
 ```
 
@@ -57,7 +61,8 @@ The spec sections that carry the rules: 3 (kinds and matrix), 4 (defaults), 5 (o
 
 ## Rules that are easy to get wrong
 
-- Kind keys are `agent`, `llm`, `run`, `workflow` only. No `ask`, `wait`, `uses`, `with`, `gate`, `goto`, `execute` or presets.
+- Kind keys are `agent`, `llm`, `run`, `workflow` only. No node-level `ask`, `wait`, `uses`, `with`, `gate`, `goto`, `execute` or presets. A subgraph takes inputs through `workflow.with`.
+- Keep `for_each` and `route` on separate nodes.
 - `eval` measures and has no pass field. `route` holds every consequence, retries included.
 - `max_attempts` is part of a case's match and counts node runs from 1. A case at its limit falls to the next case.
 - A node fails when no case matches and at least one case was skipped for `max_attempts`.
