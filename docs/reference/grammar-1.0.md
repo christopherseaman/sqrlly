@@ -8,7 +8,7 @@ The first draft came from an 11-agent pass (a map of the 0.10 authoring surface,
 | Date | Decision |
 |---|---|
 | 2026-11-14 | LangGraph stays at `>=1.2,<2`. Codex cloud (#28) stays parked until environments are manageable from the CLI. |
-| 2026-11-18 | Node kinds are separate keys: `agent`, `llm`, `run`, `workflow` (answers question 1). |
+| 2026-11-18 | Node kinds are separate keys: `agent`, `llm`, `run`, `workflow`. |
 | 2026-11-18 | Extensions register their own keywords, Ansible style. `uses` and `with` are rejected. The framework is built after 1.0. |
 | 2026-11-18 | The human pause (`ask`, `wait`) is out of 1.0 and returns as the first bundled extension. |
 | 2026-11-19 | `gate` is replaced by `eval` (measures) plus `route` (decides). `eval` has no pass field. |
@@ -16,10 +16,13 @@ The first draft came from an 11-agent pass (a map of the 0.10 authoring surface,
 | 2026-11-19 | `retry` and `fail` are reserved `then` words. `else` is the documented catch-all. A bare `then` is valid. |
 | 2026-11-19 | A node fails when no case matches and at least one case was skipped for `max_attempts`. |
 | 2026-11-19 | Prompt names resolve under `settings.prompts`. |
-| 2026-11-19 | Decision models in 1.0 are `llm` plus schema plus `route`. A table kind waits for extensions (answers question 3). |
+| 2026-11-19 | Decision models in 1.0 are `llm` plus schema plus `route`. A table kind waits for extensions. |
 | 2026-11-19 | Claude cloud proof of concept uses `claude --cloud` (#34). Managed Agents through `ant` follows (#35). Neither is in 1.0. |
+| 2026-11-19 | An isolated node's work promotes to the base by default, and a conflict fails the run (section 4). |
+| 2026-11-19 | A workflow that names no model uses the CLI's own default (section 4). |
+| 2026-11-19 | Remote prompt URLs are removed: 5 settings, `runtime/url.py`, `runtime/secrets.py` (section 2). |
 
-Open: questions 2, 4 and 5 in section 12. Question 2 holds #41. Questions 4 and 5 hold #38.
+No decision is open.
 
 ## 1. Recommendation
 
@@ -33,6 +36,7 @@ Adopt the author-first grammar on a reworked worktree engine. A node is `id` plu
 | CLI backend | Carry, 3 edits | `--model` becomes optional. A schema flag is added. `llm` disables tools. |
 | Presets | Delete | Both preset models and `--preset`. `settings.model` and `settings.defaults.<kind>` replace them. |
 | `Execute`/url dispatch | Delete | `execute.url`, `mode`, `type: join`, the interpreter table, `_MODE_TO_PARAMS`. |
+| Remote prompt URLs | Delete | `http(s)://` prompt fetch, its 5 settings, `runtime/url.py`, `runtime/secrets.py`. Prompts are files in the repo, which section 9 needs for `host:`. |
 | Gates | Replace | `eval` measures and `route` decides (section 5a). `Evaluation`, `threshold`, `blocking` and `max_retries` go. The eval runs in the node's tree; `nodes.py:519` passes the base workdir today. |
 | Routes | Change | One shape: a first-match list of `when`, `then`, `max_attempts`, `context` (section 5a). simpleeval stays. Predicates gain `node.field` and `eval.field`. `goto` becomes `then`. |
 | Fan-out and manifest | Change | `for_each` on the repeating node. `FanOutTemplate`, `FanOutFinalNode` and `manifest_path` go. |
@@ -256,15 +260,7 @@ Skipped: budgets, unknown keys that warn, PR-as-merge, variable-mutation actions
 
 1.0 releases after issue 7. After 1.0, not scheduled: the extension framework (keyword registration, `extensions:` list), then the human-pause extension with `--answer` and `--state-dir`. `host:` is the first 2.0 issue.
 
-## 12. Open decisions for the owner
-
-1. Answered 2026-11-18: its own key. `llm` kind. Options: its own key, or `agent` with no tools (0 of 7 surveyed systems have a separate kind). Recommended: its own key, since 3 matrix cells differ and the split was requested.
-2. Promote default. Options: `true` with `on_promote_conflict: fail`, or `false` as in 0.10. Recommended: `true` with `fail`.
-3. Answered 2026-11-19: the classifier now. "Decision models". Options: an LLM classifier (`llm` plus schema plus `route`), a deterministic decision table kind, or both. Recommended: the classifier now. A table kind can arrive later as an extension keyword.
-4. Model default. Options: the CLI's own default, or `settings.model` required once. Recommended: the CLI default, which removes the last required setting.
-5. Remote prompt URLs (5 settings, `runtime/url.py`, `runtime/secrets.py`). Options: delete at 1.0, or carry. Recommended (opinion): delete, because `host:` needs every path inside the repo.
-
-## 13. Unverified claims
+## 12. Unverified claims
 
 All 11 critic findings were applied, and the code-related ones were re-read in the source first. None was rejected. Three carry a variation: `waiting` is a failure kind (finding 1), a `run` scalar containing `{{` is a load error (finding 7), and the old issues 7 and 8 merged to fit the spike (finding 9).
 
