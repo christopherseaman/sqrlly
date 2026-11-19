@@ -18,6 +18,9 @@ repo. Narrative documentation lives elsewhere:
   **`docs/reference/issues.md`** says; file a new issue for any finding or
   decision. No backlog lives in a file.
 - **`CHANGELOG.md`** — release history.
+- **`docs/reference/grammar-1.0.md`** — the spec for the 1.0 line (node
+  grammar, eval and route, outputs, worktrees). Issues that build 1.0 cite
+  its sections; the rest of this file describes 0.10.
 
 Read those when narrative context is needed; this file stays focused on
 day-to-day operator concerns (build, test, layout, limitations,
