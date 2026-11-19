@@ -32,7 +32,10 @@ async def execute_with_outputs(
         if not result.success or outputs is None:
             return result, attempt
         missing = validate_output_contract(outputs, result.worktree or workdir)
-        errors = ["missing files: " + ", ".join(missing)] if missing else []
+        errors = []
+        if missing:
+            errors.append("missing files: " + ", ".join(missing)
+                          + " (outputs.files requires regular files, symlink paths are unsupported)")
         if outputs.schema_file:
             try:
                 value = result.structured_output

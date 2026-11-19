@@ -128,7 +128,7 @@ A prompt eval takes the usual prompt options, an optional `model`, `timeout` and
 
 ## Outputs
 
-`outputs.files` lists file paths or globs relative to the execution worktree. Each entry must match a regular file. Directory symlinks are never traversed. The same patterns limit which files the node promotes. Agents, commands and workflows can declare files.
+`outputs.files` lists file paths or globs relative to the execution worktree. Each entry must match a regular file. File and directory symlinks cannot satisfy a declaration. A pattern such as `r[1].txt` matches both the literal filename and `r1.txt`. The same patterns limit promotion to matching regular files, including deletions of tracked files. A matching directory does not include its contents. Without a file filter, promotion also carries symlink changes. Agents, commands and workflows can declare files.
 
 `outputs.schema` names a JSON Schema file relative to the workflow YAML. Agents and LLMs pass it to their provider CLI. A command must print a single matching JSON document. Workflows can declare files, and LLMs can declare a schema.
 

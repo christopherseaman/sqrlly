@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -328,26 +329,29 @@ class TestConcurrencyCap:
 
     @pytest.mark.asyncio
     async def test_no_cap_runs_fully_parallel(self, tmp_path):
-        """Without a cap, 4 sleeping nodes finish in ~1 sleep duration."""
-        _init_git_repo(tmp_path)
-        inner = DispatchExecutor(workdir=str(tmp_path))
-        foreman = ForemanExecutor(
-            inner=inner, base_workdir=str(tmp_path), max_parallel_jobs=100,
+        """All four dispatched commands can rendezvous in their isolated trees."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        inner = DispatchExecutor(workdir=str(repo))
+        foreman = ForemanExecutor(inner=inner, base_workdir=str(repo), max_parallel_jobs=100)
+        barrier = tmp_path / "barrier"
+        barrier.mkdir()
+        script = tmp_path / "rendezvous.py"
+        script.write_text(
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "root = Path(sys.argv[1])\n"
+            "(root / sys.argv[2]).touch()\n"
+            "while len(list(root.iterdir())) < 4: time.sleep(0.01)\n"
+            "print('all four started')\n"
         )
-        sleep_s = 0.3
-
         try:
-            start = time.perf_counter()
-            results = await asyncio.gather(*[
-                foreman.execute(
-                    _cmd_phase(f"p{i}", "sleep", [str(sleep_s)]), {},
-                )
-                for i in range(4)
-            ])
-            elapsed = time.perf_counter() - start
-            assert all(r.success for r in results)
-            # Fully parallel: one sleep duration + overhead
-            assert elapsed < sleep_s * 2, f"elapsed {elapsed:.3f}s too long"
+            results = await asyncio.wait_for(asyncio.gather(*(
+                foreman.execute(Node(id=f"p{i}", run=[sys.executable, str(script), str(barrier), str(i)],
+                                     worktree="isolated"), {}) for i in range(4)
+            )), timeout=30)
+            assert [r.output for r in results] == ["all four started\n"] * 4
         finally:
             await foreman.close()
 

@@ -281,3 +281,46 @@ def test_skip_structural_conflict_promotes_independent_path(tmp_path, obstructio
         assert (base / "slot").is_symlink()
         assert not (tmp_path / "result").exists()
     run.close(True)
+
+
+def test_output_filter_promotes_literal_and_glob_matches_and_deletions(tmp_path):
+    from sqrlly.runtime.gates import validate_output_contract
+    from sqrlly.schema.models import Outputs
+
+    (tmp_path / "nested").mkdir()
+    init_git_repo(tmp_path, files={"nested/r[1].txt": "old", "nested/r2.txt": "old",
+                                   "nested/d[3].txt": "old", "r[1].txt": "outside"})
+    run = SnapshotRun(str(tmp_path), "nested", "run")
+    sha = run.capture_in("node")
+    wt = tmp_path / ".sqrlly" / "tree"
+    wt.parent.mkdir()
+    subprocess.run(["git", "-C", tmp_path, "worktree", "add", "--detach", wt, sha], check=True)
+    nested = wt / "nested"
+    (nested / "r[1].txt").write_text("literal")
+    (nested / "r1.txt").write_text("glob")
+    (nested / "r2.txt").write_text("outside filter")
+    (nested / "d[3].txt").unlink()
+    (nested / "d3.txt").write_text("replacement")
+    (nested / "p[4]").mkdir()
+    (nested / "p[4]" / "private").write_text("outside filter")
+    (nested / "p4").write_text("glob")
+    (nested / "symbolic.txt").symlink_to("r1.txt")
+    (nested / "symbolic-dir").symlink_to("p[4]")
+    assert validate_output_contract(Outputs(files=["symbolic.txt", "symbolic-dir/private"]),
+                                    str(nested)) == ["symbolic.txt", "symbolic-dir/private"]
+    (wt / "r[1].txt").write_text("outside workdir")
+    outputs = Outputs(files=["r[1].txt", "d[3].txt", "p[4]"])
+    assert validate_output_contract(outputs, str(nested)) == []
+    run.capture_out("node", wt)
+    run.close(False)
+    run = SnapshotRun(str(tmp_path), "nested", "run")
+    plan = run.promote([("node", outputs.files)], "fail", prefix="nested")
+    assert set(plan.allowed["node"]) == {"nested/r[1].txt", "nested/r1.txt",
+                                          "nested/d[3].txt", "nested/d3.txt", "nested/p4"}
+    assert (tmp_path / "nested" / "r[1].txt").read_text() == "literal"
+    assert (tmp_path / "nested" / "r1.txt").read_text() == "glob"
+    assert not (tmp_path / "nested" / "d[3].txt").exists()
+    assert (tmp_path / "nested" / "r2.txt").read_text() == "old"
+    assert not (tmp_path / "nested" / "p[4]").exists()
+    assert (tmp_path / "r[1].txt").read_text() == "outside"
+    run.close(True)
