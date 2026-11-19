@@ -84,40 +84,39 @@ def matching_output_files(pattern: str, workdir: str):
     root = Path(workdir).resolve()
     internal = {".git", ".sqrlly"}
 
-    def inside(path):
-        try:
-            parts = path.resolve().relative_to(root).parts
-        except (ValueError, OSError, RuntimeError):
-            return False
-        return not internal.intersection(parts)
-
-    def matches(directory, parts, visited):
+    def matches(directory, parts):
         part, *rest = parts
         recursive = part == "**"
         if recursive and rest:
-            yield from matches(directory, rest, visited)
+            yield from matches(directory, rest)
         if recursive or any(c in part for c in "*?["):
             candidates = directory.iterdir()
         else:
             candidates = [directory / part]
         for candidate in candidates:
-            if candidate.name in internal or not inside(candidate):
+            if candidate.name in internal or candidate.is_symlink():
                 continue
             if not recursive and not fnmatchcase(candidate.name, part):
                 continue
             if not rest and candidate.is_file():
                 yield candidate
             if candidate.is_dir() and (recursive or rest):
-                real = candidate.resolve()
-                if real not in visited:
-                    yield from matches(candidate, parts if recursive else rest, visited | {real})
+                yield from matches(candidate, parts if recursive else rest)
 
     parts = Path(pattern).parts
+    if Path(pattern).is_absolute() or ".." in parts or internal.intersection(parts):
+        return
     literal = root / pattern
-    if inside(literal) and literal.is_file():
-        yield literal
+    current = root
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            break
+    else:
+        if literal.is_file():
+            yield literal
     if parts:
-        for match in matches(root, parts, {root}):
+        for match in matches(root, parts):
             if match != literal:
                 yield match
 

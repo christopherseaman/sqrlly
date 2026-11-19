@@ -9,6 +9,8 @@ import stat
 import subprocess
 import tempfile
 from contextlib import closing
+from fnmatch import fnmatchcase
+from functools import cache
 from pathlib import Path
 
 from sqrlly.runtime.promote import PromoteConflictError, plan_promotions
@@ -54,6 +56,24 @@ def _entries(root, tree):
         mode, _, oid = meta.split()
         result[os.fsdecode(name)] = (mode, oid)
     return result
+
+
+def _output_match(path, pattern):
+    parts, glob = Path(path).parts, Path(pattern).parts
+    if parts == glob:
+        return True
+
+    @cache
+    def match(i, j):
+        if j == len(glob):
+            return i == len(parts)
+        if glob[j] == "**":
+            if j + 1 == len(glob):
+                return i < len(parts)
+            return match(i, j + 1) or (i < len(parts) and match(i + 1, j))
+        return i < len(parts) and fnmatchcase(parts[i], glob[j]) and match(i + 1, j + 1)
+
+    return match(0, 0)
 
 
 def _path_conflicts(base, current, updates):
@@ -210,7 +230,7 @@ class SnapshotRun:
                 continue
             pending = _git(self.base, "rev-parse", "--revs-only", after + "-pending").strip() == oid
             revisions[after] = oid.decode()
-            paths = [f":(glob){g}" for g in globs] if globs else ["."]
+            paths = ["."]
             paths.extend(f":(exclude){e}" for e in excludes)
             changed = _records(_git(Path(self.base) / prefix, "diff", "--name-only",
                                     "--no-relative", "--no-renames", "-z", before, after,
@@ -220,6 +240,13 @@ class SnapshotRun:
             changes = footprints[node] = {}
             for raw in changed:
                 path = os.fsdecode(raw)
+                if globs:
+                    entry = new.get(path, old.get(path))
+                    if entry[0] not in (b"100644", b"100755"):
+                        continue
+                    relative = Path(path).relative_to(prefix)
+                    if not any(_output_match(relative, pattern) for pattern in globs):
+                        continue
                 changes[path] = "deleted" if path not in new else "modified" if path in old else "added"
                 # An interrupted git apply may have installed part of this exact delta.
                 applied = pending and current.get(path) == new.get(path)
