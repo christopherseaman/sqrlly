@@ -95,7 +95,7 @@ class _BranchScopedExecutor:
 
 def load_graph(
     config_path: str, base_dir: str | Path = ".", parent_settings: Settings | None = None,
-    *, inputs: frozenset[str] | None = frozenset(),
+    *, inputs: frozenset[str] | None = None,
 ) -> Graph:
     """Load and parse a Graph YAML file. Path is relative to base_dir."""
     resolve = (lambda child: merge_settings(parent_settings, child, Path(base_dir))) if parent_settings else None
@@ -262,7 +262,8 @@ def make_fan_out_subgraph_invoker(
     # outermost build runs it (depth=0 callers), so nested fan-out
     # subgraphs don't re-walk the same chains.
     if depth == 0:
-        detect_config_cycle(workflow_file, base_dir=base_dir, parent_settings=parent_settings)
+        detect_config_cycle(workflow_file, base_dir=base_dir, parent_settings=parent_settings,
+                            inputs=frozenset(inputs_decl))
     sub_config = load_graph(workflow_file, base_dir, parent_settings, inputs=frozenset(inputs_decl))
 
     # Gate: isolate iff the effective worktree mode for THIS fan-out is not
@@ -375,6 +376,7 @@ def detect_config_cycle(
     visited: list[str] | None = None,
     base_dir: str | Path = ".",
     parent_settings: Settings | None = None,
+    *, inputs: frozenset[str] | None = None,
 ) -> None:
     """Check ordinary and fan-out workflow references for ancestor cycles."""
     visited = list(visited or [])
@@ -383,7 +385,7 @@ def detect_config_cycle(
         chain = " -> ".join(visited + [abs_path])
         raise SubgraphCycleError(f"Subgraph reference cycle: {chain}")
     visited.append(abs_path)
-    sub = load_graph(config_path, base_dir, parent_settings, inputs=None)
+    sub = load_graph(config_path, base_dir, parent_settings, inputs=inputs)
     for node in sub.nodes:
         steps = [node]
         if node.fan_out:
@@ -392,4 +394,5 @@ def detect_config_cycle(
             steps.extend(node.fan_out.final_nodes)
         for step in steps:
             if step.workflow:
-                detect_config_cycle(step.workflow.file, visited, Path(abs_path).parent, sub.settings)
+                detect_config_cycle(step.workflow.file, visited, Path(abs_path).parent, sub.settings,
+                                    inputs=frozenset(step.workflow.inputs))

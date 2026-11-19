@@ -5,31 +5,31 @@ All four body sections are complete. Compose the final paper as a single markdow
 **Abstract (copy verbatim into the paper's `## Abstract` section):**
 
 ```
-{{abstract}}
+{{workflow_inputs.abstract}}
 ```
 
 **Introduction:**
 
 ```
-{{intro}}
+{{workflow_inputs.intro}}
 ```
 
 **Methods:**
 
 ```
-{{methods}}
+{{workflow_inputs.methods}}
 ```
 
 **Results:**
 
 ```
-{{results}}
+{{workflow_inputs.results}}
 ```
 
 **Discussion:**
 
 ```
-{{discussion}}
+{{workflow_inputs.discussion}}
 ```
 
 ## Task
@@ -48,19 +48,19 @@ Structure:
 **Corresponding author:** <fake>@<fake-edu-domain>
 
 ## Abstract
-<Copy the abstract prose from {{abstract}} verbatim — that's the `abstract` field of the JSON above, emitted as a single prose paragraph (no JSON wrapping).>
+<Copy the abstract prose from {{workflow_inputs.abstract}} verbatim — that's the `abstract` field of the JSON above, emitted as a single prose paragraph (no JSON wrapping).>
 
 ## Introduction
-<{{intro}} content, drop its leading `## Introduction` header since this one replaces it>
+<{{workflow_inputs.intro}} content, drop its leading `## Introduction` header since this one replaces it>
 
 ## Methods
-<{{methods}} content, drop its leading `## Methods` header>
+<{{workflow_inputs.methods}} content, drop its leading `## Methods` header>
 
 ## Results
-<{{results}} content, same treatment>
+<{{workflow_inputs.results}} content, same treatment>
 
 ## Discussion
-<{{discussion}} content, same treatment>
+<{{workflow_inputs.discussion}} content, same treatment>
 
 ## Conclusion
 <100-150 word punchy conclusion — the only net-new prose. MUST land a single striking observation, aphorism, or provocation — a quotable line that crystallizes the paper. NOT a recap of what was already said. Think "the closing sentence of a memorable TED talk," not "this paper has shown that..." Start strong, end stronger.>

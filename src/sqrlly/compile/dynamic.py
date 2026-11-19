@@ -146,7 +146,8 @@ def _make_fan_out_node(
         base_context = build_context(parent_node, state)
         base_context[parent_node.id] = bind_output(state, parent_node.id)
         for key, value in item.items():
-            base_context[key] = str(value)
+            if key != "workflow_inputs":
+                base_context[key] = str(value)
 
         # Simulated state that accumulates inline across retries within this
         # branch. Starts from the caller-provided state so reducers at the

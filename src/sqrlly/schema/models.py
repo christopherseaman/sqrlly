@@ -425,12 +425,11 @@ class Graph(BaseModel):
 
 def load_workflow(
     path: str | Path, *, resolve_settings: Callable[[Settings], Settings] | None = None,
-    inputs: frozenset[str] | None = frozenset(),
+    inputs: frozenset[str] | None = None,
 ) -> Graph:
     path = Path(path)
     with path.open(encoding="utf-8") as stream:
         raw = yaml.load(stream, Loader=WorkflowLoader)
     graph = Graph.model_validate(raw, context={"workflow_path": path, "resolve_settings": resolve_settings})
-    if inputs is not None:
-        validate_references(graph, inputs)
+    validate_references(graph, inputs)
     return graph
