@@ -155,6 +155,10 @@ def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_di
         update = {"fan_children": {node.id: children}, "fan_ready": {node.id: False},
                   "attempts": {node.id: generation},
                   "fan_child_attempts": dict.fromkeys(inherited, generation)}
+        previous = state.get("fan_children", {}).get(node.id, ())
+        invalidated = set(previous) - inherited
+        if invalidated:
+            update["completed_nodes"] = dict.fromkeys(invalidated, False)
         sends = [
             Send(f"_sub_{node.id}", {**state, "_fan_child_id": child, "_fan_out_item": item,
                                      "_fan_attempt": generation, "_resume_skip": frozen - {child}})

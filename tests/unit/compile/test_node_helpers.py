@@ -176,80 +176,16 @@ class TestBuildContext:
         # No silent first-dep-wins binding for bare `summary`.
         assert "summary" not in ctx
 
-    def test_projects_branch_aggregations(self):
-        """Downstream context synthesizes `{dep}_branches` + worktrees from state.
-
-        Stage 2b moved aggregation out of the final-node wrapper; any
-        node depending on a dynamic parent now sees the same aggregate
-        via build_context's state projection.
-        """
-        node = _phase(depends_on=["parent"])
+    def test_repeated_dependency_exposes_manifest_order(self):
         state = {
-            "node_outputs": {"parent": "parent-out"},
-            "child_outputs": {"parent::a": "x", "parent::b": "y"},
-            "node_worktrees": {
-                "parent::a": "/tmp/wt-a",
-                "parent::b": "/tmp/wt-b",
-            },
+            "node_outputs": {"build": '["z", "a"]', "build::a": "a", "build::z": "z"},
+            "node_structured_outputs": {"build": ["z", "a"]},
         }
-        ctx = build_context(node, state)
-        import json as _json
-        assert _json.loads(ctx["parent_branches"]) == {
-            "parent::a": "x",
-            "parent::b": "y",
-        }
-        assert sorted(_json.loads(ctx["parent_branch_worktrees"])) == [
-            "/tmp/wt-a",
-            "/tmp/wt-b",
-        ]
-
-    def test_no_branch_aggregations_when_absent(self):
-        """Nodes with no fan-out parent in deps get no aggregate keys."""
-        node = _phase(depends_on=["normal"])
-        state = {
-            "node_outputs": {"normal": "out"},
-            "child_outputs": {},
-            "node_worktrees": {},
-        }
-        ctx = build_context(node, state)
-        assert "normal_branches" not in ctx
-        assert "normal_branch_worktrees" not in ctx
-        assert "normal_branch_map" not in ctx
-
-    def test_branch_map_keyed_by_child_id(self):
-        """`{{p_branch_map}}` is a JSON dict keyed by child id, each entry
-        holding both output and worktree — the AP4 fix that eliminates
-        positional-order coupling between _branches and _branch_worktrees.
-        """
-        import json
-        node = _phase(depends_on=["p"])
-        state = {
-            "node_outputs": {"p": "parent-out"},
-            "child_outputs": {"p::0": "out0", "p::1": "out1"},
-            "node_worktrees": {"p::0": "/wt/p0", "p::1": "/wt/p1"},
-        }
-        ctx = build_context(node, state)
-        bmap = json.loads(ctx["p_branch_map"])
-        assert bmap == {
-            "p::0": {"output": "out0", "worktree": "/wt/p0"},
-            "p::1": {"output": "out1", "worktree": "/wt/p1"},
-        }
-
-    def test_branch_map_missing_worktree_is_none(self):
-        """When a child has no recorded worktree, branch_map entry has worktree=None."""
-        import json
-        node = _phase(depends_on=["p"])
-        state = {
-            "node_outputs": {"p": "parent-out"},
-            "child_outputs": {"p::0": "out0", "p::1": "out1"},
-            "node_worktrees": {"p::0": "/wt/p0"},  # p::1 absent
-        }
-        ctx = build_context(node, state)
-        bmap = json.loads(ctx["p_branch_map"])
-        assert bmap["p::0"] == {"output": "out0", "worktree": "/wt/p0"}
-        assert bmap["p::1"] == {"output": "out1", "worktree": None}
-
-    # -- aggregate _deps / _dep_worktrees ---------------------------------
+        context = build_context(_phase(depends_on=["build"]), state)
+        assert str(context["build"]) == '["z", "a"]'
+        assert context["build"][0] == "z"
+        assert context["build"][1] == "a"
+        assert not {"build_branches", "build_branch_worktrees", "build_branch_map"}.intersection(context)
 
     def test_single_dep_no_aggregate(self):
         """Node with exactly one dep does NOT get _deps — it's unnecessary."""

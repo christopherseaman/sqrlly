@@ -22,15 +22,7 @@ def compute_skip_set(
     prior_failed: set[str],
     rerun_targets: set[str],
 ) -> set[str]:
-    """Return the node ids safe to skip on resume.
-
-    ``skip = prior_completed - dirty`` where ``dirty`` starts at
-    ``prior_failed | rerun_targets`` and is closed over: transitive
-    ``depends_on`` dependents and route-target reachability. A node in ``prior_failed`` is subtracted out of
-    the skip set even if it is ALSO in ``prior_completed`` — the only case
-    where that overlap arises is a fan-out parent that committed its gate
-    (completed) and then had its ``_fan_`` dispatcher fail on a duplicate-id
-    manifest (failed); the dirty subtraction re-runs it, so it re-fans."""
+    """Freeze completed nodes outside the failure, rerun, and downstream closure."""
     ids = {n.id for n in config.nodes}
     dependents: dict[str, list[str]] = {nid: [] for nid in ids}
     for n in config.nodes:

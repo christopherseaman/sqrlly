@@ -75,3 +75,11 @@ def test_authored_ids_cannot_contain_checkpoint_separators(node_id):
 def test_join_cannot_repeat():
     with pytest.raises(ValueError, match="requires an executable kind"):
         Graph(nodes=[{"id": "just_join", "for_each": {"file": "items.json"}}])
+
+
+def test_repeating_eval_needs_child_schema_for_own_fields(tmp_path):
+    with pytest.raises(ValueError, match="build field access requires outputs.schema"):
+        load(tmp_path, [{
+            "id": "build", "for_each": {"file": "items.json"}, "run": "echo build",
+            "eval": {"run": ["echo", "{{build.label}}"]},
+        }])

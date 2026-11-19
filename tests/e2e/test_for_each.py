@@ -169,3 +169,34 @@ def test_for_each_serializes_item_with_json_method_names(tmp_path):
     assert text == raw
     assert plan_field == item_field == "1"
     assert json.loads(encoded) == item
+
+
+@pytest.mark.parametrize("suffix", ["branches", "branch_worktrees", "branch_map"])
+def test_validate_rejects_removed_branch_bindings(scenario, suffix):
+    config, _, nodes = scenario
+    write_items(config, {"value": "one"})
+    name = f"build_{suffix}"
+    nodes[1]["run"] = ["echo", "{{" + name + "}}"]
+    config.write_text(yaml.safe_dump({"nodes": nodes}))
+    result = CliRunner().invoke(cli, ["validate", str(config)])
+    assert result.exit_code != 0 and name in result.output
+
+
+def test_repeated_eval_reads_current_child_by_authored_id(tmp_path):
+    (tmp_path / "schema.json").write_text('{"type":"object","required":["label"]}')
+    (tmp_path / "items.json").write_text('[{"id":"first","value":"alpha"},{"id":"second","value":"beta"}]')
+    config = tmp_path / "workflow.yaml"
+    config.write_text(yaml.safe_dump({"nodes": [{
+        "id": "build", "for_each": {"file": "items.json"},
+        "run": [sys.executable, "-c", "import json,sys; print(json.dumps({'label':sys.argv[1]}))", "{{item.value}}"],
+        "outputs": {"schema": "schema.json"},
+        "eval": {"run": [
+            sys.executable, "-c", "import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))",
+            "{{item.id}}", "{{build.label}}", "{{output}}", "{{item.value}}",
+        ]},
+    }]}))
+    run(config, tmp_path)
+    for name, value in (("first", "alpha"), ("second", "beta")):
+        label, output, item = json.loads((tmp_path / name).read_text())
+        assert label == item == value
+        assert json.loads(output) == {"label": value}

@@ -28,6 +28,14 @@ def _merge_evaluations(
     return merged
 
 
+def _merge_completed(left: set[str], right: set[str] | dict[str, bool]) -> set[str]:
+    if isinstance(right, dict):
+        return left.difference(key for key, present in right.items() if not present) | {
+            key for key, present in right.items() if present
+        }
+    return left | right
+
+
 def _merge_sets(left: set[str], right: set[str]) -> set[str]:
     """Set-union reducer for `completed_nodes` / `failed_nodes`.
 
@@ -44,7 +52,7 @@ def _merge_sets(left: set[str], right: set[str]) -> set[str]:
 # (via the TypedDict annotations) and `dynamic._merge_updates` (when the
 # fan-out node accumulates state inline across its retry loop).
 REDUCERS: dict[str, Callable[[Any, Any], Any]] = {
-    "completed_nodes": _merge_sets,
+    "completed_nodes": _merge_completed,
     "fan_children": _merge_dicts,
     "fan_child_attempts": _merge_dicts,
     "fan_ready": _merge_dicts,
@@ -59,7 +67,6 @@ REDUCERS: dict[str, Callable[[Any, Any], Any]] = {
     "required_attempts": _merge_dicts,
     "route_context": _merge_dicts,
     "route_destinations": _merge_dicts,
-    "child_outputs": _merge_dicts,
     "node_worktrees": _merge_worktrees,
     "node_models": _merge_dicts,
     "evaluations": _merge_evaluations,
@@ -78,7 +85,6 @@ class WorkflowState(TypedDict):
     node_structured_outputs: Annotated[dict[str, Any], REDUCERS["node_structured_outputs"]]
     evaluations: Annotated[dict[str, list[dict[str, Any]]], REDUCERS["evaluations"]]
     retries: Annotated[dict[str, int], REDUCERS["retries"]]
-    child_outputs: Annotated[dict[str, Any], REDUCERS["child_outputs"]]
     node_worktrees: Annotated[dict[str, str], REDUCERS["node_worktrees"]]
     node_models: Annotated[dict[str, Any], REDUCERS["node_models"]]
     errors: Annotated[list[dict], REDUCERS["errors"]]
@@ -139,7 +145,6 @@ def make_initial_state(
         "required_attempts": {},
         "route_context": {},
         "route_destinations": {},
-        "child_outputs": {},
         "node_worktrees": {},
         "node_models": {},
         "errors": [],

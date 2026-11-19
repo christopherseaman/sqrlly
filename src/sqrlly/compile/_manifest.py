@@ -1,17 +1,11 @@
-"""Shared langgraph-free compile helpers.
-
-Lives in its own module so `compile/graph.py`, `compile/dynamic.py`,
-and `compile/subgraph.py` can all import these without crossing a
-private-import boundary in the other direction. Pure functions — no
-langgraph imports.
-"""
+"""Read workflow manifests and assign stable branch identities."""
 from __future__ import annotations
 
-import json
 import hashlib
-from urllib.parse import quote
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from sqrlly.runtime._json import extract_json
 from sqrlly.runtime.result import ManifestError
@@ -111,5 +105,5 @@ def _read_manifest(
             else:
                 raise ValueError(f"source {source!r} has no output")
         return _child_ids(node.id, items)
-    except (ValueError, OSError, TypeError, UnicodeError) as exc:
+    except (ValueError, OSError, TypeError) as exc:
         raise ManifestError(f"for_each {node.id!r} ({source}): {exc}") from exc

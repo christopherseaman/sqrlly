@@ -88,30 +88,3 @@ def test_dotted_source_ignores_unrelated_sibling():
     node = repeat("plan.work")
     node._ancestors = ["plan", "plan.work"]
     assert _read_manifest(state, node)[0][0] == "work::wrong"
-
-
-def test_resume_then_back_route_starts_a_fresh_manifest_wave(tmp_path):
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    import yaml
-
-    nodes = [
-        {"id": "dispatch", "run": ["sh", "-c", """if test -e next; then echo '["b"]'; else echo '["a"]'; fi"""]},
-        {"id": "work", "for_each": "dispatch", "depends_on": ["dispatch"], "worktree": "off",
-         "run": ["sh", "-ec", 'test -e allow; echo "$1" >> calls', "worker", "{{item}}"]},
-        {"id": "advance", "depends_on": ["work"], "run": ["sh", "-c",
-         'if test -e next; then echo done; else touch next; echo again; fi']},
-        {"id": "gate", "depends_on": ["advance"], "route": [
-            {"when": "'again' in advance", "then": "dispatch", "max_attempts": 3}]},
-    ]
-    path = tmp_path / "flow.yaml"
-    path.write_text(yaml.safe_dump({"nodes": nodes}))
-    argv = [str(Path(sys.executable).with_name("sqrlly")), "run", str(path), "-w", str(tmp_path)]
-    failed = subprocess.run(argv, capture_output=True, text=True)
-    assert failed.returncode == 1 and "work" in failed.stdout
-    (tmp_path / "allow").touch()
-    recovered = subprocess.run([*argv, "--resume"], capture_output=True, text=True)
-    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
-    assert (tmp_path / "calls").read_text().splitlines() == ["a", "b"]

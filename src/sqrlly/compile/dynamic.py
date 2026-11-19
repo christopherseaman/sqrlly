@@ -64,7 +64,6 @@ def make_item_worker(prototype: Node, config: Graph, executor, settings: Setting
                     return update
             update["completed_nodes"] = {child_id}
             update["fan_child_attempts"] = {child_id: state["_fan_attempt"]}
-            update["child_outputs"] = {child_id: update["node_outputs"][child_id]}
             return update
 
     return worker

@@ -111,7 +111,6 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     outputs = state.get("node_outputs", {})
     structured = state.get("node_structured_outputs", {})
     worktrees = state.get("node_worktrees", {})
-    child_outputs = state.get("child_outputs", {})
     # Subgraph inputs (Stage 4c): inputs declared on a parent's subgraph-
     # reference node are projected into the subgraph's state.node_inputs
     # before invocation. Subgraph nodes see them as plain template vars,
@@ -134,23 +133,6 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
             if k.startswith(dotted_prefix):
                 suffix = k[len(dotted_prefix):]
                 context[f"{dep}_{suffix}"] = v
-        # Synthesize fan-out aggregates from state. Any node depending on
-        # a dynamic parent sees `{{dep_branches}}` (JSON id→output map),
-        # `{{dep_branch_worktrees}}` (JSON list of worktree paths), and
-        # `{{dep_branch_map}}` (JSON id→{output, worktree}, the preferred
-        # id-keyed pairing) — not just the final-node wrapper.
-        prefix = f"{dep}::"
-        dep_branches = {k: v for k, v in child_outputs.items() if k.startswith(prefix)}
-        if dep_branches:
-            context[f"{dep}_branches"] = _json.dumps(dep_branches)
-            dep_branch_worktrees = [v for k, v in worktrees.items() if k.startswith(prefix)]
-            context[f"{dep}_branch_worktrees"] = _json.dumps(dep_branch_worktrees)
-            branch_map = {
-                cid: {"output": out, "worktree": worktrees.get(cid)}
-                for cid, out in dep_branches.items()
-            }
-            context[f"{dep}_branch_map"] = _json.dumps(branch_map)
-
     # When a node has multiple deps, provide aggregate collections so
     # templates can iterate inputs generically without hardcoding names.
     if len(node.depends_on) > 1:

@@ -77,7 +77,10 @@ def _emit_update_events(emitter: Any, update: dict[str, Any]) -> None:
                 "attempt": record["attempt"], "result": record["result"],
             })
 
-    for node in update.get("completed_nodes") or []:
+    completed = update.get("completed_nodes") or ()
+    if isinstance(completed, dict):
+        completed = [key for key, present in completed.items() if present]
+    for node in completed:
         emitter.emit({"event": "node_completed", "node": node})
 
     for node in update.get("failed_nodes") or []:

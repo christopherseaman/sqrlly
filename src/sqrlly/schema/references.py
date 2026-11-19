@@ -101,11 +101,15 @@ def validate_references(graph: Graph, inputs: frozenset[str] | None) -> None:
             for suffix in ("structured", "worktree")
         }
 
+        def is_aggregate(source):
+            # The current node's name binds its individual result inside its eval.
+            return source is not None and source is not node and source.for_each is not None
+
         def check(name, scope, node_ids, *, field=False, whole=False):
             if name not in scope:
                 raise ValueError(f"{node.id}: {name} is not an ancestor or available input")
             source = by_id[name] if name in node_ids else None
-            if source and source.for_each is not None:
+            if is_aggregate(source):
                 if field:
                     raise ValueError(f"{node.id}: {name} is a for_each result list and has no named fields")
                 return
@@ -130,7 +134,7 @@ def validate_references(graph: Graph, inputs: frozenset[str] | None) -> None:
                     indexed_list = (isinstance(get, nodes.Getitem) and
                                     not (isinstance(get.arg, nodes.Const) and isinstance(get.arg.value, str)))
                     source = by_id.get(get.node.name)
-                    if not (indexed_list and source and source.for_each is not None):
+                    if not (indexed_list and is_aggregate(source)):
                         check(get.node.name, scope, node_ids, field=True)
 
         node_ids = upstream
@@ -159,7 +163,7 @@ def validate_references(graph: Graph, inputs: frozenset[str] | None) -> None:
                     indexed_list = isinstance(expr, ast.Subscript) and not (
                         isinstance(expr.slice, ast.Constant) and isinstance(expr.slice.value, str))
                     source = by_id.get(expr.value.id)
-                    if not (indexed_list and source and source.for_each is not None):
+                    if not (indexed_list and is_aggregate(source)):
                         check(expr.value.id, route_scope, upstream | own_output, field=True)
                 if isinstance(expr, ast.Compare):
                     for operand in (expr.left, *expr.comparators):
