@@ -1,5 +1,3 @@
-{{_retry_reason}}
-
 ## Context
 
 The seed command produced a slate of **inspirations** — half curated absurd domains, half Journal-of-Irreproducible-Results-style faux article stubs. Your job is to pick ONE absurd research domain the paper will actually be written about.

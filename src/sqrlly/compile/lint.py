@@ -10,14 +10,17 @@ run as its own top-level workflow).
 """
 from __future__ import annotations
 
-from sqrlly.schema.models import Graph
+from collections.abc import Iterator
+
+from sqrlly.schema.models import Graph, Node
+from sqrlly.schema.v1 import Case
 
 
 def collect_warnings(config: Graph) -> list[str]:
     """Advisory warnings for a workflow config, in declaration order."""
     return (
         _hyphenated_id_warnings(config)
-        + _advisory_gate_warnings(config)
+        + _upstream_route_warnings(config)
         + _worktree_setup_exclude_warnings(config)
         + _fanout_parent_promote_warnings(config)
         + _fanout_resume_drift_warnings(config)
@@ -50,34 +53,31 @@ def _fanout_resume_drift_warnings(config: Graph) -> list[str]:
     return out
 
 
-def _advisory_gate_warnings(config: Graph) -> list[str]:
-    """Flag a gate that can fail but won't halt.
-
-    A node whose ``evaluation`` sets a positive ``threshold`` with
-    ``blocking: false`` scores the gate but never stops the workflow — a
-    below-threshold score is logged and execution continues. Easy to
-    mistake a hollow "green" run for a real pass. (A ``threshold`` of 0.0
-    can never fail, so it is not flagged.)
-    """
-    out: list[str] = []
-
-    def check(ev: object, label: str) -> None:
-        if ev is not None and not ev.blocking and ev.threshold > 0.0:
-            out.append(
-                f"{label}: gate sets threshold={ev.threshold} but blocking is "
-                f"false — advisory only; a below-threshold score won't halt "
-                f"the workflow (set 'blocking: true' to halt)."
-            )
-
+def iter_route_edges(config: Graph) -> Iterator[tuple[Node, Case, str, bool]]:
+    """Classify routes against dependencies and preceding forward routes."""
+    upstream = {node.id: set(node.depends_on) for node in config.nodes}
     for node in config.nodes:
-        check(node.evaluation, f"node '{node.id}'")
-        if node.fan_out is not None:
-            template = getattr(node.fan_out, "template", None)
-            if template is not None:
-                check(template.evaluation, f"fan-out template of '{node.id}'")
-            for fn in node.fan_out.final_nodes:
-                check(fn.evaluation, f"fan-out final node '{fn.id}'")
-    return out
+        seen = {node.id}
+        pending = list(upstream[node.id])
+        while pending:
+            ancestor = pending.pop()
+            if ancestor not in seen:
+                seen.add(ancestor)
+                pending.extend(upstream[ancestor])
+        for case in node.route or []:
+            for target in case.targets:
+                is_upstream = target in seen
+                yield node, case, target, is_upstream
+                if not is_upstream and target in upstream:
+                    upstream[target].add(node.id)
+
+
+def _upstream_route_warnings(config: Graph) -> list[str]:
+    return [
+        f"{node.id}: route to upstream node {target!r} has no max_attempts"
+        for node, case, target, is_upstream in iter_route_edges(config)
+        if is_upstream and case.max_attempts is None
+    ]
 
 
 def _worktree_setup_exclude_warnings(config: Graph) -> list[str]:

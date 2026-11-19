@@ -7,6 +7,8 @@ All notable changes to sqrlly are documented here. Format follows
 
 ### Changed
 
+- Workflows measure output with `eval`. Ordered `route` cases handle retries, escalation and failure.
+
 - Workflow nodes select `agent`, `llm`, `run` or `workflow` explicitly.
   Prompt filenames resolve under the YAML file's prompts directory.
   Commands take argv, and joins need only dependencies.

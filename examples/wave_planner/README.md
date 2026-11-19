@@ -4,7 +4,7 @@ Demonstrates the **wave-driven dynamic-task pattern** — discover new
 tasks mid-run without restarting upstream work. Each "wave" is one
 trip around the dispatcher → workers → reconcile → gate loop. A
 wave that finds new pending tasks routes back to the dispatcher;
-a wave that finds none routes to `__end__`.
+a wave that finds none completes the workflow.
 
 ## Topology
 
@@ -24,9 +24,7 @@ planner ─→ dispatcher (fan_out) ─→ workers (Send×N)
 - **reconcile** inspects post-wave state and may add follow-up
   tasks. Stdout signals the gate: `reconcile_added:<id>` to loop,
   `reconcile_clean` to exit.
-- **gate** is a route-only node. Its `cases:` predicate inspects
-  reconcile's stdout and emits `Command(goto=dispatcher)` (loop)
-  or `Command(goto=__end__)` (exit).
+- **gate** routes to `dispatcher` when reconcile reports a new task. The case allows up to ten waves.
 
 ## Why this pattern
 
@@ -45,7 +43,7 @@ work-items as it goes — typical use cases:
 Two sqrlly primitives make it work:
 
 1. `dispatcher` has BOTH `depends_on: [planner]` AND is the
-   `goto:` target of the gate. The compile layer wires both
+   `then:` target of the gate. The compile layer wires both
    edges; the planner→dispatcher edge fires once at startup,
    the gate→dispatcher goto fires on subsequent waves.
 
@@ -74,9 +72,9 @@ You'll see two waves run:
 
 ```
 Note: workdir is not a git repo — running without worktree isolation (foreman disabled).
-Completed: 6 nodes
+Completed: 7 nodes
   Nodes: dispatcher, dispatcher::q_competitor_share, dispatcher::q_growth_rate,
-         dispatcher::q_market_size, planner, reconcile
+         dispatcher::q_market_size, gate, planner, reconcile
 ```
 
 The runner lists each completed node ID once. The second wave adds

@@ -21,10 +21,9 @@ nodes:
     name: Loop while reconcile finds new tasks
     depends_on: [reconcile]
     route:
-      cases:
       - when: '''reconcile_added'' in reconcile'
-        goto: dispatcher
-      else: __end__
+        then: dispatcher
+        max_attempts: 10
 settings:
   max_parallel_jobs: 2
   memory_threshold_pct: 95.0

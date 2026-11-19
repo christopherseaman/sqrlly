@@ -16,16 +16,15 @@ from sqrlly.compile._manifest import (
     find_terminal_nodes,
     manifest_drift,
 )
+from sqrlly.compile.lint import iter_route_edges
 from sqrlly.compile.dynamic import _make_final_fan_out_node, _make_fan_out_node
 from sqrlly.compile.nodes import (
     _make_execution_node,
     _make_gate_node,
     make_failure_update,
 )
-from sqrlly.compile.route import build_route_namespace, evaluate_case
 from sqrlly.compile.subgraph import node_subgraph_path
-from sqrlly.runtime.gates import build_eval_preamble
-from sqrlly.runtime.result import ManifestError, RouteError
+from sqrlly.runtime.result import ManifestError
 from sqrlly.runtime.state import WorkflowState
 from sqrlly.schema.models import Graph, Node, Settings
 
@@ -33,131 +32,12 @@ if TYPE_CHECKING:
     from sqrlly.runtime.result import NodeExecutor
 
 
-def _resolve_goto(target: str | list[str]) -> str | list[str]:
-    """Normalize ``__end__`` → ``END`` for str or list-valued goto.
-
-    Supports list-valued goto (Stage 5c) for static fan-out via
-    `Command(goto=[...])` — LangGraph 1.x dispatches each target as
-    its own concurrent edge in the next super-step.
-    """
-    if isinstance(target, list):
-        return [END if t == "__end__" else t for t in target]
-    return END if target == "__end__" else target
-
-
-# Route detection helpers — local since route semantics are
-# compile-time-only. Subgraph detection uses
-# `compile/subgraph.py::node_subgraph_path` directly.
-
-def _has_inline_route(node: Node) -> bool:
-    """Stage 5c inline route: `Node.route` block. Coexists with execute,
-    or stands alone."""
-    return node.route is not None
-
-
-def _is_route(node: Node) -> bool:
-    """Standalone route — node whose only forward dispatch is a route
-    block, no execute body."""
-    return _has_inline_route(node) and node.kind is None
-
-
-def _has_synthetic_route(node: Node) -> bool:
-    """Node that pairs `execute:` with inline `route:` — needs a
-    synthetic `_route_<id>` dispatcher node post-execute (and post-
-    eval if present)."""
-    return _has_inline_route(node) and node.kind is not None
-
-
-def _collect_route_targets(node: Node) -> set[str]:
-    """Every node id this node's inline route block can dispatch to.
-    Used to mark goto-targets so they don't get a stray START →
-    fallback edge.
-    """
-    targets: set[str] = set()
-
-    def _add(tgt: Any) -> None:
-        ids = tgt if isinstance(tgt, list) else [tgt]
-        for t in ids:
-            if t != "__end__" and t is not None:
-                targets.add(t)
-
-    if _has_inline_route(node):
-        r = node.route
-        if r.goto is not None:
-            _add(r.goto)
-        for case in r.cases:
-            _add(case.goto)
-        if r.else_ is not None:
-            _add(r.else_.goto)
-    return targets
-
-
-def _make_inline_route_node(node: Node):
-    """Build the async fn for an inline-route dispatcher (Node.route).
-
-    Used in two configurations:
-    1. **Standalone** — node has `route:` and no `execute:`. Registered
-       under ``node.id``; runs as the node itself.
-    2. **Synthetic post-execute** — node has both `execute:` and
-       `route:`. The synthetic `_route_<id>` runs after the execute
-       node (and after eval, if present) and resolves the route block.
-
-    Returns Command(update={...}, goto=resolved). Update includes:
-
-    - ``_route_sender``: source node id (always).
-    - ``_route_eval_preamble``: pre-built preamble string. Populated
-      only when ``include_eval=True`` on the matched case AND the
-      source node has ``evaluation:`` AND a result is recorded. Empty
-      string otherwise (overwrites any stale value from a prior
-      Command emission). ``_dispatch_prompt`` auto-prepends a
-      non-empty preamble before the rendered prompt body.
-    """
-    assert _has_inline_route(node)
-    route = node.route
-    sender_id = node.id
-
-    async def node_fn(state: WorkflowState) -> Command:
-        from sqrlly.compile.route import build_safe_funcs
-        ns = build_route_namespace(state, node.depends_on)
-        funcs = build_safe_funcs(state)
-
-        def _build_preamble(include_eval: bool) -> str:
-            if not include_eval or node.evaluation is None:
-                return ""
-            records = (state.get("evaluations") or {}).get(sender_id) or []
-            if not records:
-                return ""
-            last_result = records[-1].get("result", {}) or {}
-            return build_eval_preamble(last_result, node.evaluation)
-
-        def _command(target: Any, include_eval: bool) -> Command:
-            return Command(
-                update={
-                    "_route_sender": sender_id,
-                    "_route_eval_preamble": _build_preamble(include_eval),
-                },
-                goto=_resolve_goto(target),
-            )
-
-        if route.goto is not None:
-            return _command(route.goto, route.include_eval)
-
-        for case in route.cases:
-            try:
-                matched = evaluate_case(case.when, ns, functions=funcs)
-            except Exception as e:
-                raise RouteError(
-                    f"Route '{sender_id}' case {case.when!r}: {e}"
-                ) from e
-            if matched:
-                return _command(case.goto, case.include_eval)
-
-        # else (always present when cases is non-empty per validation)
-        else_ = route.else_
-        return _command(else_.goto, else_.include_eval)
-
-    node_fn.__name__ = f"route_{sender_id}"
-    return node_fn
+def _collect_route_targets(node):
+    targets = set()
+    for case in node.route or []:
+        dest = case.then or case.otherwise
+        targets.update(dest if isinstance(dest, list) else [dest])
+    return targets - {"retry", "fail"}
 
 
 def _detect_cycles(config: Graph) -> None:
@@ -190,14 +70,7 @@ def _wire_evaluation_pair(
     executor: NodeExecutor | None = None,
     effective_settings: Settings | None = None,
 ) -> None:
-    """Register a gated execution node's collapsed gate.
-
-    One plain edge ``exec → _eval_<id>`` and one gate node (kept under the
-    existing ``_eval_<id>`` name for event-stream / log stability). The
-    gate returns ``Command(update=record+outcome, goto=...)`` — retry →
-    ``exec_id``, fail → END, pass → ``pass_targets`` — with no downstream
-    ``_decide_<id>`` node and no conditional edges.
-    """
+    """Measure and route after the execution update reaches the checkpoint."""
     gate_id = f"_eval_{exec_id}"
     builder.add_edge(exec_id, gate_id)
     builder.add_node(
@@ -276,7 +149,7 @@ def _make_fan_dispatcher(
     template_node_id = f"_sub_{node.id}"
 
     def dispatcher(state: WorkflowState):
-        # 1. Parent failed (blocking gate, or dep-failure) → END, no fan-out.
+        # 1. Parent failed → END, no fan-out.
         if node.id in state.get("failed_nodes", set()):
             return Command(goto=END)
 
@@ -378,6 +251,7 @@ def build_workflow_graph(
     *,
     logger: Any | None = None,
     effective_settings: Settings | None = None,
+    entry: str | None = None,
     _depth: int = 0,
     _base_dir: Any = None,
 ) -> Any:
@@ -392,11 +266,7 @@ def build_workflow_graph(
     so subgraph-internal completions surface in the parent JSONL keyed
     as `parent_id::child_id` (and nested as `parent::child::grandchild`).
 
-    ``effective_settings`` (Phase 3 / scope-aware): pre-merged settings
-    for this scope. ``None`` at top-level (use ``config.settings``);
-    subgraph wrappers compute the merge and pass it in. Used for
-    ``effective_timeout``, ``effective_max_retries``, ``retry_backoff``,
-    LLM-gate ``default_model``, and the executor's ``settings_override``.
+    Subgraphs inherit dispatch, timeout and retry settings from their parent.
 
     `_depth` and `_base_dir` are internal: subgraph wrappers pass
     `_depth+1` to enforce MAX_SUBGRAPH_DEPTH and propagate
@@ -439,17 +309,8 @@ def build_workflow_graph(
     gated_node_ids: set[str] = set()
     dynamic_fan_out_ids: set[str] = set()
     subgraph_node_ids: set[str] = set()
-    route_node_ids: set[str] = set()
-    # Stage 5c: nodes carrying `Node.route` block. `synthetic_route_ids`
-    # is the subset that ALSO has `execute:` — they get a synthetic
-    # `_route_<id>` dispatcher post-execute. `inline_route_ids` includes
-    # both standalone and synthetic forms (used to skip terminal-end
-    # wiring; their exit is via Command(goto=)).
-    inline_route_ids: set[str] = set()
-    synthetic_route_ids: set[str] = set()
-
     for node in config.nodes:
-        if node.evaluation:
+        if node.eval or node.route:
             gated_node_ids.add(node.id)
         if node.fan_out is not None:
             dynamic_fan_out_ids.add(node.id)
@@ -459,13 +320,6 @@ def build_workflow_graph(
             # see _depth>0 so they skip this and rely on the depth cap.
             if _depth == 0:
                 detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings)
-        if _is_route(node):
-            route_node_ids.add(node.id)
-        if _has_inline_route(node):
-            inline_route_ids.add(node.id)
-            if _has_synthetic_route(node):
-                synthetic_route_ids.add(node.id)
-
     # ----- Node registration -----
 
     # compile_fn is shared by recursive subgraph machinery and per-child
@@ -493,10 +347,6 @@ def build_workflow_graph(
     for node in config.nodes:
         if node.id in subgraph_node_ids:
             builder.add_node(node.id, build_subgraph(node))
-        elif node.id in route_node_ids:
-            # Standalone inline `Node.route` with no execute. Dispatched
-            # via Command from the node fn itself.
-            builder.add_node(node.id, _make_inline_route_node(node))
         else:
             builder.add_node(
                 node.id,
@@ -505,21 +355,6 @@ def build_workflow_graph(
                     effective_settings=settings,
                 ),
             )
-
-    # Synthetic _route_<id> dispatchers for execute+route nodes.
-    # They fire after the execute body (and after eval, if present)
-    # settles, resolving the route and emitting Command(goto=...) with
-    # _route_sender / _route_eval_preamble state updates.
-    for node_id in synthetic_route_ids:
-        node = node_map[node_id]
-        builder.add_node(f"_route_{node_id}", _make_inline_route_node(node))
-
-    # Evaluation nodes for every gated node. Top-level non-dynamic
-    # gated nodes get ONE collapsed gate node registered under
-    # ``_eval_<id>`` by ``_wire_evaluation_pair`` at the wiring sites
-    # below (it needs the per-site exec_id + pass_targets). No separate
-    # registration loop — a gate registered here without those would have
-    # no routing.
 
     # Dynamic node child template + final nodes.
     final_node_ids: dict[tuple[str, str], str] = {}
@@ -550,14 +385,14 @@ def build_workflow_graph(
                     effective_settings=settings,
                 ),
             )
-            if final_node.evaluation:
+            if final_node.eval or final_node.route:
                 gated_final_ids.add(fid)
                 # Synthetic Node mirrors the FanOutFinalNode; its gate is
                 # registered as ``_eval_<fid>`` by _wire_evaluation_pair
                 # when the final chain is wired below.
                 final_synthetic_nodes[fid] = Node(
                     id=fid, name=final_node.name,
-                    evaluation=final_node.evaluation,
+                    eval=final_node.eval, route=final_node.route,
                 )
 
     # ----- exit_node: what downstream deps plain-edge from -----
@@ -587,14 +422,12 @@ def build_workflow_graph(
 
     # ----- Plain edges: start + dep-to-node -----
 
-    # Goto targets of routes: a node reached only by Command(goto=) must
-    # not get a START → node fallback edge (would fire it unconditionally
-    # regardless of routing). Covers standalone `Node.route` and
-    # `_route_<id>` synthetic dispatchers (their goto targets are also
-    # Command-driven).
-    route_goto_targets: set[str] = set()
+    # Back edges may return to a root. Only forward routes suppress its START edge.
+    route_goto_targets = {target for _, _, target, back_edge in iter_route_edges(config) if not back_edge}
     for node in config.nodes:
-        route_goto_targets |= _collect_route_targets(node)
+        if node.fan_out:
+            for step in [node.fan_out.template, *node.fan_out.final_nodes]:
+                route_goto_targets |= _collect_route_targets(step)
 
     has_incoming: set[str] = set()
 
@@ -610,41 +443,22 @@ def build_workflow_graph(
                 builder.add_edge(exit_node[dep], node.id)
             has_incoming.add(node.id)
 
-    for node in config.nodes:
-        if node.id not in has_incoming and node.id not in route_goto_targets:
-            builder.add_edge(START, node.id)
+    if entry is not None:
+        builder.add_edge(START, entry)
+    else:
+        for node in config.nodes:
+            if node.id not in has_incoming and node.id not in route_goto_targets:
+                builder.add_edge(START, node.id)
 
     # ----- Top-level gated node wiring (non-dynamic) -----
 
     for node in config.nodes:
         if node.id not in gated_node_ids or node.id in dynamic_fan_out_ids:
             continue
-        if node.id in synthetic_route_ids:
-            # execute + eval + route: pass target is the synthetic
-            # `_route_<id>` dispatcher, which then emits Command(goto=)
-            # to the actual route case target. Dependents-via-depends_on
-            # is forbidden for inline-route nodes (validated in schema),
-            # so deps_of is guaranteed empty.
-            _wire_evaluation_pair(
-                builder, node, node.id, [f"_route_{node.id}"], config,
-                executor=executor, effective_settings=settings,
-            )
-        else:
-            deps_of = dependents[node.id]
-            _wire_evaluation_pair(
-                builder, node, node.id, deps_of or [END], config,
-                executor=executor, effective_settings=settings,
-            )
-
-    # ----- Inline-route synthetic node wiring (ungated execute+route) -----
-    # For nodes with execute + route but NO eval, plain edge from the
-    # execute node to the synthetic dispatcher. Gated case is already
-    # wired above via the eval pair's pass target.
-
-    for node_id in synthetic_route_ids:
-        if node_id in gated_node_ids:
-            continue
-        builder.add_edge(node_id, f"_route_{node_id}")
+        _wire_evaluation_pair(
+            builder, node, node.id, dependents[node.id] or [END], config,
+            executor=executor, effective_settings=settings,
+        )
 
     # ----- Dynamic node wiring -----
 
@@ -686,12 +500,7 @@ def build_workflow_graph(
             for tgt in (deps_of or [END]):
                 builder.add_edge(exit_node[node.id], tgt)
 
-        # Fan-out dispatch is a `_fan_<id>` node (mirrors `_route_<id>`),
-        # reached via Command(goto=_fan_<id>) from a gated parent's gate or
-        # a plain edge from an ungated parent. It emits the per-item Send
-        # array. An empty manifest ("no_items") routes to the first final
-        # node when the fan-out declares final_nodes, otherwise to *every*
-        # dependent.
+        # Empty manifests continue at the first final node or the parent dependents.
         if dsc.final_nodes:
             no_items_targets = [f"_final_{node.id}_{dsc.final_nodes[0].id}"]
         else:
@@ -701,10 +510,6 @@ def build_workflow_graph(
         )
 
         if node.id in gated_node_ids:
-            # Gated parent: exec → gate, gate gotoes _fan_<id> on pass.
-            # fan_out WINS over an inline route on the same node (the route
-            # block is dead) — matching the pre-collapse skip at the
-            # top-level gated wiring loop.
             _wire_evaluation_pair(
                 builder, node, node.id, [fan_id], config,
                 executor=executor, effective_settings=settings,
@@ -714,20 +519,12 @@ def build_workflow_graph(
             # defers until the parent settles).
             builder.add_edge(node.id, fan_id)
 
-    # ----- Terminal plain-end edges for ungated, non-dynamic nodes -----
-    # Inline-route nodes (standalone or execute+route) drive their exit
-    # via Command(goto=...), so they must not get a static node→END
-    # edge — that would create a parallel path to END alongside the
-    # Command-driven path. Excluded by route_node_ids and
-    # inline_route_ids.
-
+    # Nodes with an evaluation or route dispatch their own terminal command.
     for node in config.nodes:
         if (
             node.id in terminal_ids
             and node.id not in gated_node_ids
             and node.id not in dynamic_fan_out_ids
-            and node.id not in route_node_ids
-            and node.id not in inline_route_ids
         ):
             builder.add_edge(node.id, END)
 

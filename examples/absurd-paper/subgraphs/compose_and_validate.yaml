@@ -17,10 +17,7 @@ nodes:
   - id: submission_check
     name: Submission Structural Check
     depends_on: [persist]
-    evaluation:
-      validator: ../gates/submission_check.py
-      threshold: 1.0
-      blocking: true
+    run: [python3, '{{workflow_dir}}/../gates/submission_check.py']
 settings:
   worktree: 'off'
   prompts: ../prompts

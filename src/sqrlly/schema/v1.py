@@ -146,6 +146,12 @@ class Case(Record):
     max_attempts: PositiveInt | None = None
     context: str = "last"
 
+    @property
+    def targets(self) -> list[str]:
+        target = self.then if self.then is not None else self.otherwise
+        assert target is not None
+        return [target] if isinstance(target, str) else target
+
     @model_validator(mode="after")
     def _destination(self) -> Self:
         if (self.then is None) == (self.otherwise is None):

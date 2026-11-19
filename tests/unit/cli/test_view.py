@@ -91,10 +91,7 @@ class TestMermaidEmitter:
                 "id": "gate",
                 "name": "Gate",
                 "depends_on": ["trigger"],
-                "route": {
-                    "cases": [{"when": "true", "goto": "trigger"}],
-                    "else": "__end__",
-                },
+                "route": [{"when": "true", "then": "trigger"}, {"else": "fail"}],
             },
         ])
         out = render_mermaid(config)
@@ -224,10 +221,7 @@ class TestMermaidEmitter:
                 "id": "gated",
                 "name": "Gated",
                 "run": ["/usr/bin/echo"],
-                "evaluation": {
-                    "validator": "/usr/bin/true",
-                    "threshold": 1.0,
-                },
+                "eval": {"run": ["/usr/bin/true"]},
             },
         ])
         out = render_mermaid(config)
@@ -241,12 +235,7 @@ class TestMermaidEmitter:
                 "id": "router",
                 "name": "Router",
                 "depends_on": ["source"],
-                "route": {
-                    "cases": [
-                        {"when": "source == 'spam'", "goto": "drop"},
-                    ],
-                    "else": "keep",
-                },
+                "route": [{"when": "source == 'spam'", "then": "drop"}, {"else": "keep"}],
             },
             _node("drop"),
             _node("keep"),
@@ -263,22 +252,28 @@ class TestMermaidEmitter:
                 "id": "decide",
                 "name": "Decide",
                 "depends_on": ["a"],
-                "route": {
-                    "cases": [{"when": "true", "goto": "a"}],
-                    "else": "__end__",
-                },
+                "route": [{"when": "true", "then": "a"}, {"else": "fail"}],
             },
         ])
         out = render_mermaid(config)
-        assert "decide -.->|\"else\"| END" in out
+        assert "decide -.->|\"else: fail\"| END" in out
 
     def test_unconditional_goto_uses_dotted_arrow_no_label(self):
         config = make_config([
-            _node("step_one", route={"goto": "step_two"}),
+            _node("step_one", route=[{"then": "step_two"}]),
             _node("step_two"),
         ])
         out = render_mermaid(config)
         assert "step_one -.-> step_two" in out
+
+    def test_conditional_retry_renders_entry_and_fallback(self):
+        config = make_config([
+            _node("build", route=[{"when": "attempt < 3", "then": "retry"}]),
+        ])
+        diagram = render_mermaid(config)
+        assert "START --> build" in diagram
+        assert 'build -.->|"attempt < 3: retry"| build' in diagram
+        assert "build --> END" in diagram
 
     def test_wave_pattern_dispatcher_loop_renders(self):
         """Simulate the wave_planner topology: gate routes back to a
@@ -297,12 +292,7 @@ class TestMermaidEmitter:
                 "id": "gate",
                 "name": "Gate",
                 "depends_on": ["reconcile"],
-                "route": {
-                    "cases": [
-                        {"when": "'added' in reconcile", "goto": "dispatcher"},
-                    ],
-                    "else": "__end__",
-                },
+                "route": [{"when": "'added' in reconcile", "then": "dispatcher"}, {"else": "fail"}],
             },
         ])
         out = render_mermaid(config)
@@ -314,7 +304,7 @@ class TestMermaidEmitter:
         # Loop-back
         assert "gate -.->" in out and "dispatcher" in out
         # Exit
-        assert "gate -.->|\"else\"| END" in out
+        assert "gate -.->|\"else: fail\"| END" in out
         # Entry
         assert "START --> planner" in out
 
@@ -332,7 +322,7 @@ class TestExtractNodeConfig:
         assert cfg["id"] == "a"
         assert cfg["run"] == {"cmd": ["/usr/bin/echo"]}
         # Defaults shouldn't pollute the panel.
-        assert "evaluation" not in cfg
+        assert "eval" not in cfg
         assert "fan_out" not in cfg
 
     def test_evaluation_block_surfaces(self):
@@ -341,20 +331,11 @@ class TestExtractNodeConfig:
                 "id": "g",
                 "name": "G",
                 "run": ["/usr/bin/echo"],
-                "evaluation": {
-                    "validator": "/usr/bin/true",
-                    "threshold": 0.7,
-                    "max_retries": 3,
-                    "dimensions": [{"field": "rigor", "min": 0.5}],
-                },
+                "eval": {"run": ["/usr/bin/true"]},
             },
         ])
         cfg = extract_node_config(config.nodes[0])
-        ev = cfg["evaluation"]
-        assert ev["validator"] == "/usr/bin/true"
-        assert ev["threshold"] == 0.7
-        assert ev["max_retries"] == 3
-        assert ev["dimensions"] == [{"field": "rigor", "min": 0.5}]
+        assert cfg["eval"] == {"run": {"cmd": ["/usr/bin/true"]}}
 
 
 # ---------------------------------------------------------------------------

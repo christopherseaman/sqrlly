@@ -6,7 +6,7 @@ question id. Already-answered questions are excluded — that's how
 "the next wave" naturally narrows.
 
 If no questions are pending the manifest is empty and fan-out
-dispatches zero children; the gate then routes to __end__ on its
+dispatches zero children; the route node then finishes on its
 "reconcile_clean" branch.
 """
 import json

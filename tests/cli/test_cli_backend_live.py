@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -42,17 +43,17 @@ class TestJokeWorkflowCLIIntegration:
         validator = tmp_path / "validate.py"
         validator.write_text(
             "import json, sys\n"
-            "raw = sys.stdin.read().strip()\n"
+            "raw = sys.argv[1].strip()\n"
             "try:\n"
             "    data = json.loads(raw)\n"
             "    jokes = data.get('jokes', [])\n"
             "    if isinstance(jokes, list) and len(jokes) == 3 "
             "and all(isinstance(j, str) and j for j in jokes):\n"
-            "        print('1.0')\n"
+            "        sys.exit(0)\n"
             "    else:\n"
-            "        print('0.0')\n"
+            "        sys.exit(1)\n"
             "except Exception:\n"
-            "    print('0.0')\n"
+            "    sys.exit(1)\n"
         )
 
         config = make_config(
@@ -61,12 +62,7 @@ class TestJokeWorkflowCLIIntegration:
                     "id": "generate",
                     "name": "Generate Jokes",
                     "llm": "generate.md",
-                    "evaluation": {
-                        "validator": str(validator),
-                        "threshold": 1.0,
-                        "blocking": True,
-                        "max_retries": 2,
-                    },
+                    "eval": {"run": [sys.executable, str(validator), "{{output}}"]},
                 },
                 {
                     "id": "select",
@@ -84,7 +80,7 @@ class TestJokeWorkflowCLIIntegration:
 
             assert "generate" in result["completed_nodes"]
             assert "select" in result["completed_nodes"]
-            assert result["evaluations"]["generate"][-1]["result"]["score"] == 1.0
+            assert result["evaluations"]["generate"][-1]["result"]["exit_code"] == 0
 
             gen_output = result["node_outputs"]["generate"]
             data = json.loads(gen_output)

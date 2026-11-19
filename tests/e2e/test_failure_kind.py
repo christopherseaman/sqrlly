@@ -3,8 +3,8 @@
 failed-id→kind map.
 
 Real subprocesses (no mocks): a script that exits non-zero (`node_error`), a
-node blocked by a failed dependency (`upstream_failed`), a blocking script
-gate scored below threshold (`gate_failure`), and a node that overruns its
+node blocked by a failed dependency (`upstream_failed`), an exhausted command
+eval retry (`gate_failure`), and a node that overruns its
 timeout (`timeout`). The overload/backend_error kinds are LLM-backend paths
 covered at the unit level (tests/unit/runtime/test_prompt.py); here we pin the
 four script-reachable kinds through the full graph → event boundary.
@@ -38,10 +38,9 @@ def _build(workdir: Path) -> Graph:
     fail = _script(workdir, "fail.py", "import sys; sys.exit(1)\n")
     ok = _script(workdir, "ok.py", "print('ok')\n")
     slow = _script(workdir, "slow.py", "import time; time.sleep(3)\n")
-    # Blocking validator that always scores 0.0 (< threshold) → gate_failure.
     validator = _script(
         workdir, "val.py",
-        "import sys; sys.stdin.read(); print('0.0')\n",
+        "import sys; sys.exit(1)\n",
     )
     return Graph(
         name="failure-kinds",
@@ -52,8 +51,7 @@ def _build(workdir: Path) -> Graph:
              "run": [_PYTHON, ok]},
             {"id": "gate_fail", "name": "gate_fail",
              "run": [_PYTHON, ok],
-             "evaluation": {"validator": validator, "threshold": 0.9,
-                            "blocking": True, "max_retries": 0}},
+             "eval": {"run": [sys.executable, validator]}},
             {"id": "slow", "name": "slow", "timeout": 1.0,
              "run": [_PYTHON, slow]},
         ],
@@ -78,7 +76,7 @@ async def test_node_failed_events_carry_the_right_kind(tmp_path):
     }
     assert kinds.get("bad") == "node_error"            # script exit 1
     assert kinds.get("blocked") == "upstream_failed"   # dep 'bad' failed
-    assert kinds.get("gate_fail") == "gate_failure"    # blocking eval < 0.9
+    assert kinds.get("gate_fail") == "gate_failure"
     assert kinds.get("slow") == "timeout"              # overran node timeout
 
     # Every failed node has a kind; none defaulted silently to the fallback

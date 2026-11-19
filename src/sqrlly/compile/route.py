@@ -79,10 +79,6 @@ def build_safe_funcs(state: WorkflowState) -> dict[str, Any]:
         return records[-1].get("result", {}) or {}
 
     def passed(node_id: str) -> bool:
-        # "Settled cleanly" — landed in completed_nodes and not in
-        # failed_nodes. For evaluated nodes this means score >=
-        # threshold OR (blocking=False AND retries exhausted with
-        # pass-with-warning). For ungated nodes, just "ran without error."
         return node_id in completed and node_id not in failed
 
     def score(node_id: str) -> float:

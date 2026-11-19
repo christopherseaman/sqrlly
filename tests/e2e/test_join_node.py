@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import shutil
 
+import sys
+
 import pytest
 
 from sqrlly.compile.graph import build_workflow_graph
@@ -144,7 +146,7 @@ class TestExplicitJoin:
                 "id": "gated_join",
                 "name": "Gated Join",
                 "depends_on": ["a", "b"],
-                "evaluation": {"validator": str(validator), "threshold": 0.9},
+                "eval": {"run": [sys.executable, str(validator)]},
             },
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -154,4 +156,4 @@ class TestExplicitJoin:
         assert "gated_join" in result["completed_nodes"]
         records = result["evaluations"]["gated_join"]
         assert len(records) == 1
-        assert records[0]["result"]["score"] == 1.0
+        assert records[0]["result"]["exit_code"] == 0

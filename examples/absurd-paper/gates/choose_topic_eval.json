@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "absurdity": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "specificity": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "methodological_hook": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "feedback": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "absurdity",
+    "specificity",
+    "methodological_hook",
+    "feedback"
+  ],
+  "additionalProperties": false
+}

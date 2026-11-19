@@ -76,16 +76,16 @@ class TestRendererStateModel:
         r = TerminalRenderer(_config([("a", [])]))
         r.emit({
             "event": "gate_evaluated", "node": "a",
-            "invocation": 0, "score": 0.85,
+            "attempt": 1, "result": {"score": 0.85},
         })
-        assert r._gate_scores["a"] == 0.85
+        assert r._eval_summaries["a"] == "score=0.85"
         assert r._attempts["a"] == 1
 
     def test_gate_evaluated_attempt_count_monotonic(self):
         """Multiple gate evaluations accumulate the max attempt seen."""
         r = TerminalRenderer(_config([("a", [])]))
-        r.emit({"event": "gate_evaluated", "node": "a", "invocation": 0, "score": 0.3})
-        r.emit({"event": "gate_evaluated", "node": "a", "invocation": 1, "score": 0.9})
+        r.emit({"event": "gate_evaluated", "node": "a", "attempt": 1, "result": {"score": 0.3}})
+        r.emit({"event": "gate_evaluated", "node": "a", "attempt": 2, "result": {"score": 0.9}})
         assert r._attempts["a"] == 2
 
     def test_node_retried_marks_retrying(self):
@@ -129,10 +129,10 @@ class TestLogUpdate:
         r = TerminalRenderer(_config([("a", [])]))
         r.log_update({
             "evaluations": {
-                "a": [{"invocation": 0, "result": {"score": 0.7}}]
+                "a": [{"attempt": 1, "result": {"exit_code": 7}}]
             },
         })
-        assert r._gate_scores["a"] == 0.7
+        assert r._eval_summaries["a"] == "exit=7"
         assert r._attempts["a"] == 1
 
 

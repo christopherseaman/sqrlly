@@ -2,15 +2,11 @@ import pytest
 from pydantic import ValidationError
 
 from sqrlly.schema.models import (
-    DimensionCheck,
-    Evaluation,
     FanOut,
     FanOutTemplate,
     Graph,
     Node,
     OutputContract,
-    Route,
-    RouteElse,
     Settings,
 )
 
@@ -24,89 +20,6 @@ class TestMinimalWorkflow:
         graph = Graph(nodes=[{"id": "a"}])
         assert graph.name == "workflow"
         assert graph.nodes[0].name == "a"
-
-
-class TestQualityGate:
-    def test_basic_gate(self):
-        gate = Evaluation(validator="gates/v.py", threshold=0.85)
-        assert gate.validator == "gates/v.py"
-        assert gate.threshold == 0.85
-        assert gate.blocking is False
-        assert gate.max_retries is None
-
-    def test_blocking_gate(self):
-        gate = Evaluation(validator="v.md", threshold=0.9, blocking=True)
-        assert gate.blocking is True
-
-    def test_threshold_bounds(self):
-        with pytest.raises(ValidationError):
-            Evaluation(validator="v.md", threshold=1.5)
-        with pytest.raises(ValidationError):
-            Evaluation(validator="v.md", threshold=-0.1)
-
-    def test_custom_max_retries(self):
-        gate = Evaluation(validator="v.md", threshold=0.8, max_retries=5)
-        assert gate.max_retries == 5
-
-    def test_dimension_gate(self):
-        gate = Evaluation(
-            validator="v.py",
-            dimensions=[
-                DimensionCheck(field="correctness", threshold=0.7),
-                DimensionCheck(field="style", threshold=0.5),
-            ],
-        )
-        assert len(gate.dimensions) == 2
-        assert gate.dimensions[0].field == "correctness"
-        assert gate.dimensions[0].threshold == 0.7
-
-    def test_dimension_gate_from_yaml(self):
-        # `min` is the back-compat YAML alias for `threshold`.
-        raw = {
-            "validator": "v.py",
-            "dimensions": [
-                {"field": "correctness", "min": 0.7},
-                {"field": "style", "min": 0.5},
-            ],
-        }
-        gate = Evaluation(**raw)
-        assert gate.dimensions[1].field == "style"
-        assert gate.dimensions[0].threshold == 0.7
-
-    def test_dimension_check_bounds(self):
-        with pytest.raises(ValidationError):
-            DimensionCheck(field="x", min=1.5)
-        with pytest.raises(ValidationError):
-            DimensionCheck(field="x", min=-0.1)
-
-
-class TestEffectiveMaxRetries:
-    """Node.effective_max_retries resolves gate override vs settings default."""
-
-    def test_no_gate_uses_settings(self):
-        settings = Settings(max_retries=5)
-        node = Node(id="p1", name="P1", agent="t.md")
-        assert node.effective_max_retries(settings) == 5
-
-    def test_gate_with_override(self):
-        settings = Settings(max_retries=5)
-        node = Node(
-            id="p1",
-            name="P1",
-            agent="t.md",
-            evaluation=Evaluation(validator="v.md", threshold=0.8, max_retries=2),
-        )
-        assert node.effective_max_retries(settings) == 2
-
-    def test_gate_without_override_uses_settings(self):
-        settings = Settings(max_retries=7)
-        node = Node(
-            id="p1",
-            name="P1",
-            agent="t.md",
-            evaluation=Evaluation(validator="v.md", threshold=0.8),
-        )
-        assert node.effective_max_retries(settings) == 7
 
 
 class TestOutputContract:
@@ -145,194 +58,6 @@ class TestSettingsSafeMode:
 
     def test_accepts_true(self):
         assert Settings(safe_mode=True).safe_mode is True
-
-
-class TestInlineRoute:
-    """Stage 5c: `Node.route` block (inline forward dispatch).
-
-    Coexists with `execute:` (executes, evaluates, then routes) or
-    stands alone (node has no execute body, just a route).
-    """
-
-    def test_unconditional_goto_str(self):
-        r = Route(goto="b")
-        assert r.goto == "b"
-        assert r.cases == []
-        assert r.else_ is None
-        assert r.include_eval is False
-
-    def test_unconditional_goto_list(self):
-        r = Route(goto=["b", "c"])
-        assert r.goto == ["b", "c"]
-
-    def test_unconditional_with_include_eval(self):
-        r = Route(goto="b", include_eval=True)
-        assert r.include_eval is True
-
-    def test_cases_with_string_else(self):
-        r = Route.model_validate({
-            "cases": [{"when": "x>0", "goto": "ship"}],
-            "else": "fallback",
-        })
-        assert r.cases[0].goto == "ship"
-        assert r.cases[0].include_eval is False
-        # else: string shorthand auto-promoted to RouteElse
-        assert isinstance(r.else_, RouteElse)
-        assert r.else_.goto == "fallback"
-        assert r.else_.include_eval is False
-
-    def test_cases_with_list_else(self):
-        r = Route.model_validate({
-            "cases": [{"when": "x>0", "goto": ["a", "b"]}],
-            "else": ["c", "d"],
-        })
-        assert r.cases[0].goto == ["a", "b"]
-        assert r.else_.goto == ["c", "d"]
-
-    def test_cases_with_structured_else(self):
-        r = Route.model_validate({
-            "cases": [{"when": "x>0", "goto": "ship"}],
-            "else": {"goto": "human_review", "include_eval": True},
-        })
-        assert r.else_.goto == "human_review"
-        assert r.else_.include_eval is True
-
-    def test_per_case_include_eval(self):
-        r = Route.model_validate({
-            "cases": [
-                {"when": "passed('x')", "goto": "ship"},
-                {"when": "score('x') < 0.4", "goto": "rewrite", "include_eval": True},
-            ],
-            "else": "review",
-        })
-        assert r.cases[0].include_eval is False
-        assert r.cases[1].include_eval is True
-
-    def test_goto_and_cases_are_mutex(self):
-        with pytest.raises(ValidationError, match="mutually exclusive"):
-            Route.model_validate({
-                "goto": "a",
-                "cases": [{"when": "x", "goto": "b"}],
-                "else": "c",
-            })
-
-    def test_cases_require_else(self):
-        with pytest.raises(ValidationError, match="requires `else"):
-            Route.model_validate({
-                "cases": [{"when": "x", "goto": "b"}],
-            })
-
-    def test_else_without_cases_rejected(self):
-        """Bare `else:` without `cases:` is a silent unconditional
-        redirect — confusing structure identical to `goto:` shorthand.
-        Reject so authors pick the unambiguous form."""
-        with pytest.raises(ValidationError, match="requires `cases"):
-            Route.model_validate({"else": "fallback"})
-
-    def test_route_must_set_at_least_one_form(self):
-        with pytest.raises(ValidationError, match="requires either"):
-            Route()
-
-    def test_route_level_include_eval_only_with_goto_shorthand(self):
-        # `cases:` form forbids route-level include_eval (per-case is canonical)
-        with pytest.raises(ValidationError, match="route level"):
-            Route.model_validate({
-                "include_eval": True,
-                "cases": [{"when": "x", "goto": "b"}],
-                "else": "c",
-            })
-
-    def test_node_route_field(self):
-        config = Graph(
-            name="T",
-            nodes=[
-                {"id": "a", "name": "A", "agent": "a.md",
-                 "route": {"goto": "b"}},
-                {"id": "b", "name": "B", "agent": "b.md"},
-            ],
-        )
-        assert config.nodes[0].route is not None
-        assert config.nodes[0].route.goto == "b"
-
-    def test_node_route_unknown_target_rejected(self):
-        with pytest.raises(ValidationError, match="goto 'ghost'"):
-            Graph(
-                name="T",
-                nodes=[
-                    {"id": "a", "name": "A", "agent": "a.md",
-                     "route": {"goto": "ghost"}},
-                ],
-            )
-
-    def test_node_route_else_unknown_target_rejected(self):
-        with pytest.raises(ValidationError, match="else goto 'ghost'"):
-            Graph(
-                name="T",
-                nodes=[
-                    {"id": "a", "name": "A", "agent": "a.md",
-                     "route": {
-                         "cases": [{"when": "x", "goto": "b"}],
-                         "else": "ghost",
-                     }},
-                    {"id": "b", "name": "B", "agent": "b.md"},
-                ],
-            )
-
-    def test_node_route_list_goto_unknown_rejected(self):
-        with pytest.raises(ValidationError, match="goto 'ghost'"):
-            Graph(
-                name="T",
-                nodes=[
-                    {"id": "a", "name": "A", "agent": "a.md",
-                     "route": {"goto": ["b", "ghost"]}},
-                    {"id": "b", "name": "B", "agent": "b.md"},
-                ],
-            )
-
-    def test_inline_route_node_cannot_be_dep(self):
-        # Inline-route nodes dispatch via Command; static depends_on to
-        # them would double-trigger the goto target.
-        with pytest.raises(ValidationError, match="depends on route"):
-            Graph(
-                name="T",
-                nodes=[
-                    {"id": "a", "name": "A", "agent": "a.md",
-                     "route": {"goto": "b"}},
-                    {"id": "b", "name": "B", "agent": "b.md"},
-                    {"id": "c", "name": "C", "agent": "c.md",
-                     "depends_on": ["a"]},
-                ],
-            )
-
-    def test_standalone_inline_route(self):
-        # Node with route but no execute — pure forward-edge dispatcher.
-        # Validates target resolution like any other route.
-        config = Graph(
-            name="T",
-            nodes=[
-                {"id": "produce", "name": "P", "agent": "p.md"},
-                {"id": "dispatch", "name": "D", "depends_on": ["produce"],
-                 "route": {
-                     "cases": [{"when": "True", "goto": "ship"}],
-                     "else": "__end__",
-                 }},
-                {"id": "ship", "name": "S", "agent": "s.md"},
-            ],
-        )
-        assert config.nodes[1].kind is None
-        assert config.nodes[1].route is not None
-
-    def test_fan_out_and_route_on_one_node_rejected(self):
-        # A node cannot both fan out and carry an inline route: gated fan-out
-        # dispatches via _fan_<id> while route dispatches via _route_<id>;
-        # ungated, both static edges fire and double-dispatch. Fail at load.
-        with pytest.raises(ValidationError, match="fan_out.*route|route.*fan_out"):
-            Node(
-                id="p", name="P",
-                agent="p.md",
-                fan_out=FanOut(template=FanOutTemplate(agent="w.md")),
-                route=Route(goto="d"),
-            )
 
 
 class TestDependencyValidation:
@@ -398,10 +123,10 @@ class TestFanOut:
             manifest_path="m.json",
             template={
                 "agent": "template.md",
-                "evaluation": {"validator": "v.md", "threshold": 0.8},
+                "eval": {"run": ["true"]},
             },
         )
-        assert config.template.evaluation.threshold == 0.8
+        assert config.template.eval.run.cmd == ["true"]
 
     def test_legacy_enabled_field_rejected(self):
         """`enabled` was removed in the post-Stage-5c audit — the

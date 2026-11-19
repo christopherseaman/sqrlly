@@ -56,7 +56,7 @@ class TestScopeCapture:
                 {"id": "p", "name": "Parent",
                  "run": [_ECHO, "-n", "x"]},
             ],
-            "settings": {"preamble_file": "parent-out", "max_retries": 7},
+            "settings": {"preamble_file": "parent-out", "max_parallel_jobs": 7},
         })
         config = Graph(**yaml.safe_load((tmp_path / "wf.yaml").read_text()))
         executor = MockExecutor()
@@ -69,7 +69,7 @@ class TestScopeCapture:
         seen = executor.received_settings["p"]
         assert seen is not None
         assert seen.preamble_file == "parent-out"
-        assert seen.max_retries == 7
+        assert seen.max_parallel_jobs == 7
 
     async def test_subgraph_node_sees_merged_settings(self, tmp_path):
         """Parent preamble_file=parent-out; subgraph preamble_file=sub-out.
@@ -91,7 +91,7 @@ class TestScopeCapture:
                  "depends_on": ["top"],
                  "workflow": "sub.yaml"},
             ],
-            "settings": {"preamble_file": "parent-out", "max_retries": 4},
+            "settings": {"preamble_file": "parent-out", "max_parallel_jobs": 4},
         })
         config = Graph(**yaml.safe_load((tmp_path / "wf.yaml").read_text()))
         executor = MockExecutor()
@@ -106,8 +106,8 @@ class TestScopeCapture:
         assert top_seen is not None and child_seen is not None
         assert top_seen.preamble_file == "parent-out"   # parent scope
         assert child_seen.preamble_file == "sub-out"    # subgraph wins
-        # Subgraph inherited parent's max_retries (didn't author it).
-        assert child_seen.max_retries == 4
+        # Subgraph inherited parent's max_parallel_jobs (didn't author it).
+        assert child_seen.max_parallel_jobs == 4
 
     async def test_subgraph_inherits_when_unset(self, tmp_path):
         """Subgraph YAML with NO settings: block inherits everything
@@ -145,7 +145,7 @@ class TestScopeCapture:
             "name": "bot",
             "nodes": [{"id": "leaf", "name": "Leaf",
                        "run": [_ECHO, "-n", "z"]}],
-            "settings": {"max_retries": 9},
+            "settings": {"max_parallel_jobs": 9},
         })
         _yaml(tmp_path / "mid.yaml", {
             "name": "mid",
@@ -158,7 +158,7 @@ class TestScopeCapture:
             "nodes": [{"id": "ref_mid", "name": "Top",
                        "workflow": "mid.yaml"}],
             "settings": {
-                "preamble_file": "top-out", "max_retries": 2,
+                "preamble_file": "top-out", "max_parallel_jobs": 2,
                 "default_timeout": 60.0,
             },
         })
@@ -171,10 +171,10 @@ class TestScopeCapture:
         ))
 
         leaf = executor.received_settings["leaf"]
-        # top→mid won preamble_file=mid-out, mid→bot kept it; bot won max_retries=9.
+        # top→mid won preamble_file=mid-out, mid→bot kept it; bot won max_parallel_jobs=9.
         # default_timeout flowed top→mid→bot untouched.
         assert leaf.preamble_file == "mid-out"
-        assert leaf.max_retries == 9
+        assert leaf.max_parallel_jobs == 9
         assert leaf.default_timeout == 60.0
 
 

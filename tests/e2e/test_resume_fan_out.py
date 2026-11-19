@@ -231,24 +231,15 @@ class TestResumeFromCheckpoint:
 
 _ECHO = shutil.which("echo") or "/bin/echo"
 
-# Flippable validator: passes (1.0) unless eval_fail.txt exists in the workdir,
-# in which case it fails (0.0). CWD is the workdir when the validator subprocess
-# runs (mirrors the fail.txt marker pattern used by worker.py).
+# The eval runs in the workdir and exits 1 while the marker exists.
 _VALIDATOR_SRC = (
     "import sys; from pathlib import Path; sys.stdin.read(); "
-    "print('0.0' if Path('eval_fail.txt').exists() else '1.0')"
+    "sys.exit(Path('eval_fail.txt').exists())"
 )
 
 
 def _build_gated_chain(workdir: Path) -> Graph:
-    """Linear chain up -> g, where g has a BLOCKING evaluation (script validator).
-
-    Used to pin the Decision node's `node_id in completed_nodes` guard: on
-    resume with g dirty, the Decision node must consult the FRESH eval result
-    (not short-circuit as pass). Pinned by flipping the validator to FAIL
-    between phases and asserting g ends in failed_nodes — impossible if the
-    Decision node short-circuits on stale completed_nodes.
-    """
+    """Re-evaluate the dirty node on resume, even when it completed previously."""
     worker = _worker_path(workdir)
     validator = workdir / "validator.py"
     validator.write_text(_VALIDATOR_SRC)
@@ -262,12 +253,8 @@ def _build_gated_chain(workdir: Path) -> Graph:
             {
                 "id": "g", "name": "g", "depends_on": ["up"],
                 "run": [_PYTHON, str(worker), "g"],
-                "evaluation": {
-                    "validator": str(validator),
-                    "threshold": 0.9,
-                    "blocking": True,
-                    "max_retries": 0,
-                },
+                "eval": {"run": [sys.executable, str(validator)]},
+                "route": [{"when": "eval.exit_code != 0", "then": "fail"}],
             },
         ],
     )
@@ -314,20 +301,12 @@ class TestResumeDirtyGuards:
 
     @pytest.mark.asyncio
     async def test_gated_node_reruns_eval_on_resume_from(self, tmp_path):
-        """up -> g(blocking eval). Phase 1 passes. Flip eval to FAIL, resume-from up.
-
-        Pins the Decision node's `node_id in completed_nodes` guard. Without
-        the R8 fix (`completed_nodes` reseeded to full prior set), the Decision
-        node short-circuits as pass (g stays completed) even though the fresh
-        validator now returns 0.0. With the fix, completed_nodes is seeded to
-        skip={} (g is dirty), so the Decision node reads the fresh failing eval
-        and routes to fail_blocking → g ends in failed_nodes.
-        """
+        """Changing the marker changes the route on a resumed execution."""
         config = _build_gated_chain(tmp_path)
         db_path = str(tmp_path / ".checkpoint.db")
         thread_id = "gated-resume"
 
-        # Phase 1: no eval_fail.txt → validator returns 1.0 → g completes.
+        # The successful first eval completes g.
         result_1 = await _run_phase(
             tmp_path, config, db_path, thread_id, resume=False,
         )
@@ -338,9 +317,7 @@ class TestResumeDirtyGuards:
         (tmp_path / "eval_fail.txt").write_text("fail")
 
         # Phase 2: --resume-from up → up and g are dirty.
-        # The Decision node MUST consult the fresh eval (0.0 < 0.9 threshold)
-        # and route to fail_blocking. If it short-circuits on stale
-        # completed_nodes, g would stay completed and this assertion fails.
+        # A dirty node uses the new measurement when choosing its route.
         result_2 = await _run_phase(
             tmp_path, config, db_path, thread_id,
             resume=True, resume_from=("up",),

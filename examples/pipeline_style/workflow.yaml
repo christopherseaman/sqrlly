@@ -3,13 +3,13 @@ nodes:
   - id: step_one
     name: Step one
     route:
-      goto: step_two
+      - then: step_two
     run: [echo, '[step_one]']
 
   - id: step_two
     name: Step two
     route:
-      goto: step_three
+      - then: step_three
     run: [echo, '[step_two] after {{sender_id}}']
 
   - id: step_three

@@ -1,5 +1,3 @@
-{{_retry_reason}}
-
 ## Context
 
 **Abstract:**

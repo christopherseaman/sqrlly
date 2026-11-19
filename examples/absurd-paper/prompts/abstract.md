@@ -1,5 +1,3 @@
-{{_retry_reason}}
-
 ## Task
 
 The topic-synthesis node has selected the following research domain (JSON with `topic` and `rationale` fields — use the `topic` value as the subject of the paper; the rationale is context only):

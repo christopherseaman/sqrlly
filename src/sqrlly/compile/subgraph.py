@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqrlly.compile._manifest import find_terminal_nodes
 from sqrlly.compile.nodes import (
+    count_attempts,
     all_deps_completed,
     build_context,
     check_dep_failed,
@@ -172,7 +173,7 @@ def make_subgraph_node(
         else:
             sub_result = await sub_graph.ainvoke(sub_state)
 
-        update: dict[str, Any] = {"completed_nodes": {parent_id}}
+        update: dict[str, Any] = {"completed_nodes": set() if parent_node.eval or parent_node.route else {parent_id}}
         update["node_outputs"] = {parent_id: _terminal_node_output(sub_result, sub_config)}
 
         if sub_result.get("failed_nodes"):
@@ -213,7 +214,7 @@ def make_subgraph_node(
             return make_failure_update(parent_id, f"Node timed out after {timeout}s", kind="timeout")
 
     wrapper.__name__ = f"subgraph_{parent_id}"
-    return wrapper
+    return count_attempts(parent_node, wrapper)
 
 
 def make_fan_out_subgraph_invoker(

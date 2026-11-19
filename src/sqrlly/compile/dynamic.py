@@ -8,9 +8,8 @@ from typing import TYPE_CHECKING, Any
 from sqrlly.compile.nodes import (
     _make_execution_node,
     build_context,
-    run_evaluation_and_outcome,
+    settle,
     run_with_timeout,
-    inject_retry_reason,
     make_failure_update,
 )
 from sqrlly.runtime.executor.prompt import retry_delay
@@ -71,7 +70,6 @@ def _make_fan_out_node(
     settings = effective_settings or config.settings
     template = parent_node.fan_out.template
     timeout = parent_node.effective_timeout(settings)
-    max_retries = parent_node.effective_max_retries(settings)
     retry_backoff = settings.retry_backoff
 
     from sqrlly.compile.subgraph import make_fan_out_subgraph_invoker
@@ -129,7 +127,7 @@ def _make_fan_out_node(
         synthetic_node = Node(
             id=child_id,
             name=f"{parent_node.name} - {item.get('name', item_id)}",
-            evaluation=template.evaluation,
+            eval=template.eval, route=template.route,
             **({template.kind: getattr(template, template.kind)} if template.kind else {}),
             # Per-fan-out worktree override (FanOutTemplate.worktree). None
             # inherits settings.worktree — identical to a top-level node with
@@ -150,31 +148,12 @@ def _make_fan_out_node(
         # branch. Starts from the caller-provided state so reducers at the
         # super-step boundary see the whole history.
         update: dict[str, Any] = {}
-        history: list[dict[str, Any]] = list(
-            state.get("evaluations", {}).get(child_id, [])
-        )
-        retries_local = state.get("retries", {}).get(child_id, 0)
-
         while True:
-            context = dict(base_context)
-            if retries_local > 0:
-                delay = retry_delay(retries_local, retry_backoff)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                synthetic_state: WorkflowState = {
-                    **state,
-                    "evaluations": _synth_evaluations(
-                        state.get("evaluations", {}), child_id, history
-                    ),
-                    "retries": {
-                        **state.get("retries", {}),
-                        child_id: retries_local,
-                    },
-                }
-                context = inject_retry_reason(
-                    context, synthetic_node, synthetic_state,
-                    max_retries, node_id=child_id,
-                )
+            current = _merge_updates(state, update)
+            context = {**base_context, **build_context(synthetic_node, current)}
+            retries = current.get("retries", {}).get(child_id, 0)
+            if retries:
+                await asyncio.sleep(retry_delay(retries, retry_backoff))
 
             if sub_invoker is not None:
                 # Subgraph template: each Send branch runs the subgraph
@@ -203,6 +182,7 @@ def _make_fan_out_node(
                     ),
                     timeout,
                 )
+            update["attempts"] = {child_id: current.get("attempts", {}).get(child_id, 0) + 1}
             if not exec_result.success:
                 return _merge_updates(update, make_failure_update(
                     child_id, exec_result.error,
@@ -217,60 +197,22 @@ def _make_fan_out_node(
                 exec_update["node_worktrees"] = {child_id: exec_result.worktree}
             update = _merge_updates(update, exec_update)
 
-            if not template.evaluation:
+            if not (template.eval or template.route):
                 update.setdefault("completed_nodes", set()).add(child_id)
                 return update
 
-            backend = (
-                executor.get_backend(settings)
-                if hasattr(executor, "get_backend") else None
+            settlement, target = await settle(
+                synthetic_node, _merge_updates(state, update), settings, executor, context,
             )
-            # Call run_evaluation_and_outcome with a state reflecting the
-            # inline retries counter, so its own read of retries matches.
-            eval_state: WorkflowState = {
-                **state,
-                "retries": {
-                    **state.get("retries", {}),
-                    child_id: retries_local,
-                },
-            }
-            eval_update = await run_evaluation_and_outcome(
-                synthetic_node, config, eval_state, exec_result.output, timeout,
-                backend=backend, node_id=child_id, history=history,
-                effective_settings=effective_settings,
-            )
-            update = _merge_updates(update, eval_update)
-
-            new_record = eval_update.get("evaluations", {}).get(child_id, [])
-            history = history + list(new_record)
-
-            if child_id in eval_update.get("completed_nodes", set()):
+            update = _merge_updates(update, settlement)
+            if target != "retry":
+                if target and target != "fail":
+                    from langgraph.types import Command
+                    return Command(update=update, goto=target)
                 return update
-            if child_id in eval_update.get("failed_nodes", set()):
-                return update
-
-            # Retry outcome — increment and loop.
-            bumped = eval_update.get("retries", {}).get(child_id)
-            if bumped is None:
-                # Defensive: no retry signal → treat as terminal to avoid infinite loop.
-                return update
-            retries_local = bumped
 
     node_fn.__name__ = f"branch_{parent_node.id}"
     return node_fn
-
-
-def _synth_evaluations(
-    existing: dict[str, list[dict[str, Any]]],
-    key: str,
-    history: list[dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-    """Return a new evaluations dict where `key` reflects the inline
-    history. Leaves other keys untouched.
-    """
-    out = {k: list(v) for k, v in existing.items()}
-    out[key] = list(history)
-    return out
 
 
 def _make_final_fan_out_node(
@@ -306,7 +248,7 @@ def _make_final_fan_out_node(
         id=node_id,
         name=final_node.name,
         description=final_node.description,
-        evaluation=final_node.evaluation,
+        eval=final_node.eval, route=final_node.route,
         depends_on=[parent_node.id],
         **({final_node.kind: getattr(final_node, final_node.kind)} if final_node.kind else {}),
         output_contract=final_node.output_contract,

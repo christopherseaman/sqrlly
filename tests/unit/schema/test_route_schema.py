@@ -1,172 +1,63 @@
-"""Unit tests for inline ``Node.route`` (Stage 5c): schema parse + Graph-level validator.
-
-Function-level tests cover:
-    - YAML/dict parses into Route(cases=..., else=...)
-    - else: alias is required (else_ in Python)
-    - cases: may be empty (else-only is legal)
-    - Graph validator: goto must resolve to a real node id or __end__
-    - Graph validator: routes must be leaves in the dep DAG
-"""
-
-from __future__ import annotations
-
 import pytest
-import yaml
 from pydantic import ValidationError
 
-from sqrlly.schema.models import (
-    Graph,
-    Node,
-    Route,
-    RouteCase,
-    RouteElse,
-)
+from sqrlly.schema.models import Graph, load_workflow
 
 
-def test_route_parses_from_dict():
-    payload = {
-        "cases": [
-            {"when": "score >= 0.8", "goto": "ship"},
-            {"when": "len(history) >= 3", "goto": "__end__"},
-        ],
-        "else": "produce",
-    }
-    parsed = Route.model_validate(payload)
-    assert len(parsed.cases) == 2
-    assert parsed.cases[0] == RouteCase(when="score >= 0.8", goto="ship")
-    # `else: <string>` shorthand auto-promotes to RouteElse
-    assert isinstance(parsed.else_, RouteElse)
-    assert parsed.else_.goto == "produce"
+def test_route_destinations_and_static_fallback():
+    graph = Graph(nodes=[
+        {"id": "build", "eval": {"llm": {"text": "judge"}}, "route": [
+            {"when": "eval.score < 1", "then": "retry", "max_attempts": 3},
+            {"when": "eval.score < 1", "then": ["review", "log"], "context": "all"},
+        ]},
+        {"id": "ship", "depends_on": ["build"]}, {"id": "review"}, {"id": "log"},
+    ])
+    first, second = graph.nodes[0].route
+    assert first.targets == ["retry"]
+    assert first.context == "last"
+    assert second.targets == ["review", "log"]
+    assert graph.nodes[1].depends_on == ["build"]
 
 
-def test_route_parses_from_yaml():
-    src = """
-    cases:
-      - when: "judge['score'] >= 0.8"
-        goto: ship
-    else: produce
-    """
-    parsed = Route.model_validate(yaml.safe_load(src))
-    assert parsed.else_.goto == "produce"
+@pytest.mark.parametrize(("fields", "error"), [
+    ({"id": "fail"}, "reserved node id"),
+    ({"id": "retry"}, "reserved node id"),
+    ({"eval": {"agent": {"text": "review"}}}, "requires a route"),
+    ({"eval": {"llm": {"text": "review"}}}, "requires a route"),
+    ({"eval": {"run": "true", "llm": {"text": "review"}}}, "exactly one"),
+    ({"eval": {"run": "true", "model": "model"}}, "cannot set model"),
+    ({"eval": {"run": "true", "threshold": 1}}, "threshold"),
+    ({"evaluation": {"validator": "true"}}, "evaluation"),
+    ({"route": {"goto": "fail"}}, "valid list"),
+    ({"route": [{"then": "x", "include_eval": True}]}, "include_eval"),
+    ({"route": [{"then": "x", "else": "fail"}]}, "exactly one"),
+    ({"route": [{"else": "fail"}, {"then": "x"}]}, "last"),
+    ({"route": [{"else": "x", "when": "True"}]}, "predicate"),
+    ({"route": [{"then": ["retry", "x"]}]}, "single"),
+    ({"route": [{"then": "retry", "max_attempts": 0}]}, "greater than 0"),
+    ({"route": [{"else": "ghost"}]}, "unknown node ghost"),
+    ({"fan_out": {}, "route": [{"else": "x"}]}, "fan_out.*route"),
+])
+def test_invalid_route(fields, error):
+    with pytest.raises(ValidationError, match=error):
+        Graph(nodes=[{"id": "x", **fields}])
 
 
-def test_route_missing_else_raises():
-    with pytest.raises(ValidationError) as ei:
-        Route.model_validate({"cases": [{"when": "True", "goto": "a"}]})
-    assert "else" in str(ei.value).lower()
-
-
-def test_route_empty_cases_with_else_rejected():
-    """``cases: []`` with an ``else:`` target is now rejected — confusing
-    structure identical to ``goto:`` shorthand. Authors should write
-    ``goto:`` for unconditional dispatch."""
-    with pytest.raises(ValidationError) as ei:
-        Route.model_validate({"cases": [], "else": "always_here"})
-    assert "cases" in str(ei.value).lower()
-
-
-def test_route_populate_by_name():
-    parsed = Route(
-        cases=[RouteCase(when="True", goto="x")],
-        else_=RouteElse(goto="y"),
-    )
-    assert parsed.else_.goto == "y"
-
-
-def _cmd(id: str, **kw):
-    """Stage-5b helper: bare echo node via execute.url."""
-    import shutil
-    return Node(
-        id=id, name=id,
-        run=[shutil.which("echo") or "/bin/echo", id],
-        **kw,
-    )
-
-
-def _route(id: str, cases: list[dict], else_target: str, **kw):
-    """Build a Node with inline Route (no execute body — standalone router)."""
-    return Node(
-        id=id, name=id,
-        route=Route(
-            cases=[RouteCase(**c) for c in cases],
-            else_=RouteElse(goto=else_target),
-        ),
-        **kw,
-    )
-
-
-def test_graph_validator_resolves_real_goto():
-    config = Graph(
-        name="t",
-        nodes=[
-            _cmd("a"),
-            _route("r", [{"when": "True", "goto": "a"}], "__end__", depends_on=["a"]),
-        ],
-    )
-    assert config.nodes[1].route is not None
-    assert config.nodes[1].route.cases[0].goto == "a"
-
-
-def test_graph_validator_rejects_unresolved_goto():
-    with pytest.raises(ValidationError) as ei:
-        Graph(
-            name="t",
-            nodes=[
-                _cmd("a"),
-                _route(
-                    "r",
-                    [{"when": "True", "goto": "nonexistent"}],
-                    "__end__",
-                    depends_on=["a"],
-                ),
-            ],
-        )
-    msg = str(ei.value)
-    assert "nonexistent" in msg
-    assert "r" in msg
-
-
-def test_graph_validator_rejects_unresolved_else():
-    with pytest.raises(ValidationError) as ei:
-        Graph(
-            name="t",
-            nodes=[
-                _cmd("a"),
-                _route(
-                    "r",
-                    [{"when": "True", "goto": "a"}],
-                    "ghost",
-                    depends_on=["a"],
-                ),
-            ],
-        )
-    assert "ghost" in str(ei.value)
-
-
-def test_graph_validator_accepts_end_sentinel():
-    config = Graph(
-        name="t",
-        nodes=[
-            _cmd("a"),
-            _route(
-                "r", [{"when": "True", "goto": "__end__"}], "__end__",
-                depends_on=["a"],
-            ),
-        ],
-    )
-    assert config.nodes[1].route.else_.goto == "__end__"
-
-
-def test_graph_validator_rejects_route_in_depends_on():
-    with pytest.raises(ValidationError) as ei:
-        Graph(
-            name="t",
-            nodes=[
-                _cmd("a"),
-                _route("r", [{"when": "True", "goto": "a"}], "__end__", depends_on=["a"]),
-                _cmd("downstream", depends_on=["r"]),
-            ],
-        )
-    msg = str(ei.value)
-    assert "downstream" in msg
-    assert "route 'r'" in msg
+def test_eval_files_follow_settings_prompts(tmp_path):
+    path = tmp_path / "workflow.yaml"
+    path.write_text("""
+settings: {prompts: reviews}
+nodes:
+  - id: build
+    run: echo test
+    eval: {llm: judge.md, outputs: {schema: result.json}}
+    route: [{else: fail}]
+""")
+    with pytest.raises(ValueError, match="judge.md"):
+        load_workflow(path)
+    (tmp_path / "reviews").mkdir()
+    (tmp_path / "reviews/judge.md").write_text("Judge")
+    with pytest.raises(ValueError, match="result.json"):
+        load_workflow(path)
+    (tmp_path / "result.json").write_text("{}")
+    assert load_workflow(path).nodes[0].eval.outputs.schema_file == "result.json"
