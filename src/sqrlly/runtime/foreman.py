@@ -193,6 +193,8 @@ class ForemanExecutor:
             return ExecutionResult(success=False, error=str(exc), error_kind="infra")
 
     def settle(self, node: Node, settings: Settings, ids: list[str]) -> set[str]:
+        if node.effective_worktree(settings) == "off":
+            return set()
         keys = [self._key(node_id) for node_id in ids]
         trees = [(key, self._tree(key)) for key in keys if self._tree(key).exists()]
         for key, tree in trees:
