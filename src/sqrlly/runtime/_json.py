@@ -52,7 +52,7 @@ class _JsonObject(dict):
 
 def bind_json(value):
     if isinstance(value, dict):
-        return _JsonObject((key, bind_json(item)) for key, item in value.items())
+        return _JsonObject((key, bind_json(item)) for key, item in dict.items(value))
     if isinstance(value, list):
         return [bind_json(item) for item in value]
     return value

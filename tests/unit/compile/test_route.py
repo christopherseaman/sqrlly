@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-
+from simpleeval import FeatureNotAvailable
 
 from sqrlly.compile.route import (
     build_route_namespace,
@@ -104,3 +104,37 @@ def test_evaluate_case_blocks_dunder_import():
 def test_evaluate_case_unknown_name_raises():
     with pytest.raises(Exception):
         evaluate_case("ghost_var > 0", {})
+
+@pytest.mark.parametrize("name", ["plan", "eval"])
+def test_route_reads_nested_json_fields_named_after_dict_methods(name):
+    data = {"items": [{"keys": {"values": [1]}}]}
+    assert evaluate_case(f"{name}.items[0].keys.values == [1]", {name: data})
+
+
+@pytest.mark.parametrize("field", ["_private", "func_code", "format", "__class__"])
+def test_json_fields_preserve_forbidden_attribute_checks(field):
+    with pytest.raises(FeatureNotAvailable):
+        evaluate_case(f"plan.{field}", {"plan": {field: 1}})
+
+
+def test_route_reads_evaluation_fields_through_cli(tmp_path):
+    from click.testing import CliRunner
+    from sqrlly.cli.main import cli
+
+    workflow = tmp_path / "workflow.yaml"
+    workflow.write_text("""
+nodes:
+  - id: review
+    run: [echo, finished]
+    eval: {run: [echo, '{"items":[{"keys":{"values":[1]}}]}']}
+  - id: decide
+    depends_on: [review]
+    run: [echo, decide]
+    route:
+      - {when: 'evals.review.items[0].keys.values == [1]', then: accepted}
+      - {else: fail}
+  - {id: accepted, run: [touch, accepted]}
+""")
+    result = CliRunner().invoke(cli, ["run", str(workflow), "--workdir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "accepted").is_file()
