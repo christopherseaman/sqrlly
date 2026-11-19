@@ -113,6 +113,11 @@ nodes:
   - {id: complete, depends_on: [check, review]}
 ```
 
+A child template reads caller inputs through `{{workflow_inputs.source}}` or the short form `{{source}}`.
+The qualified form lets `sqrlly validate child.yaml` check the child independently.
+Validating the parent also checks literal input keys against its `workflow.with` mapping.
+At the top level, `workflow_inputs` is an empty mapping. An ancestor named `workflow_inputs` binds its output under that name.
+
 A node with only an id and dependencies joins its predecessors without launching a process.
 
 ## Eval

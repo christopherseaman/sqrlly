@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 _TEMPLATE = Environment()
 _BUILTINS = {
-    "workflow_dir", "_deps", "_dep_worktrees", "evals", "sender_id", "sender",
+    "workflow_inputs", "workflow_dir", "_deps", "_dep_worktrees", "evals", "sender_id", "sender",
     "sender_structured", "sender_worktree", "_retry_reason", "_route_eval_preamble",
     "_output_retry_reason",
 }
@@ -69,65 +69,72 @@ def _templates(step, graph):
         yield from (v for v in workflow.inputs.values() if isinstance(v, str))
 
 
-def validate_references(graph: Graph, inputs: frozenset[str]) -> None:
+def validate_references(graph: Graph, inputs: frozenset[str] | None) -> None:
+    input_names = inputs or frozenset()
     by_id = {node.id: node for node in graph.nodes}
     for node in graph.nodes:
         upstream = set(node._ancestors)
-        allowed = _BUILTINS | inputs | {
+        allowed = _BUILTINS | input_names | {
             f"{dep}_{suffix}" for dep in upstream
             for suffix in ("structured", "worktree", "branches", "branch_worktrees", "branch_map")
         }
 
-        def check(name, scope, *, field=False, whole=False):
+        def check(name, scope, node_ids, *, field=False, whole=False):
             if name not in scope:
                 raise ValueError(f"{node.id}: {name} is not an ancestor or available input")
-            source = by_id.get(name)
+            source = by_id[name] if name in node_ids else None
             if source and not (source.outputs and source.outputs.schema_file):
                 if field:
                     raise ValueError(f"{node.id}: {name} field access requires outputs.schema")
                 if whole and source.kind in ("agent", "llm"):
                     raise ValueError(f"{node.id}: comparing {name} text requires outputs.schema")
 
-        def check_template(template, scope, item_fields):
+        def check_template(template, scope, node_ids, item_fields):
             tree = _TEMPLATE.parse(template)
             free = meta.find_undeclared_variables(tree)
             local = scope | (free - by_id.keys() if item_fields else set())
             for name in sorted(free):
-                check(name, local)
+                check(name, local, node_ids)
             for get in tree.find_all((nodes.Getattr, nodes.Getitem)):
                 if isinstance(get.node, nodes.Name) and get.node.name in free:
-                    check(get.node.name, local, field=True)
+                    if get.node.name == "workflow_inputs" and get.node.name not in node_ids and inputs is not None:
+                        key = get.attr if isinstance(get, nodes.Getattr) else (
+                            get.arg.value if isinstance(get.arg, nodes.Const) else None)
+                        if key is not None and key not in inputs:
+                            raise ValueError(f"{node.id}: workflow.with does not supply {key!r}")
+                    check(get.node.name, local, node_ids, field=True)
 
-        def check_step(step, scope, *, item_fields=False):
+        def check_step(step, node_ids, *, extras=(), item_fields=False):
+            scope = allowed | node_ids | set(extras)
             for template in _templates(step, graph):
-                check_template(template, scope, item_fields)
+                check_template(template, scope, node_ids, item_fields)
             own_output = {node.id} if step is node else set()
             eval_scope = scope | own_output | {"output", "node_output", "node_id", "attempt"}
             if step.eval:
                 for template in _templates(step.eval, graph):
-                    check_template(template, eval_scope, item_fields)
+                    check_template(template, eval_scope, node_ids | own_output, item_fields)
             for case in step.route or []:
                 if case.context not in {"none", "all", "last"}:
-                    check_template(case.context, eval_scope | {"history", "eval"}, item_fields)
+                    check_template(case.context, eval_scope | {"history", "eval"}, node_ids | own_output, item_fields)
                 if not case.when:
                     continue
                 tree = ast.parse(case.when, mode="eval")
-                route_scope = inputs | upstream | own_output | _ROUTE_NAMES
+                route_scope = input_names | upstream | own_output | _ROUTE_NAMES
                 for expr in ast.walk(tree):
                     if isinstance(expr, ast.Name):
-                        check(expr.id, route_scope)
+                        check(expr.id, route_scope, upstream | own_output)
                     if isinstance(expr, (ast.Attribute, ast.Subscript)) and isinstance(expr.value, ast.Name):
-                        check(expr.value.id, route_scope, field=True)
+                        check(expr.value.id, route_scope, upstream | own_output, field=True)
                     if isinstance(expr, ast.Compare):
                         for operand in (expr.left, *expr.comparators):
                             if isinstance(operand, ast.Name):
-                                check(operand.id, route_scope, whole=True)
+                                check(operand.id, route_scope, upstream | own_output, whole=True)
 
-        check_step(node, allowed | upstream)
+        check_step(node, upstream)
         if node.fan_out:
-            branch_scope = allowed | upstream | {node.id}
+            branch_scope = upstream | {node.id}
             if node.fan_out.template:
                 check_step(node.fan_out.template, branch_scope, item_fields=True)
             for final in node.fan_out.final_nodes:
                 suffixes = ("branches", "branch_worktrees", "branch_map")
-                check_step(final, branch_scope | {f"{node.id}_{suffix}" for suffix in suffixes})
+                check_step(final, branch_scope, extras={f"{node.id}_{suffix}" for suffix in suffixes})

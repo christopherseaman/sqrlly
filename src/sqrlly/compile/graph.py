@@ -320,7 +320,8 @@ def build_workflow_graph(
             # Cycle detection happens once at top-level — nested calls
             # see _depth>0 so they skip this and rely on the depth cap.
             if _depth == 0:
-                detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings)
+                detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings,
+                                    inputs=frozenset(node.workflow.inputs))
     # ----- Node registration -----
 
     # compile_fn is shared by recursive subgraph machinery and per-child

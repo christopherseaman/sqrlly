@@ -165,3 +165,41 @@ def test_eval_can_read_current_output_and_load_local_schema(tmp_path):
     node = load_workflow(path).nodes[0]
     assert node.eval.outputs.schema_document == node.outputs.schema_document
     assert "$defs" in node.eval.outputs.schema_document
+
+
+async def test_child_input_namespace_standalone_and_called(tmp_path):
+    params = {"source": "written", "items": ["one", "two"], "workflow_inputs": "same name"}
+    child = tmp_path / "child.yaml"
+    child.write_text(yaml.safe_dump({"nodes": [{
+        "id": "consume", "run": ["echo", "{{workflow_inputs.source}}",
+                                "{{workflow_inputs.items | join(',')}}",
+                                "{{workflow_inputs['workflow_inputs']}}"],
+    }]}))
+    assert CliRunner().invoke(cli, ["validate", str(child)]).exit_code == 0
+    path = workflow(tmp_path, [{"id": "child", "workflow": {"file": "child.yaml", "with": params}}])
+    config = load_workflow(path)
+    executor = DispatchExecutor(str(tmp_path), config.settings)
+    result = await build_workflow_graph(config, executor).ainvoke({"workdir": str(tmp_path)})
+    assert result["node_outputs"]["child"] == "written one,two same name\n"
+
+    child.write_text(child.read_text().replace("workflow_inputs.source", "workflow_inputs.missing"))
+    validation = CliRunner().invoke(cli, ["validate", str(path)])
+    assert validation.exit_code == 1
+    assert "workflow.with does not supply 'missing'" in validation.output
+    child.write_text(child.read_text().replace("workflow_inputs.missing", "typo"))
+    validation = CliRunner().invoke(cli, ["validate", str(child)])
+    assert validation.exit_code == 1
+    assert "typo is not an ancestor" in validation.output
+
+
+async def test_ancestor_output_named_workflow_inputs_wins(tmp_path):
+    (tmp_path / "schema.json").write_text('{"type":"object"}')
+    path = workflow(tmp_path, [
+        {"id": "workflow_inputs", "run": ["echo", '{"source":"ancestor"}'], "outputs": {"schema": "schema.json"}},
+        {"id": "consumer", "depends_on": ["workflow_inputs"], "run": ["echo", "{{workflow_inputs.source}}"]},
+    ])
+    cfg = load_workflow(path)
+    result = await build_workflow_graph(cfg, DispatchExecutor(str(tmp_path), cfg.settings)).ainvoke(
+        {"workdir": str(tmp_path)}
+    )
+    assert result["node_outputs"]["consumer"] == "ancestor\n"

@@ -113,6 +113,7 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     # alongside their own dep outputs. Top-level graphs have no inputs.
     inputs = state.get("node_inputs", {}) or {}
     context.update(inputs)
+    context["workflow_inputs"] = bind_json(inputs)
     for dep in node._ancestors or node.depends_on:
         if dep in outputs:
             context[dep] = bind_output(state, dep)

@@ -109,15 +109,15 @@ class TestBuildContext:
     def test_no_matching_deps(self):
         node = _phase(depends_on=["b"])
         state = {"node_outputs": {"a": "out-a"}}
-        assert build_context(node, state) == {"evals": {}}
+        assert build_context(node, state) == {"evals": {}, "workflow_inputs": {}}
 
     def test_empty_deps(self):
-        assert build_context(_phase(), {"node_outputs": {"a": "x"}}) == {"evals": {}}
+        assert build_context(_phase(), {"node_outputs": {"a": "x"}}) == {"evals": {}, "workflow_inputs": {}}
 
     def test_output_only_no_structured(self):
         node = _phase(depends_on=["a"])
         state = {"node_outputs": {"a": "text"}}
-        assert build_context(node, state) == {"a": "text", "evals": {}}
+        assert build_context(node, state) == {"a": "text", "evals": {}, "workflow_inputs": {}}
 
     def test_projects_dep_worktree_path(self):
         """`{{dep_worktree}}` is populated from state.node_worktrees."""
