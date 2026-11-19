@@ -1,151 +1,96 @@
-name: "Absurd Academic Paper"
-version: "0.1.0"
-
+name: Absurd Academic Paper
 nodes:
   - id: seed_inspiration
-    name: "Gather Topic Inspirations"
-    # First node runs under the `uv_script` command preset — so a missing
-    # `uv` fails fast here (before any LLM call) with a clear error,
-    # instead of surfacing only at the PDF-render step at the end.
-    execute:
-      url: "examples/absurd-paper/scripts/pick_topic.py"
-      params:
-        preset: uv_script
+    name: Gather Topic Inspirations
+    run: [uv, run, --script, '{{workflow_dir}}/scripts/pick_topic.py']
 
   - id: choose_topic
-    name: "Synthesize Absurd Research Domain"
+    name: Synthesize Absurd Research Domain
     depends_on: [seed_inspiration]
-    # LLM gate checks the synthesized topic against the journal's
-    # deadpan-absurd brief. Multi-dim scoring rejects tech-industry
-    # drift (absurdity) and vague fields (specificity); the feedback
-    # string flows into {{_retry_reason}} for the retry attempt.
     evaluation:
-      validator: "examples/absurd-paper/gates/choose_topic_eval.md"
+      validator: gates/choose_topic_eval.md
       blocking: true
       max_retries: 2
       dimensions:
-        - {field: absurdity, min: 0.7}
-        - {field: specificity, min: 0.7}
-        - {field: methodological_hook, min: 0.6}
+      - field: absurdity
+        min: 0.7
+      - field: specificity
+        min: 0.7
+      - field: methodological_hook
+        min: 0.6
+    llm: choose_topic.md
 
-    execute:
-      url: "examples/absurd-paper/prompts/choose_topic.md"
   - id: abstract
-    name: "Write Abstract"
+    name: Write Abstract
     depends_on: [choose_topic]
     evaluation:
-      validator: "examples/absurd-paper/gates/abstract_multi_dim.md"
+      validator: gates/abstract_multi_dim.md
       blocking: false
       max_retries: 1
       dimensions:
-        - {field: rigor, min: 0.7}
-        - {field: humor, min: 0.6}
-        - {field: buzzwords, min: 0.5}
+      - field: rigor
+        min: 0.7
+      - field: humor
+        min: 0.6
+      - field: buzzwords
+        min: 0.5
+    llm: abstract.md
 
-    execute:
-      url: "examples/absurd-paper/prompts/abstract.md"
   - id: outline
-    name: "Section Outline"
+    name: Section Outline
     depends_on: [abstract]
     evaluation:
-      validator: "examples/absurd-paper/gates/outline_json.py"
+      validator: gates/outline_json.py
       threshold: 1.0
       blocking: true
+    llm: outline.md
 
-  # Natural topology: each body node reads abstract + outline directly;
-  # reconcile reads all four sections + abstract. This was BROKEN before
-  # the Stage 1 wait-check fix landed (reconcile fired prematurely when
-  # abstract's gate routed to it). With that fix in place, the multi-pred
-  # join is honored and this shape runs cleanly.
-    execute:
-      url: "examples/absurd-paper/prompts/outline.md"
   - id: intro
-    name: "Introduction"
+    name: Introduction
     depends_on: [abstract, outline]
-    execute:
-      url: "examples/absurd-paper/prompts/intro.md"
+    llm: intro.md
 
   - id: methods
-    name: "Methods"
+    name: Methods
     depends_on: [abstract, outline]
-    execute:
-      url: "examples/absurd-paper/prompts/methods.md"
+    llm: methods.md
 
   - id: results
-    name: "Results"
+    name: Results
     depends_on: [abstract, outline]
-    execute:
-      url: "examples/absurd-paper/prompts/results.md"
+    llm: results.md
 
   - id: discussion
-    name: "Discussion"
+    name: Discussion
     depends_on: [abstract, outline]
-    execute:
-      url: "examples/absurd-paper/prompts/discussion.md"
+    llm: discussion.md
 
-  # Stage 4c recursive subgraph carve: reconcile + persist + structural
-  # check are now a multi-step subgraph runnable standalone. Inputs:
-  # project the five body-section outputs into the subgraph's
-  # `node_inputs` channel so the subgraph never sees the parent's full
-  # state. The subgraph's terminal output (submission_check) surfaces
-  # at `node_outputs["paper"]` here.
   - id: paper
-    name: "Compose & Validate Paper"
+    name: Compose & Validate Paper
     depends_on: [abstract, intro, methods, results, discussion]
-    execute:
-      url: "examples/absurd-paper/subgraphs/compose_and_validate.yaml"
-      params:
-        inputs:
-          abstract: "{{abstract}}"
-          intro: "{{intro}}"
-          methods: "{{methods}}"
-          results: "{{results}}"
-          discussion: "{{discussion}}"
+    workflow:
+      file: subgraphs/compose_and_validate.yaml
+      with:
+        abstract: '{{abstract}}'
+        intro: '{{intro}}'
+        methods: '{{methods}}'
+        results: '{{results}}'
+        discussion: '{{discussion}}'
 
-  # Deterministic PDF render via `uv run --script` + PEP 723 inline
-  # dependencies (markdown + weasyprint). No project-wide install — uv
-  # resolves deps on first invocation and caches them. Journal-ish CSS
-  # (2-column serif, small-caps section headers, page numbers). The
-  # `uv_script` command preset runs the script under PATH-resolved `uv`
-  # (no hardcoded interpreter path). This is the final node — the demo
-  # ends on the rendered PDF.
   - id: render_pdf
-    name: "Render Paper to PDF"
+    name: Render Paper to PDF
     depends_on: [paper]
     output_contract:
-      base_directory: "output"
-      required_files: ["paper.pdf"]
-    execute:
-      url: "examples/absurd-paper/scripts/render_pdf.py"
-      params:
-        preset: uv_script
-        args:
-          - "output/paper.md"
-          - "output/paper.pdf"
+      base_directory: output
+      required_files:
+      - paper.pdf
+    run: [uv, run, --script, '{{workflow_dir}}/scripts/render_pdf.py', output/paper.md, output/paper.pdf]
 settings:
-  preamble_file: "examples/absurd-paper/preamble.md"
-  # Run every node in the workdir (no per-node git worktrees). The paper
-  # is assembled across nodes via the shared `output/` directory, so the
-  # nodes must agree on one filesystem location — `persist` writes
-  # `output/paper.md`, `render_pdf` reads it, `submission_check` reads
-  # `$WORKDIR/output/paper.md`. This also lets the example run from a
-  # plain (non-git) directory, e.g. a fresh `sqrlly init --example`.
-  worktree: off
+  preamble_file: preamble.md
+  worktree: 'off'
   max_retries: 2
   default_timeout: 180.0
-  retry_backoff: [5.0, 15.0]
+  retry_backoff:
+  - 5.0
+  - 15.0
   max_parallel_jobs: 2
-  presets:
-    default:
-      transport: cli
-      provider: openai
-      model: "gpt-5.6-luna"
-      default: true
-    uv_script:
-      kind: command
-      # Every python script node runs under PATH-resolved `uv` — so the
-      # demo's only executable deps are `uv` (you already have it from
-      # `uv tool install sqrlly`) and `codex`. `--script` resolves any
-      # PEP 723 inline deps on demand (render_pdf.py needs markdown +
-      # weasyprint; the stdlib scripts declare none).
-      command: "uv run --script"

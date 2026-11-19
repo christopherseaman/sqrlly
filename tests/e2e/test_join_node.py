@@ -3,7 +3,7 @@
 Multi-function flow tests:
     - Implicit join: any node with multiple deps auto-syncs (LangGraph default;
       already worked pre-Stage-4b — included as a control)
-    - Explicit join: execute: { type: join } parses, dispatches as no-op,
+    - Explicit join: a node with no kind parses, dispatches as no-op,
       and downstream nodes consume the join's empty output
     - Join with evaluation: a join node can be gated (gate runs against the
       empty join output) — sanity check that downstream eval-node wiring
@@ -51,7 +51,7 @@ class TestImplicitJoin:
 
 
 class TestExplicitJoin:
-    """Stage 5b: execute: { type: join } as authored topology marker."""
+    """A node with no kind as authored topology marker."""
 
     @pytest.mark.asyncio
     async def test_explicit_join_dispatches_as_noop(self, tmp_path):
@@ -61,7 +61,6 @@ class TestExplicitJoin:
             {
                 "id": "checkpoint",
                 "name": "Checkpoint",
-                "execute": {"type": "join"},
                 "depends_on": ["a", "b"],
             },
         ])
@@ -82,7 +81,6 @@ class TestExplicitJoin:
             {
                 "id": "sync",
                 "name": "Sync",
-                "execute": {"type": "join"},
                 "depends_on": ["a", "b"],
             },
             cmd_phase("after", depends_on=["sync"], output="post-sync"),
@@ -108,19 +106,12 @@ class TestExplicitJoin:
             {
                 "id": "sync",
                 "name": "Sync",
-                "execute": {"type": "join"},
                 "depends_on": ["a", "b"],
             },
             {
                 "id": "consumer",
                 "name": "Consumer",
-                "execute": {
-                    "url": _ECHO,
-                    # Templated args — each placeholder must resolve from
-                    # the upstream's node_output. If join doesn't synthesize
-                    # both predecessors into context, one or both renders empty.
-                    "params": {"args": ["-n", "{{a}}|{{b}}"]},
-                },
+                "run": [_ECHO, "-n", "{{a}}|{{b}}"],
                 "depends_on": ["sync", "a", "b"],
             },
         ])
@@ -152,7 +143,6 @@ class TestExplicitJoin:
             {
                 "id": "gated_join",
                 "name": "Gated Join",
-                "execute": {"type": "join"},
                 "depends_on": ["a", "b"],
                 "evaluation": {"validator": str(validator), "threshold": 0.9},
             },

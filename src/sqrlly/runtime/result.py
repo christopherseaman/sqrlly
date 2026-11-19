@@ -31,11 +31,9 @@ class ExecutionResult:
     # ran directly in the workdir. Used to validate output_contract
     # against where the node really wrote its files.
     worktree: str | None = None
-    # The LLM preset name and model that ran this node (prompt nodes
-    # only; None for script/binary). Surfaced into JSONL as a
-    # `node_model` event so logs record which model/preset each node used.
+    # The CLI chooses its own model when the workflow leaves it unset.
     model: str | None = None
-    preset: str | None = None
+    provider: str | None = None
 
 
 class OverloadError(Exception):
@@ -93,7 +91,7 @@ class NodeExecutor(Protocol):
 @runtime_checkable
 class PromptBackend(Protocol):
     async def send_prompt(
-        self, prompt: str, model: str, workdir: str,
+        self, prompt: str, model: str | None, workdir: str,
         timeout: float | None = None,
     ) -> ExecutionResult: ...
 

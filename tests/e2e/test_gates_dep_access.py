@@ -1,6 +1,6 @@
 """Gate-only phase validates upstream content via DEPS_JSON env var.
 
-A gate-only phase (a node with `evaluation:` and no `execute:`) has
+A gate-only phase (a node with `evaluation:` and no node kind) has
 only its own stub output, so validators read upstream node outputs
 from `DEPS_JSON`.
 
@@ -53,16 +53,13 @@ class TestGateOnlyPhaseSeesUpstream:
             {
                 "id": "produce",
                 "name": "Produce",
-                "execute": {
-                    "url": "/usr/bin/echo",
-                    "params": {"args": ["-n", "MARKER:wired-up content here"]},
-                },
+                "run": ["/usr/bin/echo", "-n", "MARKER:wired-up content here"],
             },
             {
                 "id": "check",
                 "name": "Check upstream content",
                 "depends_on": ["produce"],
-                # Gate-only: `evaluation:` but no `execute:`. The gate
+                # Gate-only: `evaluation:` but no node kind. The gate
                 # validator must read upstream via DEPS_JSON.
                 "evaluation": {
                     "validator": str(validator),

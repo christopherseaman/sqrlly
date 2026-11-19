@@ -4,7 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from sqrlly.schema.models import Graph, LlmPreset, Settings
+from sqrlly.schema.models import Graph
 
 # Resolve binaries once at import time.
 _ECHO = shutil.which("echo") or "/bin/echo"
@@ -44,26 +44,10 @@ def init_git_repo(
         subprocess.run(argv, check=True)
 
 
-def single_preset_settings(model: str = "sonnet", **extra_settings) -> Settings:
-    """Settings with one default preset — for tests that wire a single
-    backend through DispatchExecutor(prompt_backends={"default": ...}).
-    """
-    return Settings(
-        presets={
-            "default": LlmPreset(
-                transport="cli", provider="anthropic",
-                model=model, default=True,
-            ),
-        },
-        **extra_settings,
-    )
-
-
 def make_config(nodes, **settings_kwargs) -> Graph:
     """Build a Graph from a node list and optional settings."""
     return Graph(
         name="Test",
-        version="1.0.0",
         nodes=nodes,
         settings=settings_kwargs,
     )
@@ -74,7 +58,7 @@ def cmd_phase(id, name="", output="ok", depends_on=None, **kwargs):
     return {
         "id": id,
         "name": name or id,
-        "execute": {"url": _ECHO, "params": {"args": ["-n", output]}},
+        "run": [_ECHO, "-n", output],
         "depends_on": depends_on or [],
         **kwargs,
     }
@@ -85,7 +69,7 @@ def fail_phase(id, name="", depends_on=None, **kwargs):
     return {
         "id": id,
         "name": name or id,
-        "execute": {"url": _FALSE},
+        "run": [_FALSE],
         "depends_on": depends_on or [],
         **kwargs,
     }

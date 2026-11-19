@@ -1,8 +1,6 @@
 """Every scaffolded example compiles from its own dir; a no-backend one runs."""
 from __future__ import annotations
 
-import os
-from pathlib import Path
 
 import pytest
 
@@ -15,13 +13,8 @@ from sqrlly.compile.graph import build_workflow_graph
 def test_scaffolded_example_validates(name, tmp_path):
     dest = tmp_path / name
     init_example(name, str(dest))
-    cwd = os.getcwd()
-    os.chdir(dest)            # relative URLs resolve against the workdir
-    try:
-        config = load_config("workflow.yaml")
-        build_workflow_graph(config)          # raises on any wiring error
-    finally:
-        os.chdir(cwd)
+    config = load_config(str(dest / "workflow.yaml"))
+    build_workflow_graph(config)
     assert config.name
 
 
@@ -33,13 +26,9 @@ def test_scaffolded_explicit_join_runs(tmp_path):
 
     dest = tmp_path / "ej"
     init_example("explicit_join", str(dest))
-    cwd = os.getcwd()
-    os.chdir(dest)
-    try:
-        config = load_config("workflow.yaml")
-        graph = build_workflow_graph(config, DispatchExecutor(workdir="."))
-        result = asyncio.run(graph.ainvoke(make_initial_state(workdir=".")))
-    finally:
-        os.chdir(cwd)
-    assert "report" in result["completed_nodes"]
+    config = load_config(str(dest / "workflow.yaml"))
+    graph = build_workflow_graph(config, DispatchExecutor(workdir=str(dest)))
+    result = asyncio.run(graph.ainvoke(make_initial_state(workdir=str(dest))))
+    assert set(result["completed_nodes"]) == {"branch_a", "branch_b", "branch_c", "sync", "report"}
+    assert result["node_outputs"]["report"].strip() == "A=A done | B=B done | C=C done"
     assert not result.get("failed_nodes")

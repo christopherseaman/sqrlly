@@ -6,9 +6,8 @@ from typing import Any
 
 from jinja2 import Template
 
-from sqrlly.runtime.executor.preset import resolve_preset_name
 from sqrlly.runtime.result import ExecutionResult, OverloadError, PromptBackend
-from sqrlly.schema.models import LlmPreset, Node, Settings
+from sqrlly.schema.models import Settings
 
 
 # Tier list for OverloadError auto-downgrade. Fixed — the chain mirrors
@@ -16,7 +15,7 @@ from sqrlly.schema.models import LlmPreset, Node, Settings
 MODEL_DOWNGRADE_CHAIN = ["opus", "sonnet", "haiku"]
 
 
-def downgrade_model(current: str, chain: list[str]) -> str | None:
+def downgrade_model(current: str | None, chain: list[str]) -> str | None:
     try:
         idx = chain.index(current)
     except ValueError:
@@ -67,30 +66,22 @@ def prepend_eval_preamble(rendered: str, context: dict[str, Any]) -> str:
 def apply_preamble(
     template: str, *, settings: Settings, base_workdir: str,
 ) -> str:
-    """Prepend ``settings.preamble_file`` if configured.
-
-    Returns the modified template (or the original if no preamble is
-    configured). Raises ``FileNotFoundError`` with the resolved path if
-    the configured preamble file is missing — caller translates to
-    ``ExecutionResult`` once. ``base_workdir`` is the DispatchExecutor's
-    BASE workdir: the preamble lives with the config, never in a
-    per-node worktree. ``settings`` is scope-aware — pass the merged
-    settings so a subgraph's preamble_file is honored for its nodes.
-    """
-    if not settings.preamble_file:
+    """Read the declaring workflow's preamble, using base_workdir for in-memory settings."""
+    preamble_path = settings.preamble_path(Path(base_workdir))
+    if preamble_path is None:
         return template
-    preamble_path = Path(base_workdir) / settings.preamble_file
     return preamble_path.read_text() + "\n\n" + template
 
 
 async def execute_with_downgrade(
     backend: PromptBackend,
     rendered: str,
-    model: str,
+    model: str | None,
     workdir: str,
     timeout: float | None = None,
     *,
     settings: Settings,
+    max_retries: int | None = None,
 ) -> ExecutionResult:
     """Send a pre-rendered prompt with overload→downgrade fallback.
 
@@ -107,6 +98,8 @@ async def execute_with_downgrade(
     such as every Codex model) it consumes one like any other error.
     attempt 0 = first try.
     """
+    if max_retries is None:
+        max_retries = settings.defaults.llm.backend_max_retries
     attempt = 0
     while True:
         current_model = model
@@ -126,7 +119,7 @@ async def execute_with_downgrade(
                     current_model = next_model
             break
         except Exception as e:
-            if attempt >= settings.backend_max_retries:
+            if attempt >= max_retries:
                 # Classified only at exhaustion so the retry loop treats
                 # every error alike. A backend-level (params.timeout)
                 # deadline is a `timeout`, not a generic `backend_error`.
@@ -157,4 +150,5 @@ async def execute_with_downgrade(
         success=True,
         output=result.output,
         structured_output=result.structured_output,
+        model=current_model,
     )

@@ -21,11 +21,8 @@ from sqrlly.runtime.terminal import (
     _display_width,
 )
 from sqrlly.schema.models import (
-    Execute,
-    LlmPreset,
     Graph,
     Node,
-    Settings,
 )
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -44,21 +41,14 @@ def _config(node_specs: list[tuple[str, list[str]]]) -> Graph:
     """Helper: build a Graph from a list of (id, depends_on) tuples."""
     return Graph(
         name="Test",
-        version="0.1.0",
         nodes=[
             Node(
                 id=node_id, name=node_id,
-                execute=Execute(url="t.md"),
+                agent={"text": "test"},
                 depends_on=deps,
             )
             for node_id, deps in node_specs
         ],
-        settings=Settings(presets={
-            "default": LlmPreset(
-                transport="cli", provider="anthropic", model="sonnet",
-                default=True,
-            ),
-        }),
     )
 
 
@@ -149,19 +139,19 @@ class TestLogUpdate:
 class TestWorkflowLifecycle:
     def test_workflow_start_records_started_at(self):
         r = TerminalRenderer(_config([("a", [])]))
-        r.emit({"event": "workflow_start", "workflow": "T", "version": "0.1"})
+        r.emit({"event": "workflow_start", "workflow": "T"})
         assert r._started_at is not None
 
     def test_workflow_end_done(self):
         r = TerminalRenderer(_config([("a", [])]))
-        r.emit({"event": "workflow_start", "workflow": "T", "version": "0.1"})
+        r.emit({"event": "workflow_start", "workflow": "T"})
         r.emit({"event": "workflow_end", "completed": 1, "failed": 0})
         assert r._end_state == "done"
         assert r._ended_at is not None
 
     def test_workflow_end_failed(self):
         r = TerminalRenderer(_config([("a", [])]))
-        r.emit({"event": "workflow_start", "workflow": "T", "version": "0.1"})
+        r.emit({"event": "workflow_start", "workflow": "T"})
         r.emit({"event": "workflow_end", "completed": 0, "failed": 1})
         assert r._end_state == "failed"
 
@@ -171,7 +161,7 @@ class TestRenderingOutput:
         """Non-TTY streams short-circuit rendering; state still updates."""
         stream = StringIO()  # default isatty() returns False
         r = TerminalRenderer(_config([("a", [])]), stream=stream)
-        r.emit({"event": "workflow_start", "workflow": "T", "version": "0.1"})
+        r.emit({"event": "workflow_start", "workflow": "T"})
         r.emit({"event": "node_completed", "node": "a"})
         r.emit({"event": "workflow_end", "completed": 1, "failed": 0})
         r.close()
@@ -183,7 +173,7 @@ class TestRenderingOutput:
     def test_tty_writes_node_id_and_status(self):
         stream = _tty(StringIO())
         r = TerminalRenderer(_config([("alpha", []), ("beta", ["alpha"])]), stream=stream)
-        r.emit({"event": "workflow_start", "workflow": "T", "version": "0.1"})
+        r.emit({"event": "workflow_start", "workflow": "T"})
         r.emit({"event": "node_completed", "node": "alpha"})
         r.emit({"event": "workflow_end", "completed": 1, "failed": 0})
         r.close()
@@ -313,7 +303,7 @@ class TestNarrowTerminal:
         )
         r._term_width = lambda: 24   # simulate a phone-width terminal
         r.emit({"event": "workflow_start",
-                "workflow": "A Rather Long Workflow Name", "version": "0.1"})
+                "workflow": "A Rather Long Workflow Name"})
         for _ in range(3):
             r._render()
         printed = [

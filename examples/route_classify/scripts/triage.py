@@ -6,9 +6,6 @@ one of: spam | urgent | escalate | standard. The downstream route node
 reads this stdout via the namespace binding ``triage`` and dispatches
 with string equality.
 
-Mode selection — the runtime treats this as a script execution because
-the URL ends in `.py`; the interpreter is dispatched via the script
-table in runtime/executor/dispatch.py.
 """
 from __future__ import annotations
 

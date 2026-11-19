@@ -15,7 +15,6 @@ from sqrlly.compile.nodes import _make_execution_node
 from sqrlly.runtime.result import ExecutionResult
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
-    Execute,
     OutputContract,
     Node,
     Evaluation,
@@ -40,7 +39,7 @@ class _SlowExecutor:
 
 def _config_with(node: Node, **settings_kwargs) -> Graph:
     return Graph(
-        name="T", version="1.0",
+        name="T",
         nodes=[node],
         settings=Settings(**settings_kwargs),
     )
@@ -55,7 +54,7 @@ class TestExecutionNodeClosure:
         procedure, not the framework. (Compare: a QA step still runs
         when a reopened bug fix routes back through it.)
         """
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         node = _make_execution_node(node, _config_with(node), MockExecutor())
         state = make_initial_state(completed_nodes={"p1"})
         update = await node(state)
@@ -66,7 +65,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_none_executor_returns_no_executor_update(self):
         """CLI fallback when no git repo available: executor=None → graceful completion."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         node = _make_execution_node(node, _config_with(node), executor=None)
         update = await node(make_initial_state())
         assert update["completed_nodes"] == {"p1"}
@@ -77,7 +76,7 @@ class TestExecutionNodeClosure:
         """Gated node without executor: node node emits node_outputs but does
         NOT write completed_nodes — the downstream Evaluation node handles that."""
         node = Node(
-            id="p1", name="P1", execute=Execute(url="t.md"),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(validator="v.py", threshold=0.8),
         )
         node = _make_execution_node(node, _config_with(node), executor=None)
@@ -88,7 +87,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_retry_delay_is_awaited(self):
         """retry_count > 0 with nonzero backoff → closure sleeps before executing."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         node = _make_execution_node(
             node, _config_with(node, retry_backoff=[0.05]), MockExecutor(),
         )
@@ -101,7 +100,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_no_retry_no_delay(self):
         """retry_count == 0 → no sleep, even if backoff configured."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         node = _make_execution_node(
             node, _config_with(node, retry_backoff=[5.0]), MockExecutor(),
         )
@@ -113,7 +112,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_execution_failure_returns_failure_update(self):
         """Executor returns success=False → failed_nodes + error in update."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         executor = MockExecutor(
             results={"p1": ExecutionResult(success=False, error="boom")},
         )
@@ -125,7 +124,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_execution_timeout_returns_failure(self):
         """Slow executor + tight timeout → failed_nodes with timeout message."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"), timeout=0.01)
+        node = Node(id="p1", name="P1", agent={"text": "test"}, timeout=0.01)
         node = _make_execution_node(node, _config_with(node), _SlowExecutor())
         update = await node(make_initial_state())
         assert update["failed_nodes"] == {"p1"}
@@ -135,7 +134,7 @@ class TestExecutionNodeClosure:
     async def test_output_contract_violation_hard_fails(self, tmp_path):
         """Successful execution + missing required file → failed_nodes, no retry."""
         node = Node(
-            id="p1", name="P1", execute=Execute(url="t.md"),
+            id="p1", name="P1", agent={"text": "test"},
             output_contract=OutputContract(
                 base_directory="out", required_files=["expected.md"],
             ),
@@ -151,7 +150,7 @@ class TestExecutionNodeClosure:
     async def test_output_contract_satisfied_allows_success(self, tmp_path):
         """Required file present post-execution → completion proceeds."""
         node = Node(
-            id="p1", name="P1", execute=Execute(url="t.md"),
+            id="p1", name="P1", agent={"text": "test"},
             output_contract=OutputContract(
                 base_directory="out", required_files=["expected.md"],
             ),
@@ -166,7 +165,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_success_no_gate_writes_completed(self):
         """Happy path without gate → completed_nodes + node_outputs."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         node = _make_execution_node(node, _config_with(node), MockExecutor())
         update = await node(make_initial_state())
         assert update["completed_nodes"] == {"p1"}
@@ -177,7 +176,7 @@ class TestExecutionNodeClosure:
         """Gated node: execution writes node_outputs; Evaluation node writes
         completed_nodes / retries / failed_nodes separately."""
         node = Node(
-            id="p1", name="P1", execute=Execute(url="t.md"),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(validator="v.py", threshold=0.8),
         )
         node = _make_execution_node(node, _config_with(node), MockExecutor())
@@ -191,7 +190,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_resume_skip_freezes_body(self):
         """A node id in _resume_skip is frozen: body does not run, no update."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         ex = MockExecutor()
         nf = _make_execution_node(node, _config_with(node), ex)
         update = await nf(make_initial_state(_resume_skip={"p1"}))
@@ -201,7 +200,7 @@ class TestExecutionNodeClosure:
     @pytest.mark.asyncio
     async def test_resume_skip_other_node_still_runs(self):
         """A skip-set that doesn't name this node leaves it running."""
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         ex = MockExecutor()
         nf = _make_execution_node(node, _config_with(node), ex)
         update = await nf(make_initial_state(_resume_skip={"other"}))

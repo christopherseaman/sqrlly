@@ -19,7 +19,7 @@ def _conditional_edges(graph):
 class TestSingleNodeGraph:
     def test_single_prompt_node(self):
         config = make_config(
-            [{"id": "p1", "name": "P1", "execute": {"url": "t.md"}}]
+            [{"id": "p1", "name": "P1", "agent": {"text": "test"}}]
         )
         graph = build_workflow_graph(config)
         assert "p1" in graph.get_graph().nodes
@@ -31,10 +31,7 @@ class TestSingleNodeGraph:
                 {
                     "id": "c1",
                     "name": "C1",
-                    "execute": {
-                        "url": "/usr/bin/echo",
-                        "params": {"args": ["hello"]},
-                    },
+                    "run": ["/usr/bin/echo", "hello"],
                 }
             ]
         )
@@ -81,9 +78,9 @@ class TestLinearChain:
     def test_three_phase_chain(self):
         config = make_config(
             [
-                {"id": "a", "name": "A", "execute": {"url": "a.md"}},
-                {"id": "b", "name": "B", "execute": {"url": "b.md"}, "depends_on": ["a"]},
-                {"id": "c", "name": "C", "execute": {"url": "c.md"}, "depends_on": ["b"]},
+                {"id": "a", "name": "A", "agent": {"text": "test"}},
+                {"id": "b", "name": "B", "agent": {"text": "test"}, "depends_on": ["a"]},
+                {"id": "c", "name": "C", "agent": {"text": "test"}, "depends_on": ["b"]},
             ]
         )
         graph = build_workflow_graph(config)
@@ -112,8 +109,8 @@ class TestParallelNodes:
     def test_multiple_roots(self):
         config = make_config(
             [
-                {"id": "a", "name": "A", "execute": {"url": "a.md"}},
-                {"id": "b", "name": "B", "execute": {"url": "b.md"}},
+                {"id": "a", "name": "A", "agent": {"text": "test"}},
+                {"id": "b", "name": "B", "agent": {"text": "test"}},
             ]
         )
         graph = build_workflow_graph(config)
@@ -139,7 +136,7 @@ class TestGateRouting:
                 {
                     "id": "p1",
                     "name": "P1",
-                    "execute": {"url": "t.md"},
+                    "agent": {"text": "test"},
                     "evaluation": {"validator": "v.md", "threshold": 0.8},
                 }
             ]
@@ -160,13 +157,13 @@ class TestGateRouting:
                 {
                     "id": "a",
                     "name": "A",
-                    "execute": {"url": "a.md"},
+                    "agent": {"text": "test"},
                     "evaluation": {"validator": "v.md", "threshold": 0.8},
                 },
                 {
                     "id": "b",
                     "name": "B",
-                    "execute": {"url": "b.md"},
+                    "agent": {"text": "test"},
                     "depends_on": ["a"],
                 },
             ]
@@ -193,11 +190,11 @@ class TestGateRouting:
                 {
                     "id": "a",
                     "name": "A",
-                    "execute": {"url": "a.md"},
+                    "agent": {"text": "test"},
                     "evaluation": {"validator": "v.md", "threshold": 0.8},
                 },
-                {"id": "b", "name": "B", "execute": {"url": "b.md"}, "depends_on": ["a"]},
-                {"id": "c", "name": "C", "execute": {"url": "c.md"}, "depends_on": ["a"]},
+                {"id": "b", "name": "B", "agent": {"text": "test"}, "depends_on": ["a"]},
+                {"id": "c", "name": "C", "agent": {"text": "test"}, "depends_on": ["a"]},
             ]
         )
         graph = build_workflow_graph(config)
@@ -224,13 +221,13 @@ class TestInlineRouteShape:
     def test_standalone_inline_route(self):
         """Inline route with no execute body: node IS the dispatcher."""
         config = make_config([
-            {"id": "produce", "name": "P", "execute": {"url": "p.md"}},
+            {"id": "produce", "name": "P", "agent": {"text": "test"}},
             {"id": "dispatch", "name": "D", "depends_on": ["produce"],
              "route": {
                  "cases": [{"when": "True", "goto": "ship"}],
                  "else": "__end__",
              }},
-            {"id": "ship", "name": "S", "execute": {"url": "s.md"}},
+            {"id": "ship", "name": "S", "agent": {"text": "test"}},
         ])
         graph = build_workflow_graph(config)
         nodes = graph.get_graph().nodes
@@ -243,9 +240,9 @@ class TestInlineRouteShape:
     def test_execute_plus_route_creates_synthetic(self):
         """execute + route: _route_<id> synthetic dispatcher fires post-execute."""
         config = make_config([
-            {"id": "classify", "name": "C", "execute": {"url": "c.md"},
+            {"id": "classify", "name": "C", "agent": {"text": "test"},
              "route": {"goto": "ship"}},
-            {"id": "ship", "name": "S", "execute": {"url": "s.md"}},
+            {"id": "ship", "name": "S", "agent": {"text": "test"}},
         ])
         graph = build_workflow_graph(config)
         nodes = graph.get_graph().nodes
@@ -261,10 +258,10 @@ class TestInlineRouteShape:
         emits Command(goto=_route_<id>) on pass. No _decide_<id> node."""
         config = make_config([
             {"id": "classify", "name": "C",
-             "execute": {"url": "c.md"},
+             "agent": {"text": "test"},
              "evaluation": {"validator": "v.py", "threshold": 0.8},
              "route": {"goto": "ship"}},
-            {"id": "ship", "name": "S", "execute": {"url": "s.md"}},
+            {"id": "ship", "name": "S", "agent": {"text": "test"}},
         ])
         graph = build_workflow_graph(config)
         nodes = graph.get_graph().nodes
@@ -283,10 +280,10 @@ class TestInlineRouteShape:
         """`route: { goto: [a, b] }` produces Command(goto=[a,b]); the
         source node must NOT get a static node→END edge."""
         config = make_config([
-            {"id": "src", "name": "S", "execute": {"url": "s.md"},
+            {"id": "src", "name": "S", "agent": {"text": "test"},
              "route": {"goto": ["a", "b"]}},
-            {"id": "a", "name": "A", "execute": {"url": "a.md"}},
-            {"id": "b", "name": "B", "execute": {"url": "b.md"}},
+            {"id": "a", "name": "A", "agent": {"text": "test"}},
+            {"id": "b", "name": "B", "agent": {"text": "test"}},
         ])
         graph = build_workflow_graph(config)
         edges = _edges(graph)
@@ -303,9 +300,9 @@ class TestInlineRouteShape:
         START → fallback edge — they're meant to be reached only via
         Command(goto=...) from the route."""
         config = make_config([
-            {"id": "src", "name": "S", "execute": {"url": "s.md"},
+            {"id": "src", "name": "S", "agent": {"text": "test"},
              "route": {"goto": "tgt"}},
-            {"id": "tgt", "name": "T", "execute": {"url": "t.md"}},
+            {"id": "tgt", "name": "T", "agent": {"text": "test"}},
         ])
         graph = build_workflow_graph(config)
         edges = _edges(graph)
@@ -317,7 +314,7 @@ class TestInlineRouteShape:
 class TestEvaluationNodeShape:
     def test_ungated_phase_no_eval_node(self):
         config = make_config(
-            [{"id": "p1", "name": "P1", "execute": {"url": "t.md"}}]
+            [{"id": "p1", "name": "P1", "agent": {"text": "test"}}]
         )
         graph = build_workflow_graph(config)
         nodes = graph.get_graph().nodes
@@ -327,22 +324,19 @@ class TestEvaluationNodeShape:
 
 class TestDynamicGraphShape:
     def _dynamic_phase(self, template_evaluation=None):
-        template = {"execute": {"url": "template.md"}}
+        template = {"agent": {"text": "test"}}
         if template_evaluation is not None:
             template["evaluation"] = template_evaluation
         dsc = {
             "template": template,
             "final_nodes": [
-                {"id": "f0", "name": "F0", "execute": {"url": "f0.md"}},
+                {"id": "f0", "name": "F0", "agent": {"text": "test"}},
             ],
         }
         return {
             "id": "p",
             "name": "P",
-            "execute": {
-                "url": "/usr/bin/echo",
-                "params": {"args": ["manifest"]},
-            },
+            "run": ["/usr/bin/echo", "manifest"],
             "fan_out": dsc,
         }
 
@@ -381,15 +375,12 @@ class TestDynamicGraphShape:
         return {
             "id": "p",
             "name": "P",
-            "execute": {
-                "url": "/usr/bin/echo",
-                "params": {"args": ["manifest"]},
-            },
+            "run": ["/usr/bin/echo", "manifest"],
             "evaluation": {"validator": "v.md", "threshold": 0.8},
             "fan_out": {
-                "template": {"execute": {"url": "template.md"}},
+                "template": {"agent": {"text": "test"}},
                 "final_nodes": [
-                    {"id": "f0", "name": "F0", "execute": {"url": "f0.md"}},
+                    {"id": "f0", "name": "F0", "agent": {"text": "test"}},
                 ],
             },
         }
@@ -416,7 +407,7 @@ class TestCycleDetection:
                     {
                         "id": "a",
                         "name": "A",
-                        "execute": {"url": "a.md"},
+                        "agent": {"text": "test"},
                         "depends_on": ["a"],
                     }
                 ]
@@ -426,8 +417,8 @@ class TestCycleDetection:
         with pytest.raises(ValueError, match="[Cc]ircular"):
             config = make_config(
                 [
-                    {"id": "a", "name": "A", "execute": {"url": "a.md"}, "depends_on": ["b"]},
-                    {"id": "b", "name": "B", "execute": {"url": "b.md"}, "depends_on": ["a"]},
+                    {"id": "a", "name": "A", "agent": {"text": "test"}, "depends_on": ["b"]},
+                    {"id": "b", "name": "B", "agent": {"text": "test"}, "depends_on": ["a"]},
                 ]
             )
             build_workflow_graph(config)
@@ -436,9 +427,9 @@ class TestCycleDetection:
         with pytest.raises(ValueError, match="[Cc]ircular"):
             config = make_config(
                 [
-                    {"id": "a", "name": "A", "execute": {"url": "a.md"}, "depends_on": ["c"]},
-                    {"id": "b", "name": "B", "execute": {"url": "b.md"}, "depends_on": ["a"]},
-                    {"id": "c", "name": "C", "execute": {"url": "c.md"}, "depends_on": ["b"]},
+                    {"id": "a", "name": "A", "agent": {"text": "test"}, "depends_on": ["c"]},
+                    {"id": "b", "name": "B", "agent": {"text": "test"}, "depends_on": ["a"]},
+                    {"id": "c", "name": "C", "agent": {"text": "test"}, "depends_on": ["b"]},
                 ]
             )
             build_workflow_graph(config)

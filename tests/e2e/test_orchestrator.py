@@ -12,7 +12,7 @@ import pytest
 from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
-from sqrlly.schema.models import Execute, Node
+from sqrlly.schema.models import Node
 
 from helpers import cmd_phase, fail_phase, make_config
 
@@ -395,7 +395,7 @@ class TestDispatchExecutor:
         executor = DispatchExecutor()
         node = Node(
             id="c1", name="C1",
-            execute=Execute(url=_ECHO, params={"args": ["hello"]}),
+            run=[_ECHO, "hello"],
         )
         result = await executor.execute(node, {})
         assert result.success is True
@@ -403,40 +403,30 @@ class TestDispatchExecutor:
 
     @pytest.mark.asyncio
     async def test_gate_only_phase(self):
-        """Gate-only-by-elision: no execute= → executor returns gate-only marker."""
+        """Gate-only-by-elision: a node with no kind returns empty output."""
         executor = DispatchExecutor()
         node = Node(id="g1", name="G1")
         result = await executor.execute(node, {})
         assert result.success is True
-        assert "gate-only" in result.output
+        assert result.output == ""
 
     @pytest.mark.asyncio
     async def test_command_phase_failure(self):
         executor = DispatchExecutor()
         node = Node(
             id="c1", name="C1",
-            execute=Execute(url=_FALSE),
+            run=[_FALSE],
         )
         result = await executor.execute(node, {})
         assert result.success is False
 
     @pytest.mark.asyncio
-    async def test_no_execution_returns_gate_only(self):
-        """Stage 5b: a node with no `execute:` block is gate-only-by-elision."""
-        executor = DispatchExecutor()
-        node = Node(id="p1", name="P1")
+    async def test_missing_prompt_reports_filename(self, tmp_path):
+        executor = DispatchExecutor(workdir=str(tmp_path))
+        node = Node(id="p1", agent="missing.md")
         result = await executor.execute(node, {})
-        assert result.success is True
-        assert "gate-only" in result.output
-
-    @pytest.mark.asyncio
-    async def test_prompt_without_backend_raises(self):
-        """Post-stub-removal: prompt URL with no backend → RuntimeError.
-        The previous behavior (silent fake output) was an antipattern."""
-        executor = DispatchExecutor()
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
-        with pytest.raises(RuntimeError, match="no prompt backend"):
-            await executor.execute(node, {})
+        assert result.success is False
+        assert "missing.md" in result.error
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +502,7 @@ class TestRetryContextInjection:
             {
                 "id": "p1",
                 "name": "P1",
-                "execute": {"url": "t.md"},
+                "agent": "t.md",
                 "evaluation": {
                     "validator": str(validator),
                     "threshold": 1.0,
@@ -557,7 +547,7 @@ class TestRetryContextInjection:
             {
                 "id": "p1",
                 "name": "P1",
-                "execute": {"url": "t.md"},
+                "agent": "t.md",
                 "evaluation": {
                     "validator": str(validator),
                     "threshold": 1.0,
@@ -595,7 +585,7 @@ class TestRetryContextInjection:
             {
                 "id": "p1",
                 "name": "P1",
-                "execute": {"url": "t.md"},
+                "agent": "t.md",
                 "evaluation": {
                     "validator": str(script),
                     "threshold": 0.8,
@@ -628,8 +618,8 @@ class TestContextPropagation:
             "a": ExecutionResult(success=True, output="a-output"),
         })
         config = make_config([
-            {"id": "a", "name": "A", "execute": {"url": "t.md"}},
-            {"id": "b", "name": "B", "execute": {"url": "t.md"}, "depends_on": ["a"]},
+            {"id": "a", "name": "A", "agent": "t.md"},
+            {"id": "b", "name": "B", "agent": "t.md", "depends_on": ["a"]},
         ])
         graph = build_workflow_graph(config, mock)
         result = await graph.ainvoke(make_initial_state())
@@ -650,8 +640,8 @@ class TestContextPropagation:
             ),
         })
         config = make_config([
-            {"id": "a", "name": "A", "execute": {"url": "t.md"}},
-            {"id": "b", "name": "B", "execute": {"url": "t.md"}, "depends_on": ["a"]},
+            {"id": "a", "name": "A", "agent": "t.md"},
+            {"id": "b", "name": "B", "agent": "t.md", "depends_on": ["a"]},
         ])
         graph = build_workflow_graph(config, mock)
         result = await graph.ainvoke(make_initial_state())

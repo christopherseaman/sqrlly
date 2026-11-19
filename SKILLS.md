@@ -18,10 +18,8 @@ Install the CLI: `pipx install sqrlly` (or `uv tool install sqrlly`).
 LLM nodes drive a local agent CLI, so the chosen backend must be installed
 and authenticated — auth is per-CLI, not sqrlly's job:
 
-- `transport: cli`, `provider: openai` (scaffolded default) — the
-  authenticated `codex` binary on PATH. No extra Python deps.
-- `transport: cli`, `provider: anthropic` — the authenticated `claude`
-  binary on PATH. No extra Python deps.
+- `provider: openai` uses Codex (default).
+- `provider: anthropic` uses Claude.
 
 Script, binary, and subgraph nodes need no backend.
 
@@ -31,75 +29,45 @@ example on disk (`--list-examples` for the set: `jokes`,
 
 ## Author a workflow
 
-Fastest start: `sqrlly init [dir]` scaffolds a schema-valid
-`workflow.yaml` + `prompts/hello.md` to edit from. To author by hand,
-write a YAML file with `name`, `version`, `nodes`, and `settings`.
+`sqrlly init [dir]` writes a workflow with a single `run` node that prints a greeting.
+Choose a unique id for each node. Add `depends_on` to consume an upstream result.
 
-1. **Each node** needs a unique `id` (use underscores, never hyphens —
-   see Footguns) and a `name`. Add an `execute:` block unless the node
-   is a pure gate or a pure router.
-2. **`execute.url`** points at the resource to run; the file extension
-   selects the handler — `.md` / `.txt` / `.prompt` = LLM prompt,
-   `.py` / `.js` / `.ts` / `.sh` = script, `.yaml` = subgraph, anything
-   else = binary.
-3. **Wire dependencies** with `depends_on: [other_id]`. A prompt
-   template reads an upstream node's output as `{{other_id}}` (full
-   Jinja2 — `{% if %}`, `{% for %}`, filters all work).
-4. **Pick a backend** under `settings.presets` — one named `LlmPreset`
-   marked `default: true`. The default is subprocess-per-call Codex;
-   Claude remains available through `provider: anthropic`.
-   ```yaml
-   settings:
-     presets:
-       default:
-         transport: cli
-         provider: openai      # Codex CLI; anthropic selects Claude
-         model: gpt-5.6-luna
-         default: true
-         # Codex options go in cli_args; Claude-only permission fields
-         # belong on a provider: anthropic preset.
-         cli_args: ["--ephemeral"]      # cli-only escape hatch
-   ```
-   With no global Codex `model_reasoning_effort` override, the installed
-   Codex catalog currently defaults `gpt-5.6-luna` to `medium` effort.
-   sqrlly leaves that choice to Codex; Claude remains available through an
-   explicit `provider: anthropic` preset.
-   `transport` defaults to `cli` and `provider` defaults to `openai`, so a
-   preset needs only `model` for Codex. `provider: anthropic` selects Claude
-   through its CLI.
-   There is no environment auto-detect. A workflow whose nodes are all
-   script / binary / subgraph can omit `settings.presets` (or set it to
-   `{}`); any **LLM (prompt) node** needs at least one preset with
-   `default: true`, or dispatch fails at run time.
+| Kind | Scalar or list | Mapping |
+|---|---|---|
+| `agent` | Prompt filename | Exactly one of `prompt` or `text`, plus optional `model`, `provider`, `tools`, `cli_args`. |
+| `llm` | Prompt filename | Exactly one of `prompt` or `text`, plus optional `model` and `provider`. |
+| `run` | Command string or argv list | `cmd` and optional `env` mapping. |
+| `workflow` | Workflow filename | `file` and optional `with` mapping of child inputs. |
 
-   **Tool use.** Claude CLI presets may use `permission_mode`,
-   `allowed_tools`, and `disallowed_tools` (exact claude tool names).
-   `cli_args` is an escape hatch for extra provider flags. Defaults
-   (all unset): the CLI runs with no extra tool flags.
+Prompt files resolve under `settings.prompts`, defaulting to `prompts/` beside the declaring YAML.
+Child workflow filenames resolve relative to the declaring YAML.
+Use `{text: "Summarize {{draft}}"}` for an inline prompt.
+For `llm`, Claude disables tools and MCP servers. Codex uses a read-only sandbox with the shell and configured MCP servers disabled. Codex 0.170.0 can still expose built-in resource discovery.
+An agent accepts `tools: read`, `edit` (default), or `full`.
+A list of tool names requires `provider: anthropic`.
 
-   **Supervised cooperating agents (managed teams).** sqrlly has no
-   first-class managed-team or oversight-coordinator node. The
-   supervised-cooperating-agent-team behavior is achievable today as
-   an authoring pattern:
+A `run` command starts a process directly. The scalar form uses shell-style quoting to split argv.
+Use the list form for templates or literal shell metacharacters. Each list item becomes one argument.
+Use `{{workflow_dir}}` to locate a script beside the YAML when its working directory differs.
 
-   1. Grant a prompt node's backend the **Task** tool via the
-      preset's `allowed_tools: ["Task", ...]` + a `permission_mode`
-      that permits it (`bypassPermissions` allows all Claude tools).
-   2. Write a coordinator prompt in that single node: "spawn N
-      workers for task X, watch each result, intervene on a
-      diverging/stuck one (re-prompt / kill+retry), synthesize."
-   3. Claude inside that node acts as the supervising team lead — it
-      spawns sub-agent members, sees them report back, intervenes
-      mid-flight, and aggregates.
+```yaml
+nodes:
+  - {id: draft, agent: draft.md}
+  - {id: label, depends_on: [draft], llm: {text: "Label {{draft}}"}}
+  - {id: check, depends_on: [label], run: [python3, "{{workflow_dir}}/check.py", "{{label}}"]}
+  - {id: review, depends_on: [draft], workflow: {file: review.yaml, with: {source: "{{draft}}"}}}
+  - {id: complete, depends_on: [check, review]}
+```
 
-   Caveats: members are sub-agents inside ONE sqrlly node (one
-   worktree, one process) — they do NOT get per-member sqrlly
-   worktree isolation, gates, or `promote`, and the run log /
-   terminal grid see one node, not the sub-agents. A first-class
-   managed-team node earns its weight only if each member must be a
-   real sqrlly node (own worktree/gate/promote) — essentially
-   `fan_out` + a supervisor, a much bigger build.
-5. **Add a gate** to retry a node until its output is good enough:
+A node with only an id and dependencies joins its predecessors without launching a process.
+
+Use `settings.model` for a shared model and `settings.defaults.<kind>` for per-kind options.
+The node can override its kind's defaults. Without a model selection the CLI chooses.
+For a Claude coordinator that spawns workers inside one node, grant its Task tool with
+`agent: {prompt: coordinator.md, provider: anthropic, tools: [Task]}`.
+For per-worker worktrees, gates and logs, use fan-out.
+
+1. **Add a gate** to retry a node until its output is good enough:
    ```yaml
    evaluation:
      validator: gates/check.py   # .py / .js script, or .md LLM prompt
@@ -122,7 +90,7 @@ write a YAML file with `name`, `version`, `nodes`, and `settings`.
    **can't produce a score** (crashes, exits non-zero, or emits no
    parseable score) halts the run loudly — distinct from a valid score
    below threshold.
-6. **Node options** (any node): `timeout: 30` (seconds; the node is
+2. **Node options** (any node): `timeout: 30` (seconds; the node is
    killed and fails if it overruns) and `output_contract:` to assert a
    node wrote files —
    ```yaml
@@ -134,7 +102,7 @@ write a YAML file with `name`, `version`, `nodes`, and `settings`.
    wrote them), so write paths relative to the run, not absolute.
    `required_files` entries are paths or globs (`out_*.md`, `**/*.json`);
    each entry needs at least one match, and a literal path matches itself.
-7. **Branch** with a `route:` block — an unconditional `goto:`, or a
+3. **Branch** with a `route:` block — an unconditional `goto:`, or a
    `cases:` / `else:` ladder of `when:` predicates:
    ```yaml
    route:
@@ -151,24 +119,21 @@ write a YAML file with `name`, `version`, `nodes`, and `settings`.
    dependency id (bound to its output), `state` (the full state dict),
    and `history` / `evals` (evaluation records); plus functions
    `passed(id)`, `score(id)`, and `scores(id)`.
-8. **Parallelize** with a `fan_out:` block — one branch per manifest
+4. **Parallelize** with a `fan_out:` block — one branch per manifest
    item, joined by `final_nodes`:
    ```yaml
    fan_out:
      manifest_path: items.json   # JSON: [{"id": "a", ...}, ...] or {"items": [...]}
      template:
-       execute:
-         url: prompts/item.md     # rendered once per item
+       llm: item.md
        # evaluation: ...          # optional: gate each branch
      final_nodes:                 # inline nodes; run once after all branches join
        - id: summarize
          name: Summarize
-         execute:
-           url: prompts/summarize.md
+         llm: summarize.md
    ```
-   `final_nodes` is a list of **inline node definitions** (each needs
-   `id` / `name` / `execute`; they also accept `evaluation` and
-   `output_contract`), not references to top-level node ids. Each
+   Each inline final node has an id and a kind. Optional fields include
+   `evaluation` and `output_contract`. Each
    manifest item is a JSON **object**; its fields become template
    variables (`{{id}}`, `{{name}}`, …). A bare string item is treated
    as `{"id": "<string>"}`. The manifest may instead be produced at run
@@ -192,20 +157,8 @@ sqrlly validate path/to/workflow.yaml
 sqrlly run path/to/workflow.yaml --log run.jsonl
 ```
 
-`validate` compile-checks the graph (schema + wiring) and reports the
-node count plus advisory warnings. It does **not** check that every
-`execute.url` / `validator` file exists on disk — those surface at run
-time. `run` executes the workflow.
-
-**File resolution / git.** Relative `execute.url` / `validator` paths
-resolve against `--workdir` (default the current directory). When the
-workdir is a git repo, runs execute inside a fresh git worktree of
-`HEAD`, so paths resolve from the **repo root** — **commit your
-workflow and the files it references first**, set `--workdir` to the
-repo root (not a subdirectory), and write urls repo-root-relative
-(`examples/x/prompt.md`). A repo with no commits can't create a
-worktree. Outside a git repo, worktree isolation is off and paths
-resolve directly under `--workdir`.
+`validate` checks graph wiring and local prompt and child workflow paths.
+Run commands start in their node's working directory.
 
 **Controlling worktree isolation.** `worktree` (on `settings` or a
 node) picks the isolation mode: `auto` (default — isolate per node iff
@@ -300,18 +253,8 @@ id (or an unreadable/invalid `manifest_path`) **fails the parent node**
 before dispatch (run reports failure; fix the manifest and bare `--resume`
 re-fans the parent).
 
-**Remote sources.** `settings.base_url` sets the base for relative
-urls — including an `http(s)://` base, which fetches **prompt
-templates** over the network (gated by `allow_remote_urls`,
-`allowed_url_hosts`, `url_headers`, `max_remote_fetch_bytes`). Remote
-**scripts/binaries** are not supported (they fail with a clear error;
-use `file://` paths for those). `url_headers` is keyed by URL
-**prefix** (most-specific first), each mapping to a header dict:
-`{ "https://api.host/": { "Authorization": "Bearer ${TOKEN}" } }`.
-`${VAR}` expands from the process env, then the project-local `.env`.
-
 `run` flags: `--workdir/-w <dir>`, `--dry-run` (trace topology without
-executing), `--preset/-p <name>` (force a named preset as the default),
+executing),
 `--resume` (skip completed nodes, retry failed ones — see Debug),
 `--rerun-all` (full replay of every node), `--resume-from <node>`
 (re-run node + downstream; implies `--resume`),
@@ -350,7 +293,7 @@ wave — are absent from both.
 ## Debug a run
 
 - Read the `--log` JSONL stream — events: `workflow_start`,
-  `node_model` (LLM nodes: the `preset` + `model` that ran the node),
+  `node_model` (LLM nodes: the model that ran the node),
   `node_completed`, `node_failed`, `gate_evaluated`, `node_retried`,
   `workflow_end`. The node id is the `node` field (not `node_id`).
   Subgraph events are prefixed with the parent chain (`parent::child`,
@@ -386,10 +329,9 @@ wave — are absent from both.
   unless its reference node completed cleanly; inner nodes aren't
   individually skippable.
 
-Set `settings.backend_max_retries: N` to absorb transient backend blips (a
+Set `settings.defaults.agent.backend_max_retries` or `settings.defaults.llm.backend_max_retries` to absorb transient backend blips (a
 `claude exited 1`, or an overload once the model-downgrade chain has no lower
-model — at once for Codex models) by retrying the same node dispatch N
-times with `retry_backoff` between attempts — separate from the gate
+model — at once for Codex models) by retrying the same dispatch (default two retries) with `retry_backoff` between attempts — separate from the gate
 `max_retries`. A `.md` LLM gate dispatch gets the same retry and downgrade; if
 it still fails, the node fails with kind `backend_error` / `overload` (no
 score is recorded and the node body is not re-run). On `--resume`, a fan-out whose child failed re-runs ONLY that
@@ -406,8 +348,6 @@ large parallel build that loses one branch resumes cheaply.
   other schema model. Confirm exact field names in `SCHEMA.md`.
 - **Inline-route nodes are DAG leaves** — nothing may `depends_on` a
   node that has a `route:` block.
-- **Exactly one default preset** — if any `LlmPreset` exists in
-  `settings.presets`, exactly one must have `default: true`.
 - **Subgraphs share the schema** — a subgraph `.yaml` is an ordinary
   workflow and must validate standalone.
 - **Fan-out manifests need STABLE item ids for `--resume`** — a manifest
@@ -418,11 +358,7 @@ large parallel build that loses one branch resumes cheaply.
   siblings silently vanish and the failed child is orphaned. A stable-id
   or purely additive re-fan never trips it; `validate`/`run` flag any
   runtime-manifest fan-out with an advisory.
-- **Workflow YAML is trusted input** — `file://` / local paths are NOT
-  confined to the workdir: an absolute (`/etc/…`) or `../`-relative
-  `execute.url` or `validator` reads/runs with the orchestrator
-  process's full filesystem access, and remote schemes are unsupported
-  for scripts/binaries entirely. Don't run workflow files you don't trust.
+- Run trusted workflows only. A command runs with the host user's filesystem permissions.
 - **`prisma generate` in `worktree_setup` needs a matching exclude** —
   a `prisma generate` command without its output path in
   `worktree_setup_exclude` lets the generated client leak into the

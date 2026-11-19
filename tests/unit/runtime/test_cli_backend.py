@@ -63,6 +63,12 @@ class TestCLIBackendArgvAssembly:
         # entire argv set.
         assert result.output == "argv: --model haiku"
 
+    @pytest.mark.asyncio
+    async def test_cli_default_omits_model_argument(self, tmp_path):
+        recorder = _write_fake(tmp_path, "argv", '#!/bin/sh\nprintf "%s" "$#"\n')
+        result = await _backend_for(recorder).send_prompt("hi", None, str(tmp_path))
+        assert result.output == "0"
+
     def test_tool_argv_empty_when_unset(self):
         """No tool config → bare `claude -p --model` (prior behavior)."""
         assert CLIBackend()._tool_argv() == []
@@ -372,23 +378,6 @@ class TestCLIBackendEnv:
         assert result.output == "FOO=bar INHERITED=keepme"
 
 
-class TestLlmPresetEnvWiring:
-    """env field default + factory threading into the CLI backend."""
-
-    def test_build_cli_threads_env(self):
-        from sqrlly.runtime.executor.backends.factory import create_backend_from_preset
-        from sqrlly.schema.models import LlmPreset
-        backend = create_backend_from_preset(LlmPreset(
-            transport="cli", provider="anthropic", model="sonnet", env={"X": "1"},
-        ))
-        assert backend._env == {"X": "1"}
-
-    def test_llm_preset_env_defaults_empty(self):
-        from sqrlly.schema.models import LlmPreset
-        p = LlmPreset(transport="cli", provider="anthropic", model="sonnet")
-        assert p.env == {}
-
-
 class TestCLIBackendRetryViaDispatch:
     """End-to-end: a real CLIBackend (real subprocess) whose `claude` stub
     exits non-zero the first K times then succeeds is retried by the
@@ -430,7 +419,7 @@ class TestCLIBackendRetryViaDispatch:
         backend = CLIBackend(argv_prefix=(str(stub),))
         result = await execute_with_downgrade(
             backend, "prompt body", "sonnet", str(tmp_path), timeout=30.0,
-            settings=Settings(backend_max_retries=3),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 3}}),
         )
         assert result.success is True
         assert result.output == "stub-output"
@@ -447,7 +436,7 @@ class TestCLIBackendRetryViaDispatch:
         backend = CLIBackend(argv_prefix=(str(stub),))
         result = await execute_with_downgrade(
             backend, "prompt body", "sonnet", str(tmp_path), timeout=30.0,
-            settings=Settings(backend_max_retries=0),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 0}}),
         )
         assert result.success is False
         assert "Backend error" in result.error

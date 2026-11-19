@@ -1,18 +1,12 @@
-import shutil
-from pathlib import Path
-
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from sqrlly.schema.models import (
     DimensionCheck,
     Evaluation,
-    Execute,
     FanOut,
     FanOutTemplate,
     Graph,
-    LlmPreset,
     Node,
     OutputContract,
     Route,
@@ -20,106 +14,16 @@ from sqrlly.schema.models import (
     Settings,
 )
 
-ECHO_BIN = shutil.which("echo") or "/bin/echo"
-NODE_BIN = shutil.which("node") or "/usr/bin/node"
-
-
 class TestMinimalWorkflow:
     def test_minimal_config(self, minimal_config_dict):
         config = Graph(**minimal_config_dict)
         assert config.name == "Test Workflow"
-        assert config.version == "1.0.0"
         assert len(config.nodes) == 1
 
-    def test_name_required(self):
-        with pytest.raises(ValidationError):
-            Graph(version="1.0.0", nodes=[])
-
-    def test_version_required(self):
-        with pytest.raises(ValidationError):
-            Graph(name="Test", nodes=[])
-
-    def test_empty_nodes_allowed(self):
-        config = Graph(name="Test", version="1.0.0", nodes=[])
-        assert config.nodes == []
-
-
-class TestExecuteUrl:
-    """Stage 5b: Node.execute is the single execution shape; URL mode."""
-
-    def test_url_mode_basic(self):
-        node = Node(id="p1", name="P1", execute=Execute(url="test.md"))
-        assert node.execute is not None
-        assert node.execute.url == "test.md"
-        assert node.execute.type is None
-        assert node.execute.params == {}
-
-    def test_url_mode_from_dict(self):
-        node = Node(
-            id="p1",
-            name="P1",
-            execute={"url": "test.md"},
-        )
-        assert node.execute is not None
-        assert node.execute.url == "test.md"
-
-    def test_url_mode_with_params(self):
-        node = Node(
-            id="p1",
-            name="P1",
-            execute=Execute(url=ECHO_BIN, params={"args": ["hello"]}),
-        )
-        assert node.execute.url == ECHO_BIN
-        assert node.execute.params == {"args": ["hello"]}
-
-    def test_url_mode_subgraph_with_inputs_outputs(self):
-        node = Node(
-            id="p1",
-            name="P1",
-            execute=Execute(
-                url="sub.yaml",
-                params={
-                    "inputs": {"topic": "{{parent}}"},
-                    "outputs": {"result": "{{terminal}}"},
-                },
-            ),
-        )
-        assert node.execute.url == "sub.yaml"
-        assert node.execute.params["inputs"] == {"topic": "{{parent}}"}
-        assert node.execute.params["outputs"] == {"result": "{{terminal}}"}
-
-    def test_gate_only_by_elision(self):
-        """No execute= means gate-only-by-elision."""
-        node = Node(id="p1", name="P1")
-        assert node.execute is None
-
-
-class TestExecuteJoin:
-    def test_join_mode(self):
-        ex = Execute(type="join")
-        assert ex.type == "join"
-        assert ex.url is None
-        assert ex.params == {}
-
-    def test_join_from_dict(self):
-        node = Node(id="p1", name="P1", execute={"type": "join"})
-        assert node.execute.type == "join"
-
-    def test_join_rejects_params(self):
-        with pytest.raises(ValidationError):
-            Execute(type="join", params={"foo": "bar"})
-
-
-class TestExecuteShapeValidator:
-    """Execute must set exactly one of: url, type=join."""
-
-    def test_no_modes_set_rejected(self):
-        with pytest.raises(ValidationError):
-            Execute()
-
-    def test_url_and_join_rejected(self):
-        with pytest.raises(ValidationError):
-            Execute(url="x.md", type="join")
+    def test_optional_graph_metadata(self):
+        graph = Graph(nodes=[{"id": "a"}])
+        assert graph.name == "workflow"
+        assert graph.nodes[0].name == "a"
 
 
 class TestQualityGate:
@@ -181,7 +85,7 @@ class TestEffectiveMaxRetries:
 
     def test_no_gate_uses_settings(self):
         settings = Settings(max_retries=5)
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent="t.md")
         assert node.effective_max_retries(settings) == 5
 
     def test_gate_with_override(self):
@@ -189,7 +93,7 @@ class TestEffectiveMaxRetries:
         node = Node(
             id="p1",
             name="P1",
-            execute=Execute(url="t.md"),
+            agent="t.md",
             evaluation=Evaluation(validator="v.md", threshold=0.8, max_retries=2),
         )
         assert node.effective_max_retries(settings) == 2
@@ -199,7 +103,7 @@ class TestEffectiveMaxRetries:
         node = Node(
             id="p1",
             name="P1",
-            execute=Execute(url="t.md"),
+            agent="t.md",
             evaluation=Evaluation(validator="v.md", threshold=0.8),
         )
         assert node.effective_max_retries(settings) == 7
@@ -216,174 +120,6 @@ class TestOutputContract:
     def test_empty_required_files(self):
         contract = OutputContract(base_directory="output/", required_files=[])
         assert contract.required_files == []
-
-
-class TestPresetReferenceValidation:
-    """`Graph._validate_preset_refs` catches typos at validate time
-    instead of letting them crash with RuntimeError at first run."""
-
-    def _preset_settings(self):
-        return {
-            "presets": {
-                "default": {
-                    "transport": "cli", "provider": "anthropic",
-                    "model": "sonnet", "default": True,
-                },
-            },
-        }
-
-    def test_valid_preset_reference_validates(self):
-        Graph.model_validate({
-            "name": "T", "version": "1.0",
-            "settings": self._preset_settings(),
-            "nodes": [
-                {
-                    "id": "a", "name": "A",
-                    "execute": {
-                        "url": "t.md",
-                        "params": {"preset": "default"},
-                    },
-                },
-            ],
-        })
-
-    def test_unknown_preset_reference_rejected(self):
-        with pytest.raises(ValidationError, match="not declared in settings.presets"):
-            Graph.model_validate({
-                "name": "T", "version": "1.0",
-                "settings": self._preset_settings(),
-                "nodes": [
-                    {
-                        "id": "a", "name": "A",
-                        "execute": {
-                            "url": "t.md",
-                            "params": {"preset": "typo_name"},
-                        },
-                    },
-                ],
-            })
-
-    def test_preset_reference_with_empty_presets_rejected(self):
-        with pytest.raises(ValidationError, match="settings.presets is empty"):
-            Graph.model_validate({
-                "name": "T", "version": "1.0",
-                "nodes": [
-                    {
-                        "id": "a", "name": "A",
-                        "execute": {
-                            "url": "t.md",
-                            "params": {"preset": "anything"},
-                        },
-                    },
-                ],
-            })
-
-    def test_pure_script_workflow_no_presets_no_refs_validates(self):
-        """Script-only workflows don't need presets and don't reference
-        any — must validate cleanly."""
-        Graph.model_validate({
-            "name": "T", "version": "1.0",
-            "nodes": [
-                {
-                    "id": "a", "name": "A",
-                    "execute": {
-                        "url": "/bin/echo",
-                        "params": {"args": ["hi"]},
-                    },
-                },
-            ],
-        })
-
-
-class TestLlmPresetTransport:
-    """Schema-level coverage of ``LlmPreset.transport``.
-
-    Only ``cli`` is valid; ``acp``, ``api`` and any other value are
-    rejected.
-    """
-
-    def test_cli_transport_validates(self):
-        p = LlmPreset(
-            transport="cli", provider="anthropic",
-            model="sonnet", default=True,
-        )
-        assert p.transport == "cli"
-        assert p.provider == "anthropic"
-
-    def test_acp_transport_rejected(self):
-        with pytest.raises(ValidationError, match="transport"):
-            LlmPreset(
-                transport="acp", provider="anthropic",
-                model="sonnet", default=True,
-            )
-
-    def test_codex_cli_provider_validates(self):
-        p = LlmPreset(
-            transport="cli", provider="openai",
-            model="gpt-5.6-luna", default=True,
-        )
-        assert p.provider == "openai"
-
-    def test_transport_and_provider_default_to_codex(self):
-        p = LlmPreset(model="gpt-5.6-luna", default=True)
-        assert p.transport == "cli"
-        assert p.provider == "openai"
-
-    def test_anthropic_provider_defaults_to_claude_cli(self):
-        p = LlmPreset(provider="anthropic", model="sonnet", default=True)
-        assert p.transport == "cli"
-
-    def test_codex_rejects_claude_tool_flags(self):
-        with pytest.raises(ValidationError, match="only supported"):
-            LlmPreset(
-                transport="cli", provider="openai", model="gpt-5.6-luna",
-                permission_mode="plan",
-            )
-
-    def test_api_transport_rejected(self):
-        with pytest.raises(ValidationError):
-            LlmPreset(
-                transport="api", provider="anthropic",
-                model="sonnet", default=True,
-            )
-
-    def test_unknown_transport_rejected(self):
-        with pytest.raises(ValidationError):
-            LlmPreset(
-                transport="bogus", provider="anthropic",
-                model="sonnet", default=True,
-            )
-
-    def test_workflow_with_both_cli_providers_validates(self):
-        """A single workflow may declare both providers side-by-side;
-        the schema-level constraint is only that exactly one
-        ``LlmPreset`` is ``default: true``.
-        """
-        graph = Graph.model_validate({
-            "name": "T", "version": "1.0",
-            "settings": {
-                "presets": {
-                    "warm": {
-                        "transport": "cli", "provider": "openai",
-                        "model": "gpt-5.6-luna", "default": True,
-                    },
-                    "cold": {
-                        "transport": "cli", "provider": "anthropic",
-                        "model": "haiku", "default": False,
-                    },
-                },
-            },
-            "nodes": [
-                {
-                    "id": "a", "name": "A",
-                    "execute": {
-                        "url": "t.md", "params": {"preset": "cold"},
-                    },
-                },
-            ],
-        })
-        assert graph.settings.presets["warm"].provider == "openai"
-        assert graph.settings.presets["cold"].provider == "anthropic"
 
 
 class TestSettingsMemoryGates:
@@ -409,32 +145,6 @@ class TestSettingsSafeMode:
 
     def test_accepts_true(self):
         assert Settings(safe_mode=True).safe_mode is True
-
-
-class TestSettingsRemoteUrlGates:
-    """Stage 5b: Settings extended for execute.url remote URL gates."""
-
-    def test_defaults_safe(self):
-        s = Settings()
-        assert s.base_url is None
-        assert s.allow_remote_urls is False
-        assert s.allowed_url_hosts == []
-        assert s.url_headers == {}
-        assert s.max_remote_fetch_bytes == 5_000_000
-
-    def test_remote_url_gates_configurable(self):
-        s = Settings(
-            base_url="https://example.com/",
-            allow_remote_urls=True,
-            allowed_url_hosts=["*.example.com"],
-            url_headers={"https://api.example.com/": {"X-Auth": "${TOKEN}"}},
-            max_remote_fetch_bytes=10_000_000,
-        )
-        assert s.base_url == "https://example.com/"
-        assert s.allow_remote_urls is True
-        assert s.allowed_url_hosts == ["*.example.com"]
-        assert s.url_headers["https://api.example.com/"]["X-Auth"] == "${TOKEN}"
-        assert s.max_remote_fetch_bytes == 10_000_000
 
 
 class TestInlineRoute:
@@ -534,11 +244,11 @@ class TestInlineRoute:
 
     def test_node_route_field(self):
         config = Graph(
-            name="T", version="1.0.0",
+            name="T",
             nodes=[
-                {"id": "a", "name": "A", "execute": {"url": "a.md"},
+                {"id": "a", "name": "A", "agent": "a.md",
                  "route": {"goto": "b"}},
-                {"id": "b", "name": "B", "execute": {"url": "b.md"}},
+                {"id": "b", "name": "B", "agent": "b.md"},
             ],
         )
         assert config.nodes[0].route is not None
@@ -547,9 +257,9 @@ class TestInlineRoute:
     def test_node_route_unknown_target_rejected(self):
         with pytest.raises(ValidationError, match="goto 'ghost'"):
             Graph(
-                name="T", version="1.0.0",
+                name="T",
                 nodes=[
-                    {"id": "a", "name": "A", "execute": {"url": "a.md"},
+                    {"id": "a", "name": "A", "agent": "a.md",
                      "route": {"goto": "ghost"}},
                 ],
             )
@@ -557,25 +267,25 @@ class TestInlineRoute:
     def test_node_route_else_unknown_target_rejected(self):
         with pytest.raises(ValidationError, match="else goto 'ghost'"):
             Graph(
-                name="T", version="1.0.0",
+                name="T",
                 nodes=[
-                    {"id": "a", "name": "A", "execute": {"url": "a.md"},
+                    {"id": "a", "name": "A", "agent": "a.md",
                      "route": {
                          "cases": [{"when": "x", "goto": "b"}],
                          "else": "ghost",
                      }},
-                    {"id": "b", "name": "B", "execute": {"url": "b.md"}},
+                    {"id": "b", "name": "B", "agent": "b.md"},
                 ],
             )
 
     def test_node_route_list_goto_unknown_rejected(self):
         with pytest.raises(ValidationError, match="goto 'ghost'"):
             Graph(
-                name="T", version="1.0.0",
+                name="T",
                 nodes=[
-                    {"id": "a", "name": "A", "execute": {"url": "a.md"},
+                    {"id": "a", "name": "A", "agent": "a.md",
                      "route": {"goto": ["b", "ghost"]}},
-                    {"id": "b", "name": "B", "execute": {"url": "b.md"}},
+                    {"id": "b", "name": "B", "agent": "b.md"},
                 ],
             )
 
@@ -584,12 +294,12 @@ class TestInlineRoute:
         # them would double-trigger the goto target.
         with pytest.raises(ValidationError, match="depends on route"):
             Graph(
-                name="T", version="1.0.0",
+                name="T",
                 nodes=[
-                    {"id": "a", "name": "A", "execute": {"url": "a.md"},
+                    {"id": "a", "name": "A", "agent": "a.md",
                      "route": {"goto": "b"}},
-                    {"id": "b", "name": "B", "execute": {"url": "b.md"}},
-                    {"id": "c", "name": "C", "execute": {"url": "c.md"},
+                    {"id": "b", "name": "B", "agent": "b.md"},
+                    {"id": "c", "name": "C", "agent": "c.md",
                      "depends_on": ["a"]},
                 ],
             )
@@ -598,18 +308,18 @@ class TestInlineRoute:
         # Node with route but no execute — pure forward-edge dispatcher.
         # Validates target resolution like any other route.
         config = Graph(
-            name="T", version="1.0.0",
+            name="T",
             nodes=[
-                {"id": "produce", "name": "P", "execute": {"url": "p.md"}},
+                {"id": "produce", "name": "P", "agent": "p.md"},
                 {"id": "dispatch", "name": "D", "depends_on": ["produce"],
                  "route": {
                      "cases": [{"when": "True", "goto": "ship"}],
                      "else": "__end__",
                  }},
-                {"id": "ship", "name": "S", "execute": {"url": "s.md"}},
+                {"id": "ship", "name": "S", "agent": "s.md"},
             ],
         )
-        assert config.nodes[1].execute is None
+        assert config.nodes[1].kind is None
         assert config.nodes[1].route is not None
 
     def test_fan_out_and_route_on_one_node_rejected(self):
@@ -619,8 +329,8 @@ class TestInlineRoute:
         with pytest.raises(ValidationError, match="fan_out.*route|route.*fan_out"):
             Node(
                 id="p", name="P",
-                execute=Execute(url="p.md"),
-                fan_out=FanOut(template=FanOutTemplate(execute=Execute(url="w.md"))),
+                agent="p.md",
+                fan_out=FanOut(template=FanOutTemplate(agent="w.md")),
                 route=Route(goto="d"),
             )
 
@@ -634,13 +344,12 @@ class TestDependencyValidation:
         with pytest.raises(ValidationError, match="nonexistent"):
             Graph(
                 name="Test",
-                version="1.0.0",
                 nodes=[
-                    {"id": "p1", "name": "P1", "execute": {"url": "t.md"}},
+                    {"id": "p1", "name": "P1", "agent": "t.md"},
                     {
                         "id": "p2",
                         "name": "P2",
-                        "execute": {"url": "t.md"},
+                        "agent": "t.md",
                         "depends_on": ["nonexistent"],
                     },
                 ],
@@ -650,10 +359,9 @@ class TestDependencyValidation:
         with pytest.raises(ValidationError, match="[Dd]uplicate"):
             Graph(
                 name="Test",
-                version="1.0.0",
                 nodes=[
-                    {"id": "p1", "name": "P1", "execute": {"url": "t.md"}},
-                    {"id": "p1", "name": "P1 Again", "execute": {"url": "t2.md"}},
+                    {"id": "p1", "name": "P1", "agent": "t.md"},
+                    {"id": "p1", "name": "P1 Again", "agent": "t2.md"},
                 ],
             )
 
@@ -661,19 +369,18 @@ class TestDependencyValidation:
         with pytest.raises(ValidationError, match="self-dependency"):
             Graph(
                 name="Test",
-                version="1.0.0",
                 nodes=[
                     {
                         "id": "p1",
                         "name": "P1",
-                        "execute": {"url": "t.md"},
+                        "agent": "t.md",
                         "depends_on": ["p1"],
                     }
                 ],
             )
 
     def test_no_dependencies(self):
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent="t.md")
         assert node.depends_on == []
 
 
@@ -681,7 +388,7 @@ class TestFanOut:
     def test_dynamic_config(self):
         config = FanOut(
             manifest_path="manifest.json",
-            template={"execute": {"url": "template.md"}},
+            template={"agent": "template.md"},
         )
         assert config.manifest_path == "manifest.json"
         assert config.template is not None
@@ -690,7 +397,7 @@ class TestFanOut:
         config = FanOut(
             manifest_path="m.json",
             template={
-                "execute": {"url": "template.md"},
+                "agent": "template.md",
                 "evaluation": {"validator": "v.md", "threshold": 0.8},
             },
         )
@@ -703,34 +410,34 @@ class TestFanOut:
         field instead of silent fan-out skipping."""
         from pydantic import ValidationError as _VE
         with pytest.raises(_VE, match="enabled"):
-            FanOut(enabled=True, template={"execute": {"url": "t.md"}})
+            FanOut(enabled=True, template={"agent": "t.md"})
 
     def test_final_nodes(self):
         config = FanOut(
             manifest_path="m.json",
-            template={"execute": {"url": "t.md"}},
+            template={"agent": "t.md"},
             final_nodes=[
                 {
                     "id": "summary",
                     "name": "Summary",
-                    "execute": {"url": "s.md"},
+                    "agent": "s.md",
                 }
             ],
         )
         assert len(config.final_nodes) == 1
         assert config.final_nodes[0].id == "summary"
-        assert config.final_nodes[0].execute.url == "s.md"
+        assert config.final_nodes[0].agent.prompt == "s.md"
 
     def test_final_node_accepts_output_contract(self):
         """C1: `output_contract` is valid on a fan-out final node (it runs
         through the standard execution path, which enforces it)."""
         config = FanOut(
-            template={"execute": {"url": "t.md"}},
+            template={"agent": "t.md"},
             final_nodes=[
                 {
                     "id": "summary",
                     "name": "Summary",
-                    "execute": {"url": "s.md"},
+                    "agent": "s.md",
                     "output_contract": {
                         "base_directory": ".",
                         "required_files": ["summary.md"],
@@ -752,86 +459,22 @@ class TestFanOut:
         assert config.final_nodes == []
 
     def test_fan_out_promote_field(self):
-        from sqrlly.schema.models import FanOut, FanOutTemplate, Execute
-        fo = FanOut(template=FanOutTemplate(execute=Execute(url="x.md")), promote=True)
+        from sqrlly.schema.models import FanOut, FanOutTemplate
+        fo = FanOut(template=FanOutTemplate(agent="x.md"), promote=True)
         assert fo.promote is True
         # default is False
-        assert FanOut(template=FanOutTemplate(execute=Execute(url="x.md"))).promote is False
+        assert FanOut(template=FanOutTemplate(agent="x.md")).promote is False
 
 
-class TestFullExampleParse:
-    """Parse the absurd-paper kitchen-sink workflow to verify the schema
-    handles every Stage 4-5b feature combined: prompts, scripts, fan-out,
-    evaluations, subgraph composition (`paper` references
-    `subgraphs/compose_and_validate.yaml`)."""
+def test_kitchen_sink_composes_a_child_workflow(kitchen_sink_workflow_path):
+    from sqrlly.schema.models import load_workflow
 
-    def test_parse_example_yaml(self, kitchen_sink_workflow_path):
-        with open(kitchen_sink_workflow_path) as f:
-            raw = yaml.safe_load(f)
-        config = Graph(**raw)
-
-        assert config.name == "Absurd Academic Paper"
-        assert len(config.nodes) > 0
-        # The default preset uses Codex. The
-        # registry now mixes LlmPresets with a CommandPreset (PDF render),
-        # and CommandPresets carry no `default` flag — hence getattr.
-        defaults = [
-            p for p in config.settings.presets.values()
-            if getattr(p, "default", False)
-        ]
-        assert len(defaults) == 1
-        assert defaults[0].model == "gpt-5.6-luna"
-
-    def test_example_has_all_execution_types(self, kitchen_sink_workflow_path):
-        """Kitchen-sink YAML exercises prompt, subgraph reference, and script nodes."""
-        with open(kitchen_sink_workflow_path) as f:
-            raw = yaml.safe_load(f)
-        config = Graph(**raw)
-
-        prompt_exts = {".md", ".txt", ".prompt"}
-        subgraph_exts = {".yaml", ".yml"}
-        kinds: set[str] = set()
-        for n in config.nodes:
-            if n.execute is None:
-                kinds.add("gate_only")
-                continue
-            if n.execute.type:
-                kinds.add(n.execute.type)
-                continue
-            ext = Path(n.execute.url).suffix.lower()
-            if ext in prompt_exts:
-                kinds.add("prompt")
-            elif ext in subgraph_exts:
-                kinds.add("subgraph")
-            elif ext == "":
-                kinds.add("binary")
-            else:
-                kinds.add("script")
-        assert "prompt" in kinds
-        assert "subgraph" in kinds  # `paper` node references compose_and_validate.yaml
-
-    def test_example_node_shapes(self, kitchen_sink_workflow_path):
-        """Spot-check named nodes carry the right execute shape."""
-        with open(kitchen_sink_workflow_path) as f:
-            raw = yaml.safe_load(f)
-        config = Graph(**raw)
-        node_map = {p.id: p for p in config.nodes}
-
-        # `abstract` is a prompt node with the default sonnet model.
-        abstract = node_map["abstract"]
-        assert abstract.execute is not None
-        assert Path(abstract.execute.url).suffix == ".md"
-
-        # `paper` references a subgraph (compose_and_validate.yaml) and
-        # projects state via execute.params.{inputs,outputs}.
-        paper = node_map["paper"]
-        assert paper.execute is not None
-        assert Path(paper.execute.url).suffix == ".yaml"
-        assert "inputs" in paper.execute.params
-
-# ---------------------------------------------------------------------------
-# Node timeout fields + effective_timeout
-# ---------------------------------------------------------------------------
+    graph = load_workflow(kitchen_sink_workflow_path)
+    nodes = {node.id: node for node in graph.nodes}
+    assert graph.name == "Absurd Academic Paper"
+    assert (nodes["abstract"].agent or nodes["abstract"].llm).prompt.endswith(".md")
+    assert nodes["paper"].workflow.file.endswith(".yaml")
+    assert nodes["paper"].workflow.inputs
 
 
 class TestNodeTimeout:

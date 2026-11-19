@@ -1,44 +1,17 @@
-name: "Pipeline-style authoring"
-version: "0.1.0"
-
-# Demonstrates Stage 5c inline route forward-edge authoring as an
-# alternative to depends_on back-pointer style. Each node uses
-# `route: { goto: <next> }` to dispatch to its successor — reads
-# top-down like a pipeline. depends_on still works for fan-in
-# barriers; pick whichever reads better locally.
-#
-# {{sender_id}} is auto-bound on goto targets to the source node id
-# (via the synthetic `_route_<id>` dispatcher), so each step can
-# reference the upstream node without naming it explicitly.
-#
-# Pure script execution — runs without LLM backend.
-
+name: Pipeline-style authoring
 nodes:
   - id: step_one
-    name: "Step one"
-    execute:
-      url: "/usr/bin/echo"
-      params:
-        args: ["[step_one]"]
+    name: Step one
     route:
       goto: step_two
+    run: [echo, '[step_one]']
 
   - id: step_two
-    name: "Step two"
-    execute:
-      url: "/usr/bin/echo"
-      params:
-        args: ["[step_two] after {{sender_id}}"]
+    name: Step two
     route:
       goto: step_three
+    run: [echo, '[step_two] after {{sender_id}}']
 
   - id: step_three
-    name: "Step three"
-    execute:
-      url: "/usr/bin/echo"
-      params:
-        args: ["[step_three] after {{sender_id}}"]
-
-settings: {}
-# No `executor:` — script-only workflow runs under any backend
-# (or none, when invoked as a subgraph from run_all_examples.yaml).
+    name: Step three
+    run: [echo, '[step_three] after {{sender_id}}']

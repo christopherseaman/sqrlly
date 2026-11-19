@@ -62,12 +62,11 @@ def _build_chain(workdir: Path) -> Graph:
         return {
             "id": nid, "name": nid,
             "depends_on": deps or [],
-            "execute": {"url": _PYTHON, "params": {"args": [str(worker), nid]}},
+            "run": [_PYTHON, str(worker), nid],
         }
 
     return Graph(
         name="entry-chain",
-        version="0.1.0",
         nodes=[node("a"), node("b", ["a"]), node("c", ["b"])],
     )
 

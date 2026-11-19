@@ -1,73 +1,34 @@
-name: "Route Classifier"
-version: "0.1.0"
-
-# Stage 5c demo — inline route node dispatching on structured output.
-# Pipeline:
-#   triage → decide (route) → one of {drop_spam, page_oncall, escalate, standard_queue}
-#
-# `triage` is a Python script (URL ends in .py → script-interpreter dispatch)
-# that emits JSON on stdout. The runtime captures the JSON as
-# `node_structured_outputs[triage]`, so the route's `when:` predicates
-# read fields directly off the parsed object — `triage['category']`,
-# `triage['priority']`. The first matching case wins; if no case
-# matches, control falls through to `else:` → standard_queue.
-#
-# Run a single category via the input override:
-#   uv run sqrlly run examples/route_classify/workflow.yaml
-# Override the input by editing the triage args below.
-
+name: Route Classifier
 nodes:
   - id: triage
-    name: "Triage Ticket"
-    execute:
-      url: "examples/route_classify/scripts/triage.py"
-      params:
-        # Replace this string with a real ticket subject to see different
-        # branches. "production down" → page_oncall, "lottery" → drop_spam,
-        # "blocker" → escalate, anything else → standard_queue.
-        args: ["production down on auth-service, urgent"]
+    name: Triage Ticket
+    run: [python3, '{{workflow_dir}}/scripts/triage.py', 'production down on auth-service, urgent']
 
   - id: decide
-    name: "Route by category"
+    name: Route by category
     depends_on: [triage]
     route:
-      # `triage` in the namespace is the dep's raw stdout (no structured
-      # output from script nodes), so case predicates compare strings.
       cases:
-        - when: "triage == 'spam'"
-          goto: drop_spam
-        - when: "triage == 'urgent'"
-          goto: page_oncall
-        - when: "triage == 'escalate'"
-          goto: escalate
+      - when: triage == 'spam'
+        goto: drop_spam
+      - when: triage == 'urgent'
+        goto: page_oncall
+      - when: triage == 'escalate'
+        goto: escalate
       else: standard_queue
 
   - id: drop_spam
-    name: "Drop spam"
-    execute:
-      url: /usr/bin/echo
-      params:
-        args: ["dropped: {{triage}}"]
+    name: Drop spam
+    run: [echo, 'dropped: {{triage}}']
 
   - id: page_oncall
-    name: "Page on-call rotation"
-    execute:
-      url: /usr/bin/echo
-      params:
-        args: ["paged on-call: {{triage}}"]
+    name: Page on-call rotation
+    run: [echo, 'paged on-call: {{triage}}']
 
   - id: escalate
-    name: "Escalate to manager"
-    execute:
-      url: /usr/bin/echo
-      params:
-        args: ["escalated: {{triage}}"]
+    name: Escalate to manager
+    run: [echo, 'escalated: {{triage}}']
 
   - id: standard_queue
-    name: "Standard queue"
-    execute:
-      url: /usr/bin/echo
-      params:
-        args: ["queued: {{triage}}"]
-
-settings: {}
+    name: Standard queue
+    run: [echo, 'queued: {{triage}}']

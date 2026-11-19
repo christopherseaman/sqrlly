@@ -44,28 +44,28 @@ def _yaml(path: Path, body: dict) -> None:
 async def test_simple_recursive_subgraph(tmp_path):
     """Parent has one subgraph reference; subgraph terminal output projects up."""
     _yaml(tmp_path / "sub.yaml", {
-        "name": "Sub", "version": "1.0",
+        "name": "Sub",
         "nodes": [
             {
                 "id": "child_a",
                 "name": "Child A",
-                "execute": {"url": _ECHO, "params": {"args": ["-n", "from-child-a"]}},
+                "run": [_ECHO, "-n", "from-child-a"],
             },
             {
                 "id": "child_b",
                 "name": "Child B",
                 "depends_on": ["child_a"],
-                "execute": {"url": _ECHO, "params": {"args": ["-n", "from-child-b"]}},
+                "run": [_ECHO, "-n", "from-child-b"],
             },
         ],
     })
     _yaml(tmp_path / "parent.yaml", {
-        "name": "Parent", "version": "1.0",
+        "name": "Parent",
         "nodes": [
             {
                 "id": "sub_node",
                 "name": "Subgraph Reference",
-                "execute": {"url": "sub.yaml"},
+                "workflow": "sub.yaml",
             },
         ],
     })
@@ -83,50 +83,6 @@ async def test_simple_recursive_subgraph(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subgraph_outputs_named_projection(tmp_path):
-    """Explicit `outputs:` exposes named subgraph node outputs to parent."""
-    _yaml(tmp_path / "sub.yaml", {
-        "name": "Sub", "version": "1.0",
-        "nodes": [
-            {
-                "id": "compile",
-                "name": "Compile",
-                "execute": {"url": _ECHO, "params": {"args": ["-n", "compiled-output"]}},
-            },
-            {
-                "id": "summary",
-                "name": "Summary",
-                "depends_on": ["compile"],
-                "execute": {"url": _ECHO, "params": {"args": ["-n", "summary-output"]}},
-            },
-        ],
-    })
-    _yaml(tmp_path / "parent.yaml", {
-        "name": "Parent", "version": "1.0",
-        "nodes": [{
-            "id": "sub_node",
-            "name": "Sub Ref",
-            "execute": {
-                "url": "sub.yaml",
-                "params": {
-                    "outputs": {"compiled": "{{compile}}", "summed": "{{summary}}"},
-                },
-            },
-        }],
-    })
-
-    raw = yaml.safe_load((tmp_path / "parent.yaml").read_text())
-    parent_config = Graph(**raw)
-    executor = DispatchExecutor(workdir=str(tmp_path))
-    graph = build_workflow_graph(parent_config, executor, _base_dir=tmp_path)
-
-    result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-    assert result["node_outputs"]["sub_node.compiled"] == "compiled-output"
-    assert result["node_outputs"]["sub_node.summed"] == "summary-output"
-
-
-@pytest.mark.asyncio
 async def test_subgraph_runnable_standalone(tmp_path):
     """Same YAML file runs both standalone and as a subgraph reference.
 
@@ -134,11 +90,11 @@ async def test_subgraph_runnable_standalone(tmp_path):
     no special schema for a "subgraph YAML"; it's just a graph file.
     """
     _yaml(tmp_path / "shared.yaml", {
-        "name": "Shared", "version": "1.0",
+        "name": "Shared",
         "nodes": [{
             "id": "work",
             "name": "Work",
-            "execute": {"url": _ECHO, "params": {"args": ["-n", "shared-work"]}},
+            "run": [_ECHO, "-n", "shared-work"],
         }],
     })
 
@@ -152,8 +108,8 @@ async def test_subgraph_runnable_standalone(tmp_path):
 
     # As a subgraph reference
     _yaml(tmp_path / "wrapper.yaml", {
-        "name": "Wrapper", "version": "1.0",
-        "nodes": [{"id": "ref", "name": "Ref", "execute": {"url": "shared.yaml"}}],
+        "name": "Wrapper",
+        "nodes": [{"id": "ref", "name": "Ref", "workflow": "shared.yaml"}],
     })
     raw = yaml.safe_load((tmp_path / "wrapper.yaml").read_text())
     wrapper_config = Graph(**raw)
@@ -164,12 +120,12 @@ async def test_subgraph_runnable_standalone(tmp_path):
 
 def test_cycle_detected_at_compile_time(tmp_path):
     _yaml(tmp_path / "a.yaml", {
-        "name": "A", "version": "1.0",
-        "nodes": [{"id": "x", "name": "X", "execute": {"url": "b.yaml"}}],
+        "name": "A",
+        "nodes": [{"id": "x", "name": "X", "workflow": "b.yaml"}],
     })
     _yaml(tmp_path / "b.yaml", {
-        "name": "B", "version": "1.0",
-        "nodes": [{"id": "y", "name": "Y", "execute": {"url": "a.yaml"}}],
+        "name": "B",
+        "nodes": [{"id": "y", "name": "Y", "workflow": "a.yaml"}],
     })
 
     raw = yaml.safe_load((tmp_path / "a.yaml").read_text())
@@ -189,19 +145,19 @@ async def test_subgraph_internal_failure_surfaces_to_parent(tmp_path):
     of the subgraph's internals.
     """
     _yaml(tmp_path / "sub.yaml", {
-        "name": "Sub", "version": "1.0",
+        "name": "Sub",
         "nodes": [{
             "id": "always_fails",
             "name": "Always Fails",
-            "execute": {"url": _FALSE},  # exit 1
+            "run": [_FALSE],  # exit 1
         }],
     })
     _yaml(tmp_path / "parent.yaml", {
-        "name": "Parent", "version": "1.0",
+        "name": "Parent",
         "nodes": [{
             "id": "sub_ref",
             "name": "Sub Ref",
-            "execute": {"url": "sub.yaml"},
+            "workflow": "sub.yaml",
         }],
     })
 
@@ -233,33 +189,25 @@ async def test_subgraph_isolation_no_parent_state_leak(tmp_path):
     direct evidence of what was in scope.
     """
     _yaml(tmp_path / "sub.yaml", {
-        "name": "Sub", "version": "1.0",
+        "name": "Sub",
         "nodes": [{
             "id": "prober",
             "name": "Prober",
-            "execute": {
-                "url": _ECHO,
-                "params": {
-                    "args": ["-n", "leak={{parent_only}}|input={{from_parent}}"],
-                },
-            },
+            "run": [_ECHO, "-n", "leak={{parent_only}}|input={{from_parent}}"],
         }],
     })
     _yaml(tmp_path / "parent.yaml", {
-        "name": "Parent", "version": "1.0",
+        "name": "Parent",
         "nodes": [
             {
                 "id": "parent_only",
                 "name": "Parent Only",
-                "execute": {"url": _ECHO, "params": {"args": ["-n", "PARENT_VALUE"]}},
+                "run": [_ECHO, "-n", "PARENT_VALUE"],
             },
             {
                 "id": "sub_ref",
                 "name": "Sub Ref",
-                "execute": {
-                    "url": "sub.yaml",
-                    "params": {"inputs": {"from_parent": "explicit-input"}},
-                },
+                "workflow": {"file": "sub.yaml", "with": {"from_parent": "explicit-input"}},
                 "depends_on": ["parent_only"],
             },
         ],
@@ -295,11 +243,11 @@ def test_depth_limit_enforced(tmp_path):
         next_ref = f"link_{i+1}.yaml" if i + 1 < chain_len else None
         node = {"id": f"n{i}", "name": f"N{i}"}
         if next_ref:
-            node["execute"] = {"url": next_ref}
+            node["workflow"] = next_ref
         else:
-            node["execute"] = {"url": _ECHO, "params": {"args": ["-n", "leaf"]}}
+            node["run"] = [_ECHO, "-n", "leaf"]
         _yaml(tmp_path / f"link_{i}.yaml", {
-            "name": f"L{i}", "version": "1.0",
+            "name": f"L{i}",
             "nodes": [node],
         })
 
@@ -316,22 +264,21 @@ def test_depth_limit_enforced(tmp_path):
 
 @pytest.mark.asyncio
 async def test_absurd_paper_carve_compiles_with_subgraph(tmp_path):
-    """examples/absurd-paper/workflow.yaml uses a subgraph URL + inputs for the
+    """examples/absurd-paper/workflow.yaml uses a workflow with inputs for the
     `paper` node. Asserts the carved workflow compiles, the `paper` node
-    is present, and its execute.url resolves to the subgraph file.
+    is present, and its workflow file resolves to the subgraph file.
     """
-    repo_root = Path(__file__).resolve().parents[2]
+    example_dir = Path(__file__).resolve().parents[2] / "examples" / "absurd-paper"
     raw = yaml.safe_load(
-        (repo_root / "examples" / "absurd-paper" / "workflow.yaml").read_text()
+        (example_dir / "workflow.yaml").read_text()
     )
     config = Graph(**raw)
 
-    # Stage 5b shape: subgraph URL + inputs/outputs nested in execute.params.
     paper = next(n for n in config.nodes if n.id == "paper")
-    assert paper.execute is not None
-    assert paper.execute.url == "examples/absurd-paper/subgraphs/compose_and_validate.yaml"
+    assert paper.workflow is not None
+    assert paper.workflow.file == "subgraphs/compose_and_validate.yaml"
     # Five upstream sections project into the subgraph context.
-    assert set(paper.execute.params["inputs"].keys()) == {
+    assert set(paper.workflow.inputs) == {
         "abstract", "intro", "methods", "results", "discussion"
     }
     # render_pdf wires to the `paper` subgraph parent and is the terminal node.
@@ -339,8 +286,8 @@ async def test_absurd_paper_carve_compiles_with_subgraph(tmp_path):
     assert render_pdf.depends_on == ["paper"]
 
     # Compile against the example dir as base (so config-ref resolves).
-    executor = DispatchExecutor(workdir=str(repo_root))
+    executor = DispatchExecutor(workdir=str(example_dir))
     graph = build_workflow_graph(
-        config, executor, _base_dir=repo_root,
+        config, executor, _base_dir=example_dir,
     )
     assert graph is not None

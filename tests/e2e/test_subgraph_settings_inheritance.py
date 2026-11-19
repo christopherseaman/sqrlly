@@ -36,6 +36,8 @@ _ECHO = shutil.which("echo") or "/bin/echo"
 
 
 def _yaml(path: Path, body: dict) -> None:
+    if preamble := body.get("settings", {}).get("preamble_file"):
+        (path.parent / preamble).write_text("Workflow instructions")
     path.write_text(yaml.safe_dump(body))
 
 
@@ -49,10 +51,10 @@ class TestScopeCapture:
 
     async def test_parent_node_sees_parent_settings(self, tmp_path):
         _yaml(tmp_path / "wf.yaml", {
-            "name": "wf", "version": "1.0",
+            "name": "wf",
             "nodes": [
                 {"id": "p", "name": "Parent",
-                 "execute": {"url": _ECHO, "params": {"args": ["-n", "x"]}}},
+                 "run": [_ECHO, "-n", "x"]},
             ],
             "settings": {"preamble_file": "parent-out", "max_retries": 7},
         })
@@ -73,21 +75,21 @@ class TestScopeCapture:
         """Parent preamble_file=parent-out; subgraph preamble_file=sub-out.
         Parent node sees parent's; subgraph node sees subgraph's."""
         _yaml(tmp_path / "sub.yaml", {
-            "name": "sub", "version": "1.0",
+            "name": "sub",
             "nodes": [
                 {"id": "child", "name": "Child",
-                 "execute": {"url": _ECHO, "params": {"args": ["-n", "y"]}}},
+                 "run": [_ECHO, "-n", "y"]},
             ],
             "settings": {"preamble_file": "sub-out"},
         })
         _yaml(tmp_path / "wf.yaml", {
-            "name": "wf", "version": "1.0",
+            "name": "wf",
             "nodes": [
                 {"id": "top", "name": "Top",
-                 "execute": {"url": _ECHO, "params": {"args": ["-n", "x"]}}},
+                 "run": [_ECHO, "-n", "x"]},
                 {"id": "sub_ref", "name": "SubRef",
                  "depends_on": ["top"],
-                 "execute": {"url": "sub.yaml"}},
+                 "workflow": "sub.yaml"},
             ],
             "settings": {"preamble_file": "parent-out", "max_retries": 4},
         })
@@ -111,17 +113,17 @@ class TestScopeCapture:
         """Subgraph YAML with NO settings: block inherits everything
         from parent — the silent-loss case Phase 3 fixes."""
         _yaml(tmp_path / "sub.yaml", {
-            "name": "sub", "version": "1.0",
+            "name": "sub",
             "nodes": [
                 {"id": "child", "name": "Child",
-                 "execute": {"url": _ECHO, "params": {"args": ["-n", "y"]}}},
+                 "run": [_ECHO, "-n", "y"]},
             ],
         })
         _yaml(tmp_path / "wf.yaml", {
-            "name": "wf", "version": "1.0",
+            "name": "wf",
             "nodes": [
                 {"id": "sub_ref", "name": "SubRef",
-                 "execute": {"url": "sub.yaml"}},
+                 "workflow": "sub.yaml"},
             ],
             "settings": {"default_timeout": 60.0, "preamble_file": "x.md"},
         })
@@ -137,42 +139,24 @@ class TestScopeCapture:
         assert child_seen.default_timeout == 60.0
         assert child_seen.preamble_file == "x.md"
 
-    async def test_pathless_prompt_timeout_with_inherited_base(self, tmp_path):
-        _yaml(tmp_path / "sub.yaml", {
-            "name": "sub", "version": "1.0",
-            "nodes": [{"id": "child", "name": "Child", "execute": {
-                "url": "?rev=2", "params": {"timeout": 2},
-            }}],
-        })
-        base_url = "https://example.org/template.md"
-        config = Graph.model_validate({
-            "name": "wf", "version": "1.0", "settings": {"base_url": base_url},
-            "nodes": [{"id": "ref", "name": "Ref", "execute": {"url": "sub.yaml"}}],
-        })
-        executor = MockExecutor()
-        graph = build_workflow_graph(config, executor=executor, _base_dir=tmp_path)
-        state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-        assert "ref" in state["completed_nodes"]
-        assert executor.received_settings["child"].base_url == base_url
-
     async def test_three_level_inheritance(self, tmp_path):
         """top → mid → bot. Each layer can override; merges compose."""
         _yaml(tmp_path / "bot.yaml", {
-            "name": "bot", "version": "1.0",
+            "name": "bot",
             "nodes": [{"id": "leaf", "name": "Leaf",
-                       "execute": {"url": _ECHO, "params": {"args": ["-n", "z"]}}}],
+                       "run": [_ECHO, "-n", "z"]}],
             "settings": {"max_retries": 9},
         })
         _yaml(tmp_path / "mid.yaml", {
-            "name": "mid", "version": "1.0",
+            "name": "mid",
             "nodes": [{"id": "ref_bot", "name": "Mid",
-                       "execute": {"url": "bot.yaml"}}],
+                       "workflow": "bot.yaml"}],
             "settings": {"preamble_file": "mid-out"},
         })
         _yaml(tmp_path / "wf.yaml", {
-            "name": "wf", "version": "1.0",
+            "name": "wf",
             "nodes": [{"id": "ref_mid", "name": "Top",
-                       "execute": {"url": "mid.yaml"}}],
+                       "workflow": "mid.yaml"}],
             "settings": {
                 "preamble_file": "top-out", "max_retries": 2,
                 "default_timeout": 60.0,
@@ -212,18 +196,18 @@ class TestSubprocessTimeoutInheritance:
         sleep_script.chmod(0o755)
 
         _yaml(tmp_path / "sub.yaml", {
-            "name": "sub", "version": "1.0",
+            "name": "sub",
             "nodes": [
                 {"id": "slow", "name": "Slow",
-                 "execute": {"url": str(sleep_script)}},
+                 "run": [str(sleep_script)]},
             ],
             "settings": {"default_timeout": 10.0},
         })
         _yaml(tmp_path / "wf.yaml", {
-            "name": "wf", "version": "1.0",
+            "name": "wf",
             "nodes": [
                 {"id": "ref", "name": "Ref",
-                 "execute": {"url": "sub.yaml"}},
+                 "workflow": "sub.yaml"},
             ],
             "settings": {"default_timeout": 1.0},  # would kill the sleep
         })
@@ -253,18 +237,18 @@ class TestSubprocessTimeoutInheritance:
         sleep_script.chmod(0o755)
 
         _yaml(tmp_path / "sub.yaml", {
-            "name": "sub", "version": "1.0",
+            "name": "sub",
             "nodes": [
                 {"id": "slow", "name": "Slow",
-                 "execute": {"url": str(sleep_script)}},
+                 "run": [str(sleep_script)]},
             ],
             # NO default_timeout — must inherit parent's 1.0
         })
         _yaml(tmp_path / "wf.yaml", {
-            "name": "wf", "version": "1.0",
+            "name": "wf",
             "nodes": [
                 {"id": "ref", "name": "Ref",
-                 "execute": {"url": "sub.yaml"}},
+                 "workflow": "sub.yaml"},
             ],
             "settings": {"default_timeout": 1.0},
         })

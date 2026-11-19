@@ -67,11 +67,11 @@ class TestLogUpdate:
         assert events[0]["node"] == "research"
 
     def test_detects_node_model(self):
-        """node_models delta → a node_model event recording preset+model."""
+        """node_models delta → a node_model event recording provider and model."""
         buf = StringIO()
         logger = JsonlLogger(buf)
         logger.log_update({
-            "node_models": {"gen": {"model": "sonnet", "preset": "fast"}},
+            "node_models": {"gen": {"model": "sonnet", "provider": "anthropic"}},
         })
         events = [json.loads(l) for l in buf.getvalue().strip().split("\n")]
         assert len(events) == 1
@@ -79,7 +79,7 @@ class TestLogUpdate:
         assert e["event"] == "node_model"
         assert e["node"] == "gen"
         assert e["model"] == "sonnet"
-        assert e["preset"] == "fast"
+        assert e["provider"] == "anthropic"
 
     def test_node_model_emitted_before_completed(self):
         """For a non-gated LLM node both land in one update; node_model
@@ -87,7 +87,7 @@ class TestLogUpdate:
         buf = StringIO()
         logger = JsonlLogger(buf)
         logger.log_update({
-            "node_models": {"gen": {"model": "sonnet", "preset": "fast"}},
+            "node_models": {"gen": {"model": "sonnet", "provider": "anthropic"}},
             "completed_nodes": {"gen"},
         })
         events = [json.loads(l) for l in buf.getvalue().strip().split("\n")]
@@ -329,7 +329,6 @@ class TestRunWorkflowLogging:
         logger.emit({
             "event": "workflow_start",
             "workflow": config.name,
-            "version": config.version,
         })
         result = await run_workflow(
             build_workflow_graph(config, executor),
@@ -388,7 +387,7 @@ class TestRunWorkflowLogging:
             {
                 "id": "gated",
                 "name": "gated",
-                "execute": {"url": _ECHO, "params": {"args": ["-n", "output"]}},
+                "run": [_ECHO, "-n", "output"],
                 "evaluation": {
                     "validator": str(validator),
                     "threshold": 0.9,
@@ -440,9 +439,8 @@ class TestCliLogFlag:
 
         config_path = tmp_path / "workflow.yaml"
         config_path.write_text(
-            "name: Test\nversion: '1.0'\nnodes:\n"
-            "  - id: a\n    name: A\n    execute:\n"
-            f"      url: {_ECHO}\n      params:\n        args: ['-n', 'hi']\n"
+            "name: Test\nnodes:\n"
+            "  - id: a\n    name: A\n    run: [echo, '-n', 'hi']\n"
         )
         log_path = tmp_path / "events.jsonl"
 
@@ -457,7 +455,9 @@ class TestCliLogFlag:
         assert log_path.exists()
         events = [json.loads(l) for l in log_path.read_text().strip().split("\n")]
         event_types = [e["event"] for e in events]
-        assert "workflow_start" in event_types
+        start = next(e for e in events if e["event"] == "workflow_start")
+        assert start["workflow"] == "Test"
+        assert "version" not in start
         assert "workflow_end" in event_types
 
 
@@ -518,8 +518,7 @@ class TestSubgraphLogger:
 
 
 class TestSubgraphEventsInParentLog:
-    """End-to-end: a parent workflow with a subgraph reference (`execute.url:
-    sub.yaml`) emits the subgraph's internal node_completed events into
+    """End-to-end: a parent workflow with a subgraph reference (`workflow: sub.yaml`) emits the subgraph's internal node_completed events into
     the parent JSONL with the parent_id prefix."""
 
     @pytest.mark.asyncio
@@ -527,21 +526,19 @@ class TestSubgraphEventsInParentLog:
         # Two-node subgraph; both internal nodes complete during the run.
         sub_yaml = tmp_path / "sub.yaml"
         sub_yaml.write_text(
-            "name: sub\nversion: '1.0'\n"
+            "name: sub\n"
             "nodes:\n"
             "  - id: step1\n    name: Step 1\n"
-            f"    execute:\n      url: {_ECHO}\n"
-            "      params: {args: ['s1']}\n"
+            f"    run: [{_ECHO}, 's1']\n"
             "  - id: step2\n    name: Step 2\n    depends_on: [step1]\n"
-            f"    execute:\n      url: {_ECHO}\n"
-            "      params: {args: ['s2']}\n"
+            f"    run: [{_ECHO}, 's2']\n"
         )
 
         config = make_config([
             {
                 "id": "paper",
                 "name": "Paper",
-                "execute": {"url": "sub.yaml"},
+                "workflow": "sub.yaml",
             },
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -549,7 +546,7 @@ class TestSubgraphEventsInParentLog:
         # Inject a logger so build_workflow_graph hands it to subgraph wrappers.
         log_path = tmp_path / "events.jsonl"
         logger = JsonlLogger(log_path)
-        logger.emit({"event": "workflow_start", "workflow": "parent", "version": "1.0"})
+        logger.emit({"event": "workflow_start", "workflow": "parent"})
 
         compiled = build_workflow_graph(
             config, executor, _base_dir=tmp_path, logger=logger,
@@ -579,16 +576,15 @@ class TestSubgraphEventsInParentLog:
         Confirms the event-streaming path is opt-in."""
         sub_yaml = tmp_path / "sub.yaml"
         sub_yaml.write_text(
-            "name: sub\nversion: '1.0'\n"
+            "name: sub\n"
             "nodes:\n"
-            f"  - id: only\n    name: Only\n    execute:\n      url: {_ECHO}\n"
-            "      params: {args: ['x']}\n"
+            f"  - id: only\n    name: Only\n    run: [{_ECHO}, 'x']\n"
         )
         config = make_config([
             {
                 "id": "wrapper",
                 "name": "Wrapper",
-                "execute": {"url": "sub.yaml"},
+                "workflow": "sub.yaml",
             },
         ])
         executor = DispatchExecutor(workdir=str(tmp_path))

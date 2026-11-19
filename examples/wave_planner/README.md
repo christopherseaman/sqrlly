@@ -66,7 +66,6 @@ So run with a non-git workdir:
 
 ```bash
 mkdir -p /tmp/wave-demo
-ln -s "$(pwd)/examples/wave_planner/scripts" /tmp/wave-demo/scripts
 uv run sqrlly validate examples/wave_planner/workflow.yaml
 uv run sqrlly run examples/wave_planner/workflow.yaml --workdir /tmp/wave-demo
 ```
@@ -75,15 +74,13 @@ You'll see two waves run:
 
 ```
 Note: workdir is not a git repo — running without worktree isolation (foreman disabled).
-Completed: 8 nodes
-  Nodes: planner, dispatcher, dispatcher::q_market_size, dispatcher::q_growth_rate,
-         reconcile, dispatcher, dispatcher::q_competitor_share, reconcile
+Completed: 6 nodes
+  Nodes: dispatcher, dispatcher::q_competitor_share, dispatcher::q_growth_rate,
+         dispatcher::q_market_size, planner, reconcile
 ```
 
-The `dispatcher` entry appears twice (one fire per wave), and
-the dynamically-added `q_competitor_share` shows up as a
-fan-out branch only on the second wave — the manifest from
-wave 2 included it because reconcile added it after wave 1.
+The runner lists each completed node ID once. The second wave adds
+`dispatcher::q_competitor_share` after reconcile queues that question.
 
 `/tmp/wave-demo/state.json` has the final state with all three
 questions marked `done`.

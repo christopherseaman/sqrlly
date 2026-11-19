@@ -116,32 +116,20 @@ def _build_wave_config(scripts: dict[str, Path]) -> Graph:
     """Programmatic Graph mirroring examples/wave_planner/workflow.yaml."""
     return Graph(
         name="wave-pattern-test",
-        version="0.1.0",
         nodes=[
             {
                 "id": "planner",
                 "name": "planner",
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(scripts["planner.py"])]},
-                },
+                "run": [_PYTHON, str(scripts["planner.py"])],
             },
             {
                 "id": "dispatcher",
                 "name": "dispatcher",
                 "depends_on": ["planner"],
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(scripts["dispatcher.py"])]},
-                },
+                "run": [_PYTHON, str(scripts["dispatcher.py"])],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": _PYTHON,
-                            "params": {
-                                "args": [str(scripts["worker.py"]), "{{id}}"],
-                            },
-                        },
+                        "run": [_PYTHON, str(scripts["worker.py"]), "{{id}}"],
                     },
                 },
             },
@@ -149,10 +137,7 @@ def _build_wave_config(scripts: dict[str, Path]) -> Graph:
                 "id": "reconcile",
                 "name": "reconcile",
                 "depends_on": ["dispatcher"],
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(scripts["reconcile.py"])]},
-                },
+                "run": [_PYTHON, str(scripts["reconcile.py"])],
             },
             {
                 "id": "gate",

@@ -32,9 +32,9 @@ from sqrlly.runtime.result import (
     OverloadError,
     PromptBackend,
 )
-from sqrlly.schema.models import Execute, Node, Settings
+from sqrlly.schema.models import Settings
 
-from helpers import single_preset_settings
+
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +417,7 @@ class TestOverloadDowngrade:
         backend = OverloadThenSucceedBackend(fail_count=1, response="recovered")
         result = await execute_with_downgrade(
             backend, "x", "opus", str(tmp_path), timeout=None,
-            settings=Settings(),
+            settings=Settings(), max_retries=0,
         )
         assert result.success is True
         assert result.output == "recovered"
@@ -430,7 +430,7 @@ class TestOverloadDowngrade:
         backend = OverloadThenSucceedBackend(fail_count=2, response="haiku-ok")
         result = await execute_with_downgrade(
             backend, "x", "opus", str(tmp_path), timeout=None,
-            settings=Settings(),
+            settings=Settings(), max_retries=0,
         )
         assert result.success is True
         assert result.output == "haiku-ok"
@@ -443,7 +443,7 @@ class TestOverloadDowngrade:
         backend = AlwaysOverloadBackend()
         result = await execute_with_downgrade(
             backend, "x", "opus", str(tmp_path), timeout=None,
-            settings=Settings(),
+            settings=Settings(), max_retries=0,
         )
         assert result.success is False
         assert "exhausted model chain" in result.error
@@ -458,7 +458,7 @@ class TestOverloadDowngrade:
         backend = AlwaysOverloadBackend()
         result = await execute_with_downgrade(
             backend, "x", "gpt-4", str(tmp_path), timeout=None,
-            settings=Settings(),
+            settings=Settings(), max_retries=0,
         )
         assert result.success is False
         assert "exhausted model chain" in result.error
@@ -525,306 +525,15 @@ class TestMemoryBackendProtocol:
 # ---------------------------------------------------------------------------
 
 
-class TestDispatchPromptFlow:
-    @pytest.mark.asyncio
-    async def test_reads_prompt_file_renders_and_sends(self, tmp_path):
-        """End-to-end: file fetched, Jinja rendered, backend called."""
-        prompt = tmp_path / "test.md"
-        prompt.write_text("Hello {{name}}")
-
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        result = await executor.execute(
-            node, {"name": "world"}, workdir=str(tmp_path),
-        )
-
-        assert result.success is True
-        assert result.output == "backend-output"
-        assert len(backend.calls) == 1
-        prompt_sent, model, seen_workdir, timeout = backend.calls[0]
-        assert prompt_sent == "Hello world"
-        assert model == "sonnet"
-        assert seen_workdir == str(tmp_path)
-        assert timeout is None
-
-    @pytest.mark.asyncio
-    async def test_no_backend_for_resolved_preset_returns_node_error(self, tmp_path):
-        """A node resolving to a valid preset that has NO registered backend
-        (a preset-wiring bug) returns a failed ExecutionResult(kind='node_error')
-        — deterministic → halt — instead of escaping as a raw RuntimeError
-        traceback (which would leave workflow_end at 0/0). A --resume reproduces
-        a preset typo identically, so it must NOT be a transient kind."""
-        from sqrlly.schema.models import LlmPreset
-        prompt = tmp_path / "p.md"
-        prompt.write_text("body")
-        settings = Settings(presets={
-            "default": LlmPreset(transport="cli", provider="anthropic",
-                                 model="sonnet", default=True),
-            "smart": LlmPreset(transport="cli", provider="anthropic",
-                               model="opus"),
-        })
-        # Resolves to "smart" (a valid preset) but only "default" is wired.
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}", params={"preset": "smart"}),
-        )
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": MemoryBackend()},  # never invoked
-            settings=settings,
-        )
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert result.error_kind == "node_error"
-        assert "no backend is registered" in result.error
-
-    @pytest.mark.asyncio
-    async def test_preset_drives_model_per_node(self, tmp_path):
-        """params.preset selects a non-default preset; the resolved
-        preset's model is what the backend sees."""
-        from sqrlly.schema.models import LlmPreset
-
-        prompt = tmp_path / "t.md"
-        prompt.write_text("prompt")
-        backend_smart = MemoryBackend()
-        backend_cheap = MemoryBackend()
-        settings = Settings(presets={
-            "cheap": LlmPreset(
-                transport="cli", provider="anthropic", model="haiku",
-            ),
-            "smart": LlmPreset(
-                transport="cli", provider="anthropic",
-                model="opus", default=True,
-            ),
-        })
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"cheap": backend_cheap, "smart": backend_smart},
-            settings=settings,
-        )
-        # Node referencing 'cheap' → backend_cheap is called with haiku.
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}", params={"preset": "cheap"}),
-        )
-        await executor.execute(node, {}, workdir=str(tmp_path))
-        assert backend_cheap.calls[0][1] == "haiku"
-        assert backend_smart.calls == []
-
-    @pytest.mark.asyncio
-    async def test_node_timeout_threaded_to_backend(self, tmp_path):
-        prompt = tmp_path / "t.md"
-        prompt.write_text("prompt")
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(default_timeout=60.0),
-        )
-        node = Node(
-            id="p1", name="P1", timeout=15.5,
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        await executor.execute(node, {}, workdir=str(tmp_path))
-        assert backend.calls[0][3] == 15.5
-
-    @pytest.mark.asyncio
-    async def test_settings_default_timeout_used_when_node_unset(self, tmp_path):
-        prompt = tmp_path / "t.md"
-        prompt.write_text("prompt")
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(default_timeout=90.0),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        await executor.execute(node, {}, workdir=str(tmp_path))
-        assert backend.calls[0][3] == 90.0
-
-    @pytest.mark.asyncio
-    async def test_no_timeout_configured_passes_none(self, tmp_path):
-        prompt = tmp_path / "t.md"
-        prompt.write_text("prompt")
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        await executor.execute(node, {}, workdir=str(tmp_path))
-        assert backend.calls[0][3] is None
-
-    @pytest.mark.asyncio
-    async def test_missing_prompt_file_returns_error(self, tmp_path):
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": MemoryBackend()},
-            settings=single_preset_settings(),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{tmp_path}/missing.md"),
-        )
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert "Failed to fetch prompt" in result.error
-
-    @pytest.mark.asyncio
-    async def test_backend_error_surfaces_as_failure(self, tmp_path):
-        prompt = tmp_path / "t.md"
-        prompt.write_text("prompt")
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": ErrorBackend()},
-            settings=single_preset_settings(),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert "connection failed" in result.error
-
-    @pytest.mark.asyncio
-    async def test_structured_output_propagates(self, tmp_path):
-        prompt = tmp_path / "t.md"
-        prompt.write_text("prompt")
-        backend = MemoryBackend(response="text", structured={"key": "value"})
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.structured_output == {"key": "value"}
-
-
-# ---------------------------------------------------------------------------
-# Preamble injection through DispatchExecutor (end-to-end)
-# ---------------------------------------------------------------------------
-
-
-class TestPreambleInjection:
-    @pytest.mark.asyncio
-    async def test_preamble_prepended_to_prompt(self, tmp_path):
-        (tmp_path / "preamble.md").write_text("SHARED CONTEXT")
-        prompt = tmp_path / "prompt.md"
-        prompt.write_text("Do the thing")
-
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(preamble_file="preamble.md"),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-
-        assert result.success is True
-        assert backend.calls[0][0] == "SHARED CONTEXT\n\nDo the thing"
-
-    @pytest.mark.asyncio
-    async def test_preamble_with_template_variables(self, tmp_path):
-        (tmp_path / "preamble.md").write_text("Preamble text")
-        prompt = tmp_path / "prompt.md"
-        prompt.write_text("Use {{dep}} here")
-
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(preamble_file="preamble.md"),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        result = await executor.execute(
-            node, {"dep": "injected"}, workdir=str(tmp_path),
-        )
-
-        assert result.success is True
-        assert backend.calls[0][0] == "Preamble text\n\nUse injected here"
-
-    @pytest.mark.asyncio
-    async def test_preamble_file_not_found_returns_error(self, tmp_path):
-        prompt = tmp_path / "prompt.md"
-        prompt.write_text("prompt")
-
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(preamble_file="missing_preamble.md"),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-
-        assert result.success is False
-        assert "Preamble file not found" in result.error
-
-    @pytest.mark.asyncio
-    async def test_no_preamble_setting_unchanged_behavior(self, tmp_path):
-        prompt = tmp_path / "prompt.md"
-        prompt.write_text("Just the prompt")
-
-        backend = MemoryBackend()
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=single_preset_settings(),
-        )
-        node = Node(
-            id="p1", name="P1",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-
-        assert result.success is True
-        assert backend.calls[0][0] == "Just the prompt"
-
-
-# ---------------------------------------------------------------------------
-# Backend transient-error retry (Settings.backend_max_retries)
-# ---------------------------------------------------------------------------
-
-
 class TestBackendTransientRetry:
     @pytest.mark.asyncio
     async def test_zero_retries_is_terminal_today_behavior(self, tmp_path):
-        """backend_max_retries=0 (default): a transient error is terminal,
+        """defaults={"llm": {"backend_max_retries": 0}} (default): a transient error is terminal,
         one attempt — exactly today's behavior."""
         backend = AlwaysTransientErrorBackend()
         result = await execute_with_downgrade(
             backend, "x", "sonnet", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=0),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 0}}),
         )
         assert result.success is False
         assert "Backend error" in result.error
@@ -838,7 +547,7 @@ class TestBackendTransientRetry:
         backend = TransientThenSucceedBackend(fail_count=2, response="recovered")
         result = await execute_with_downgrade(
             backend, "x", "sonnet", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=3),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 3}}),
         )
         assert result.success is True
         assert result.output == "recovered"
@@ -855,7 +564,7 @@ class TestBackendTransientRetry:
         backend = AlwaysTransientErrorBackend()
         result = await execute_with_downgrade(
             backend, "x", "sonnet", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=2),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 2}}),
         )
         assert result.success is False
         assert "Backend error" in result.error
@@ -864,13 +573,13 @@ class TestBackendTransientRetry:
     @pytest.mark.asyncio
     async def test_overload_uses_downgrade_not_backend_retry(self, tmp_path):
         """Overload must take the model-downgrade path, NOT the backend-retry
-        path — it is not double-counted. With backend_max_retries=5 but a
+        path — it is not double-counted. With defaults={"llm": {"backend_max_retries": 5}} but a
         2-step overload, the executor walks opus→sonnet (2 calls) and
         succeeds; the backend-retry budget is never consumed."""
         backend = OverloadThenSucceedBackend(fail_count=1, response="recovered")
         result = await execute_with_downgrade(
             backend, "x", "opus", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=5),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 5}}),
         )
         assert result.success is True
         assert result.output == "recovered"
@@ -889,7 +598,7 @@ class TestBackendTransientRetry:
         started = time.monotonic()
         result = await execute_with_downgrade(
             backend, "x", "gpt-5.3-codex", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=2, retry_backoff=[0.01]),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 2}}, retry_backoff=[0.01]),
         )
         assert time.monotonic() - started >= 0.02
         assert result.success is True
@@ -899,7 +608,7 @@ class TestBackendTransientRetry:
         backend = OverloadThenSucceedBackend(fail_count=2, response="recovered")
         result = await execute_with_downgrade(
             backend, "x", "gpt-5.3-codex", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=0),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 0}}),
         )
         assert result.success is False
         assert result.error_kind == "overload"
@@ -913,7 +622,7 @@ class TestBackendTransientRetry:
         backend = AlwaysOverloadBackend()
         result = await execute_with_downgrade(
             backend, "x", "opus", str(tmp_path), timeout=None,
-            settings=Settings(backend_max_retries=1, retry_backoff=[0.01]),
+            settings=Settings(defaults={"llm": {"backend_max_retries": 1}}, retry_backoff=[0.01]),
         )
         assert result.success is False
         assert "exhausted model chain" in result.error
@@ -924,12 +633,12 @@ class TestBackendTransientRetry:
     @pytest.mark.asyncio
     async def test_backend_retry_distinct_from_gate_max_retries(self, tmp_path):
         """The backend-retry budget is read from backend_max_retries, NOT
-        max_retries. A high gate max_retries with backend_max_retries=0 does
+        max_retries. A high gate max_retries with defaults={"llm": {"backend_max_retries": 0}} does
         NOT retry a transient backend error."""
         backend = AlwaysTransientErrorBackend()
         result = await execute_with_downgrade(
             backend, "x", "sonnet", str(tmp_path), timeout=None,
-            settings=Settings(max_retries=9, backend_max_retries=0),
+            settings=Settings(max_retries=9, defaults={"llm": {"backend_max_retries": 0}}),
         )
         assert result.success is False
         assert len(backend.calls) == 1  # gate budget irrelevant here

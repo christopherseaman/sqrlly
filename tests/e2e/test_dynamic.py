@@ -23,28 +23,27 @@ _ECHO = shutil.which("echo") or "/bin/echo"
 # ---------------------------------------------------------------------------
 
 
-def dynamic_parent(id, manifest_items, *, template_execute=None,
+def dynamic_parent(id, manifest_items, *, template=None,
                    depends_on=None, evaluation=None, final_nodes=None,
                    **kwargs):
     """Shorthand for a command node that echoes a manifest JSON.
 
-    Default ``template_execute`` runs ``_ECHO`` with a Jinja-rendered
+    Default ``template`` runs ``_ECHO`` with a Jinja-rendered
     arg per child — exercises fan-out structure without requiring a
     PromptBackend. Tests that need a different template execution
     shape (e.g. real prompt template, gate template) override.
     """
     manifest = json.dumps({"items": manifest_items})
-    if template_execute is None:
-        template_execute = {
-            "url": _ECHO,
-            "params": {"args": ["-n", "child-{{id}}"]},
+    if template is None:
+        template = {
+            "run": [_ECHO, "-n", "child-{{id}}"],
         }
     node = {
         "id": id,
         "name": id,
-        "execute": {"url": _ECHO, "params": {"args": ["-n", manifest]}},
+        "run": [_ECHO, "-n", manifest],
         "fan_out": {
-            "template": {"execute": template_execute},
+            "template": template,
         },
         "depends_on": depends_on or [],
         **kwargs,
@@ -119,7 +118,7 @@ class TestFinalNodes:
 
         items = [{"id": "a"}, {"id": "b"}]
         finals = [{"id": "summary", "name": "Summary",
-                   "execute": {"url": _ECHO, "params": {"args": ["-n", "summarized"]}}}]
+                   "run": [_ECHO, "-n", "summarized"]}]
 
         config = make_config([dynamic_parent("p", items, final_nodes=finals)])
         executor = DispatchExecutor(workdir=str(tmp_path))
@@ -159,7 +158,7 @@ class TestFinalNodes:
         (tmp_path / "template.md").write_text("sub {{id}}")
         (tmp_path / "summary.md").write_text("aggregate {{parent_branches}}")
 
-        finals = [{"id": "summary", "name": "Summary", "execute": {"url": "summary.md"}}]
+        finals = [{"id": "summary", "name": "Summary", "agent": "summary.md"}]
         config = make_config([dynamic_parent("parent", manifest, final_nodes=finals)])
 
         graph = build_workflow_graph(config, mock)
@@ -195,24 +194,19 @@ class TestFinalNodes:
         """
         from sqrlly.compile.dynamic import _make_final_fan_out_node
         from sqrlly.runtime.state import make_initial_state
-        from sqrlly.schema.models import Execute, Node, FanOut
+        from sqrlly.schema.models import FanOut, FanOutFinalNode, Node
 
         parent = Node(
             id="p", name="P",
-            execute=Execute(url=_ECHO, params={"args": ["x"]}),
+            run=[_ECHO, "x"],
             fan_out=FanOut(manifest_path=None,
-                           template={"execute": {"url": "t.md"}}),
+                           template={"agent": "t.md"}),
         )
-        final = type("F", (), dict(
-            id="summary", name="Summary",
-            description=None,
-            execute=Execute(url="s.md"), evaluation=None,
-            output_contract=None,
-        ))()
+        final = FanOutFinalNode(id="summary", name="Summary", agent="s.md")
 
         from helpers import make_config
         config = make_config([{"id": "p", "name": "P",
-                               "execute": {"url": _ECHO, "params": {"args": ["x"]}}}])
+                               "run": [_ECHO, "x"]}])
 
         node_fn = _make_final_fan_out_node(parent, final, config, executor=None, is_first=True)
         # Parent not completed AND no manifest output → barrier should defer.
@@ -230,9 +224,9 @@ class TestFinalNodes:
         items = [{"id": "a"}]
         finals = [
             {"id": "step1", "name": "Step 1",
-             "execute": {"url": _ECHO, "params": {"args": ["-n", "s1"]}}},
+             "run": [_ECHO, "-n", "s1"]},
             {"id": "step2", "name": "Step 2",
-             "execute": {"url": _ECHO, "params": {"args": ["-n", "s2"]}}},
+             "run": [_ECHO, "-n", "s2"]},
         ]
 
         config = make_config([dynamic_parent("p", items, final_nodes=finals)])
@@ -257,7 +251,7 @@ class TestDownstreamWiring:
 
         items = [{"id": "a"}, {"id": "b"}]
         finals = [{"id": "wrap", "name": "Wrap",
-                   "execute": {"url": _ECHO, "params": {"args": ["-n", "wrapped"]}}}]
+                   "run": [_ECHO, "-n", "wrapped"]}]
 
         config = make_config([
             dynamic_parent("dyn", items, final_nodes=finals),
@@ -333,9 +327,8 @@ class TestDynamicGates:
         config = make_config([
             dynamic_parent(
                 "p", items,
-                template_execute={
-                    "url": _ECHO,
-                    "params": {"args": ["-n", "score={{evals.p.score}}"]},
+                template={
+                    "run": [_ECHO, "-n", "score={{evals.p.score}}"],
                 },
                 evaluation={"validator": str(script), "threshold": 0.8},
             ),
@@ -385,13 +378,10 @@ class TestDynamicGates:
         config = make_config([{
             "id": "p",
             "name": "p",
-            "execute": {"url": _ECHO, "params": {"args": ["-n", json.dumps({"items": items})]}},
+            "run": [_ECHO, "-n", json.dumps({"items": items})],
             "fan_out": {
                 "template": {
-                    "execute": {
-                        "url": _ECHO,
-                        "params": {"args": ["-n", "child-{{id}}"]},
-                    },
+                    "run": [_ECHO, "-n", "child-{{id}}"],
                     "evaluation": {
                         "validator": str(script),
                         "threshold": 0.5,
@@ -436,13 +426,10 @@ class TestDynamicGates:
         config = make_config([{
             "id": "p",
             "name": "p",
-            "execute": {"url": _ECHO, "params": {"args": ["-n", json.dumps({"items": items})]}},
+            "run": [_ECHO, "-n", json.dumps({"items": items})],
             "fan_out": {
                 "template": {
-                    "execute": {
-                        "url": _ECHO,
-                        "params": {"args": ["-n", "p::{{id}}"]},
-                    },
+                    "run": [_ECHO, "-n", "p::{{id}}"],
                     "evaluation": {
                         "validator": str(validator),
                         "threshold": 0.5,
@@ -536,12 +523,10 @@ class TestDynamicEdgeCases:
             make_config([{
                 "id": "p",
                 "name": "P",
-                "execute": {
-                    "url": _ECHO, "params": {"args": ["-n", manifest]},
-                },
+                "run": [_ECHO, "-n", manifest],
                 "fan_out": {
                     "enabled": False,
-                    "template": {"execute": {"url": "t.md"}},
+                    "template": {"agent": "t.md"},
                 },
             }])
 
@@ -555,13 +540,10 @@ class TestDynamicEdgeCases:
         config = make_config([{
             "id": "p",
             "name": "P",
-            "execute": {"url": _ECHO, "params": {"args": ["-n", "not json"]}},
+            "run": [_ECHO, "-n", "not json"],
             "fan_out": {
                 "manifest_path": "manifest.json",
-                "template": {"execute": {
-                    "url": _ECHO,
-                    "params": {"args": ["-n", "child-{{id}}"]},
-                }},
+                "template": {"run": [_ECHO, "-n", "child-{{id}}"]},
             },
         }])
         executor = DispatchExecutor(workdir=str(tmp_path))

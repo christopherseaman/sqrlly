@@ -96,10 +96,7 @@ class TestScaffoldingIntegration:
         node = {
             "id": "produce",
             "name": "produce",
-            "execute": {
-                "url": bash_bin,
-                "params": {"args": ["-c", f"echo -n done > {outfile}"]},
-            },
+            "run": [bash_bin, "-c", f"echo -n done > {outfile}"],
             "output_contract": {
                 "base_directory": "output",
                 "required_files": ["result.txt"],

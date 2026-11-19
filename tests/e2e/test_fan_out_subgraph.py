@@ -47,18 +47,18 @@ def _parent_with_fan_out_subgraph(items, sub_yaml_name="single.yaml",
                                   inputs_decl=None):
     """Build a parent-graph dict whose fan-out template runs a subgraph."""
     manifest = json.dumps({"items": items})
-    template_execute = {"url": sub_yaml_name}
+    workflow = {"file": sub_yaml_name}
     if inputs_decl:
-        template_execute["params"] = {"inputs": inputs_decl}
+        workflow["with"] = inputs_decl
     return {
-        "name": "Parent", "version": "1.0",
+        "name": "Parent",
         "nodes": [
             {
                 "id": "manifest_emitter",
                 "name": "Manifest Emitter",
-                "execute": {"url": _ECHO, "params": {"args": ["-n", manifest]}},
+                "run": [_ECHO, "-n", manifest],
                 "fan_out": {
-                    "template": {"execute": template_execute},
+                    "template": {"workflow": workflow},
                 },
             },
         ],
@@ -73,18 +73,18 @@ async def test_fan_out_per_child_subgraph_dispatch(tmp_path):
     """
     # 2-node subgraph: step1 echoes input, step2 echoes f"final-{step1}".
     _yaml(tmp_path / "single.yaml", {
-        "name": "Single", "version": "1.0",
+        "name": "Single",
         "nodes": [
             {
                 "id": "step1",
                 "name": "Step 1",
-                "execute": {"url": _ECHO, "params": {"args": ["{{topic}}"]}},
+                "run": [_ECHO, "{{topic}}"],
             },
             {
                 "id": "step2",
                 "name": "Step 2",
                 "depends_on": ["step1"],
-                "execute": {"url": _ECHO, "params": {"args": ["final-{{step1}}"]}},
+                "run": [_ECHO, "final-{{step1}}"],
             },
         ],
     })
@@ -121,13 +121,13 @@ async def test_fan_out_per_child_subgraph_dispatch(tmp_path):
 async def test_fan_out_subgraph_failure_surfaces_to_parent(tmp_path):
     """A failing subgraph node flips the branch's child_id into failed_nodes."""
     _yaml(tmp_path / "fail_sub.yaml", {
-        "name": "Fail Sub", "version": "1.0",
+        "name": "Fail Sub",
         "nodes": [
             {
                 "id": "always_fails",
                 "name": "Always Fails",
                 # `false` always exits 1
-                "execute": {"url": _FALSE},
+                "run": [_FALSE],
             },
         ],
     })
@@ -152,22 +152,22 @@ async def test_fan_out_subgraph_cycle_detected_at_compile_time(tmp_path):
     raises SubgraphCycleError at compile (not runtime)."""
     # a.yaml references b.yaml; b.yaml references a.yaml
     _yaml(tmp_path / "a.yaml", {
-        "name": "A", "version": "1.0",
+        "name": "A",
         "nodes": [
             {
                 "id": "ref_to_b",
                 "name": "ref to b",
-                "execute": {"url": "b.yaml"},
+                "workflow": "b.yaml",
             },
         ],
     })
     _yaml(tmp_path / "b.yaml", {
-        "name": "B", "version": "1.0",
+        "name": "B",
         "nodes": [
             {
                 "id": "ref_to_a",
                 "name": "ref to a",
-                "execute": {"url": "a.yaml"},
+                "workflow": "a.yaml",
             },
         ],
     })
@@ -193,15 +193,12 @@ async def test_fan_out_subgraph_inputs_render_per_item(tmp_path):
     state leaked, both branches would see the same persona.
     """
     _yaml(tmp_path / "persona_sub.yaml", {
-        "name": "Persona Sub", "version": "1.0",
+        "name": "Persona Sub",
         "nodes": [
             {
                 "id": "greet",
                 "name": "Greet",
-                "execute": {
-                    "url": _ECHO,
-                    "params": {"args": ["hello-{{persona}}"]},
-                },
+                "run": [_ECHO, "hello-{{persona}}"],
             },
         ],
     })

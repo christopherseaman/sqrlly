@@ -1,41 +1,25 @@
-"""Recursive subgraph composition.
-
-A Node with `config: path/to/another.yaml` is a subgraph reference: its
-config file is loaded as a `Graph` (identical schema to the top-level
-workflow), recursively compiled, and added as a node in the parent
-graph. State projection is explicit:
-
-    - `inputs:` maps parent dep outputs / context vars onto the
-      subgraph's `node_inputs` channel. Subgraph nodes see these as
-      ordinary template variables alongside their own dep outputs.
-
-    - `outputs:` maps subgraph terminal-node outputs back into the
-      parent's `node_outputs`. The default (empty `outputs:`) exposes
-      the subgraph's last terminal node's output as
-      `node_outputs[parent_node.id]`.
-
-Cycle detection is performed at compile time over the config-reference
-DAG; depth is capped at MAX_SUBGRAPH_DEPTH (10).
-"""
+"""Compile child workflows and project terminal results into their parent."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
 
 from sqrlly.compile._manifest import find_terminal_nodes
 from sqrlly.compile.nodes import (
     all_deps_completed,
     build_context,
     check_dep_failed,
+    make_failure_update,
 )
 from sqrlly.runtime.executor.prompt import render_template
+from sqrlly.runtime.logging import SubgraphLogger
 from sqrlly.runtime.result import ExecutionResult
 from sqrlly.runtime.settings_merge import merge_settings
 from sqrlly.runtime.state import WorkflowState, make_initial_state
-from sqrlly.schema.models import Graph, Node, Settings
+from sqrlly.schema.models import Graph, Node, Settings, load_workflow
 
 if TYPE_CHECKING:
     from sqrlly.runtime.result import NodeExecutor
@@ -87,8 +71,8 @@ class _BranchScopedExecutor:
             workdir=self._branch_tree, settings_override=settings_override,
         )
 
-    def get_backend(self) -> object:
-        return self._inner.get_backend() if hasattr(self._inner, "get_backend") else None
+    def get_backend(self, settings: Settings | None = None) -> object:
+        return self._inner.get_backend(settings) if hasattr(self._inner, "get_backend") else None
 
     def get_worktree(self, node_id: str) -> "str | None":
         return self._inner.get_worktree(node_id) if hasattr(self._inner, "get_worktree") else None
@@ -106,12 +90,12 @@ class _BranchScopedExecutor:
             await self._inner.close()
 
 
-def load_graph(config_path: str, base_dir: str | Path = ".") -> Graph:
+def load_graph(
+    config_path: str, base_dir: str | Path = ".", parent_settings: Settings | None = None,
+) -> Graph:
     """Load and parse a Graph YAML file. Path is relative to base_dir."""
-    path = Path(base_dir) / config_path
-    with open(path) as f:
-        raw = yaml.safe_load(f)
-    return Graph(**raw)
+    resolve = (lambda child: merge_settings(parent_settings, child, Path(base_dir))) if parent_settings else None
+    return load_workflow(Path(base_dir) / config_path, resolve_settings=resolve)
 
 
 def _terminal_node_output(sub_state: dict[str, Any], sub_config: Graph) -> str:
@@ -135,7 +119,7 @@ def make_subgraph_node(
     executor: "NodeExecutor | None",
     depth: int,
     logger: Any | None = None,
-    parent_settings: Settings | None = None,
+    timeout: float | None = None,
 ):
     """Create the wrapper async function added as the parent graph's node.
 
@@ -144,52 +128,27 @@ def make_subgraph_node(
       1. Renders `inputs:` templates against parent context.
       2. Builds a fresh subgraph initial state with rendered inputs.
       3. Invokes the compiled subgraph.
-      4. Projects subgraph outputs back into parent state per `outputs:`.
+      4. Returns the last terminal output to the parent.
 
     When ``logger`` is supplied, the wrapper streams subgraph state
     snapshots through a ``SubgraphLogger`` that prefixes node ids with
     the parent's id, so subgraph-internal completions surface in the
     parent JSONL keyed as ``parent_id::child_id``.
 
-    ``parent_settings`` (Phase 3 / scope-aware): the parent scope's
-    *effective* ``Settings``. Merged with ``sub_config.settings``
-    (child-explicit-fields-win) and threaded into the recursive
-    ``compile_fn`` so subgraph-internal nodes see the merged view.
     """
-    parent_eff = parent_settings or sub_config.settings
-    sub_effective = merge_settings(parent_eff, sub_config.settings)
+    sub_logger = SubgraphLogger(logger, parent_node.id) if logger else None
     sub_graph = compile_fn(
         sub_config, executor=executor, _depth=depth + 1,
-        effective_settings=sub_effective,
+        effective_settings=sub_config.settings, logger=sub_logger,
     )
 
     parent_id = parent_node.id
-    inputs_decl: dict[str, str] = {}
-    outputs_decl: dict[str, str] = {}
-    if parent_node.execute is not None and parent_node.execute.params:
-        params = parent_node.execute.params
-        if isinstance(params.get("inputs"), dict):
-            inputs_decl = dict(params["inputs"])
-        if isinstance(params.get("outputs"), dict):
-            outputs_decl = dict(params["outputs"])
+    inputs_decl = parent_node.workflow.inputs
 
-    async def wrapper(parent_state: WorkflowState) -> dict[str, Any]:
-        if parent_id in parent_state.get("failed_nodes", set()):
-            return {}
-        # Dep-join: same semantics as a regular execution node. The
-        # `completed_nodes` re-entry guard removed in audit fix #19
-        # (Stage 5c) is intentionally absent here too — Command(goto=)
-        # re-fires must re-execute the subgraph wrapper, not no-op.
-        if (failure := check_dep_failed(parent_node, parent_state)) is not None:
-            return failure
-        if parent_node.depends_on and not all_deps_completed(
-            parent_node, parent_state,
-        ):
-            return {}
-
+    async def run_child(parent_state: WorkflowState) -> dict[str, Any]:
         parent_context = build_context(parent_node, parent_state)
         rendered_inputs = {
-            k: render_template(v, parent_context)
+            k: render_template(v, parent_context) if isinstance(v, str) else v
             for k, v in inputs_decl.items()
         }
 
@@ -200,9 +159,7 @@ def make_subgraph_node(
         )
         sub_state["node_inputs"] = rendered_inputs
 
-        if logger is not None:
-            from sqrlly.runtime.logging import SubgraphLogger
-            sub_logger = SubgraphLogger(logger, prefix=parent_id)
+        if sub_logger is not None:
             sub_result = sub_state
             async for chunk_type, payload in sub_graph.astream(
                 sub_state, stream_mode=["updates", "values"],
@@ -216,19 +173,7 @@ def make_subgraph_node(
             sub_result = await sub_graph.ainvoke(sub_state)
 
         update: dict[str, Any] = {"completed_nodes": {parent_id}}
-        sub_outputs = sub_result.get("node_outputs", {}) or {}
-
-        if outputs_decl:
-            new_outputs: dict[str, str] = {}
-            for parent_key, template in outputs_decl.items():
-                rendered = render_template(template, sub_outputs)
-                new_outputs[f"{parent_id}.{parent_key}"] = rendered
-            new_outputs[parent_id] = _terminal_node_output(sub_result, sub_config)
-            update["node_outputs"] = new_outputs
-        else:
-            update["node_outputs"] = {
-                parent_id: _terminal_node_output(sub_result, sub_config),
-            }
+        update["node_outputs"] = {parent_id: _terminal_node_output(sub_result, sub_config)}
 
         if sub_result.get("failed_nodes"):
             update["failed_nodes"] = {parent_id}
@@ -246,13 +191,34 @@ def make_subgraph_node(
 
         return update
 
+    async def wrapper(parent_state: WorkflowState) -> dict[str, Any]:
+        if (parent_id in parent_state.get("_resume_skip", set())
+                or parent_id in parent_state.get("failed_nodes", set())):
+            return {}
+        # Dep-join: same semantics as a regular execution node. The
+        # `completed_nodes` re-entry guard removed in audit fix #19
+        # (Stage 5c) is intentionally absent here too — Command(goto=)
+        # re-fires must re-execute the subgraph wrapper, not no-op.
+        if (failure := check_dep_failed(parent_node, parent_state)) is not None:
+            return failure
+        if parent_node.depends_on and not all_deps_completed(
+            parent_node, parent_state,
+        ):
+            return {}
+
+        try:
+            async with asyncio.timeout(timeout):
+                return await run_child(parent_state)
+        except TimeoutError:
+            return make_failure_update(parent_id, f"Node timed out after {timeout}s", kind="timeout")
+
     wrapper.__name__ = f"subgraph_{parent_id}"
     return wrapper
 
 
 def make_fan_out_subgraph_invoker(
-    template_url: str,
-    template_params: dict[str, Any],
+    workflow_file: str,
+    inputs_decl: dict[str, Any],
     compile_fn: Any,
     base_dir: str | Path,
     depth: int,
@@ -285,7 +251,7 @@ def make_fan_out_subgraph_invoker(
     build time) so each branch gets its own compiled graph wired to its
     own ``_BranchScopedExecutor``.
 
-    Inputs (``template_params['inputs']``) render against the per-item
+    Inputs (``workflow.with``) render against the per-item
     context; the rendered map seeds the sub-invocation's
     ``node_inputs``. The subgraph's terminal-node output flows back as
     ``ExecutionResult.output`` so downstream gate evaluation, retries,
@@ -295,14 +261,8 @@ def make_fan_out_subgraph_invoker(
     # outermost build runs it (depth=0 callers), so nested fan-out
     # subgraphs don't re-walk the same chains.
     if depth == 0:
-        detect_config_cycle(template_url, base_dir=base_dir)
-    sub_config = load_graph(template_url, base_dir=base_dir)
-    # Build effective settings once at factory time (merge is pure).
-    parent_eff = parent_settings or sub_config.settings
-    sub_effective = merge_settings(parent_eff, sub_config.settings)
-    inputs_decl: dict[str, str] = {}
-    if isinstance(template_params.get("inputs"), dict):
-        inputs_decl = dict(template_params["inputs"])
+        detect_config_cycle(workflow_file, base_dir=base_dir, parent_settings=parent_settings)
+    sub_config = load_graph(workflow_file, base_dir, parent_settings)
 
     # Gate: isolate iff the effective worktree mode for THIS fan-out is not
     # "off". A per-fan-out override (FanOutTemplate.worktree) wins over the
@@ -348,13 +308,14 @@ def make_fan_out_subgraph_invoker(
             _BranchScopedExecutor(executor, branch_tree)
             if executor is not None else None
         )
+        sub_logger = SubgraphLogger(logger, prefix) if logger and prefix else None
         sub_compiled = compile_fn(
             sub_config, executor=branch_exec, _depth=depth + 1,
-            effective_settings=sub_effective,
+            effective_settings=sub_config.settings, logger=sub_logger,
         )
 
         rendered_inputs = {
-            k: render_template(v, context) for k, v in inputs_decl.items()
+            k: render_template(v, context) if isinstance(v, str) else v for k, v in inputs_decl.items()
         }
         sub_state = make_initial_state(
             workflow_name=sub_config.name,
@@ -364,9 +325,7 @@ def make_fan_out_subgraph_invoker(
         sub_state["node_inputs"] = rendered_inputs
 
         try:
-            if logger is not None and prefix is not None:
-                from sqrlly.runtime.logging import SubgraphLogger
-                sub_logger = SubgraphLogger(logger, prefix=prefix)
+            if sub_logger is not None:
                 sub_result = sub_state
                 async for chunk_type, payload in sub_compiled.astream(
                     sub_state, stream_mode=["updates", "values"],
@@ -403,51 +362,30 @@ def make_fan_out_subgraph_invoker(
     return invoke
 
 
-def execute_subgraph_path(execute: Any) -> str | None:
-    """Return the subgraph YAML path for an Execute block whose `url`
-    ends in `.yaml` / `.yml` OR which carries `mode: subgraph` to
-    force-route an extensionless URL through the subgraph compiler.
-    Used by callers that already hold the Execute (fan-out templates)
-    without a containing Node.
-    """
-    if execute is None or not execute.url:
-        return None
-    if getattr(execute, "mode", None) == "subgraph":
-        return execute.url
-    suffix = Path(execute.url).suffix.lower()
-    if suffix in {".yaml", ".yml"}:
-        return execute.url
-    return None
-
-
 def node_subgraph_path(n: Node) -> str | None:
-    """Return the subgraph YAML path for a Stage-5b execute.url ending
-    in `.yaml` or `.yml`. Single source of truth for "is this node a
-    subgraph reference and where does it point?"
-    """
-    return execute_subgraph_path(n.execute)
+    return n.workflow.file if n.workflow is not None else None
 
 
 def detect_config_cycle(
     config_path: str,
     visited: list[str] | None = None,
     base_dir: str | Path = ".",
+    parent_settings: Settings | None = None,
 ) -> None:
-    """Walk the config-reference DAG; raise on cycle.
-
-    Called at compile time for any subgraph reference (Stage 5b
-    ``node.execute.url`` ending in ``.yaml``). Visited paths are
-    accumulated as the walker descends; revisiting a path means the
-    chain refers back to an ancestor.
-    """
+    """Check ordinary and fan-out workflow references for ancestor cycles."""
     visited = list(visited or [])
-    abs_path = str(Path(base_dir) / config_path)
+    abs_path = str((Path(base_dir) / config_path).resolve())
     if abs_path in visited:
         chain = " -> ".join(visited + [abs_path])
         raise SubgraphCycleError(f"Subgraph reference cycle: {chain}")
     visited.append(abs_path)
-    sub = load_graph(config_path, base_dir=base_dir)
-    for n in sub.nodes:
-        sub_path = node_subgraph_path(n)
-        if sub_path is not None:
-            detect_config_cycle(sub_path, visited=visited, base_dir=base_dir)
+    sub = load_graph(config_path, base_dir, parent_settings)
+    for node in sub.nodes:
+        steps = [node]
+        if node.fan_out:
+            if node.fan_out.template:
+                steps.append(node.fan_out.template)
+            steps.extend(node.fan_out.final_nodes)
+        for step in steps:
+            if step.workflow:
+                detect_config_cycle(step.workflow.file, visited, Path(abs_path).parent, sub.settings)

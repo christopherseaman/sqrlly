@@ -1,4 +1,3 @@
-import hashlib
 from pathlib import Path
 
 import pytest
@@ -6,7 +5,6 @@ from click.testing import CliRunner
 
 from sqrlly.cli.main import (
     CHECKPOINT_DB,
-    _collect_subgraph_presets,
     _db_path,
     _effective_safe_mode,
     _is_git_repo,
@@ -60,9 +58,9 @@ class TestValidateCommand:
     def test_validate_reports_phase_count(self, runner, tmp_path):
         config = tmp_path / "simple.yaml"
         config.write_text(
-            "name: Test\nversion: '1.0'\nnodes:\n"
+            "name: Test\nnodes:\n"
             "  - id: p1\n    name: Node 1\n"
-            "    execute:\n      url: t.md\n"
+            "    agent: {text: test}\n"
         )
         result = runner.invoke(cli, ["validate", str(config)])
         assert result.exit_code == 0
@@ -73,9 +71,9 @@ class TestValidateCommand:
         succeeds (exit 0, 'Valid:') but emits an advisory warning."""
         config = tmp_path / "hyphen.yaml"
         config.write_text(
-            "name: Test\nversion: '1.0'\nnodes:\n"
+            "name: Test\nnodes:\n"
             "  - id: research-phase\n    name: Research\n"
-            "    execute:\n      url: t.md\n"
+            "    agent: {text: test}\n"
         )
         result = runner.invoke(cli, ["validate", str(config)])
         assert result.exit_code == 0
@@ -175,9 +173,9 @@ class TestRunCommand:
         echo_bin = shutil.which("echo") or "/bin/echo"
         config = tmp_path / "simple.yaml"
         config.write_text(
-            "name: Simple\nversion: '1.0'\nnodes:\n"
+            "name: Simple\nnodes:\n"
             "  - id: echo\n    name: Echo Test\n"
-            f"    execute:\n      url: {echo_bin}\n      params:\n        args: ['hello']\n"
+            f"    run: [{echo_bin}, 'hello']\n"
         )
         result = runner.invoke(cli, ["run", str(config), "--workdir", str(tmp_path)])
         assert result.exit_code == 0
@@ -190,10 +188,9 @@ class TestRunCommand:
         echo_bin = shutil.which("echo") or "/bin/echo"
         config = tmp_path / "hyphen.yaml"
         config.write_text(
-            "name: Simple\nversion: '1.0'\nnodes:\n"
+            "name: Simple\nnodes:\n"
             "  - id: echo-test\n    name: Echo Test\n"
-            f"    execute:\n      url: {echo_bin}\n"
-            "      params:\n        args: ['hello']\n"
+            f"    run: [{echo_bin}, 'hello']\n"
         )
         result = runner.invoke(
             cli, ["run", str(config), "--workdir", str(tmp_path)]
@@ -209,9 +206,9 @@ class TestRunCommand:
         false_bin = shutil.which("false") or "/bin/false"
         config = tmp_path / "fail.yaml"
         config.write_text(
-            "name: Fail\nversion: '1.0'\nnodes:\n"
+            "name: Fail\nnodes:\n"
             "  - id: fail\n    name: Fail Test\n"
-            f"    execute:\n      url: {false_bin}\n"
+            f"    run: [{false_bin}]\n"
         )
         result = runner.invoke(cli, ["run", str(config), "--workdir", str(tmp_path)])
         assert result.exit_code != 0
@@ -240,12 +237,11 @@ class TestRunCommand:
         _init_repo(repo_gc)
         cfg_gc = repo_gc / "workflow.yaml"
         cfg_gc.write_text(
-            "name: GcTest\nversion: '1.0'\n"
+            "name: GcTest\n"
             "settings:\n  worktree_gc: on_success\n"
             "nodes:\n"
             "  - id: step\n    name: Step\n"
-            f"    execute:\n      url: {true_bin}\n"
-            "      params:\n        args: []\n"
+            f"    run: [{true_bin}]\n"
         )
         result_gc = runner.invoke(cli, ["run", str(cfg_gc), "--workdir", str(repo_gc)])
         assert result_gc.exit_code == 0, result_gc.output + result_gc.stderr
@@ -259,11 +255,10 @@ class TestRunCommand:
         _init_repo(repo_keep)
         cfg_keep = repo_keep / "workflow.yaml"
         cfg_keep.write_text(
-            "name: KeepTest\nversion: '1.0'\n"
+            "name: KeepTest\n"
             "nodes:\n"
             "  - id: step\n    name: Step\n"
-            f"    execute:\n      url: {true_bin}\n"
-            "      params:\n        args: []\n"
+            f"    run: [{true_bin}]\n"
         )
         result_keep = runner.invoke(cli, ["run", str(cfg_keep), "--workdir", str(repo_keep)])
         assert result_keep.exit_code == 0, result_keep.output + result_keep.stderr
@@ -302,15 +297,14 @@ class TestRunCommand:
         # worktree_gc: on_success is set, but the run is not clean.
         cfg = repo / "workflow.yaml"
         cfg.write_text(
-            "name: FailGcTest\nversion: '1.0'\n"
+            "name: FailGcTest\n"
             "settings:\n  worktree_gc: on_success\n"
             "nodes:\n"
             "  - id: ok\n    name: Ok\n"
-            f"    execute:\n      url: {true_bin}\n"
-            "      params:\n        args: []\n"
+            f"    run: [{true_bin}]\n"
             "  - id: bad\n    name: Bad\n"
             "    depends_on: [ok]\n"
-            f"    execute:\n      url: {false_bin}\n"
+            f"    run: [{false_bin}]\n"
         )
         result = runner.invoke(cli, ["run", str(cfg), "--workdir", str(repo)])
         assert result.exit_code != 0, "expected non-zero exit on failure"
@@ -353,12 +347,12 @@ class TestRunCommand:
         _init_repo(repo_promote)
         cfg_promote = repo_promote / "workflow.yaml"
         cfg_promote.write_text(
-            "name: PromoteTest\nversion: '1.0'\n"
+            "name: PromoteTest\n"
             "nodes:\n"
             "  - id: writer\n    name: Writer\n"
             "    worktree: isolated\n"
             "    promote: true\n"
-            f"    execute:\n      url: {script}\n"
+            f"    run: [{script}]\n"
         )
         result_promote = runner.invoke(
             cli, ["run", str(cfg_promote), "--workdir", str(repo_promote)]
@@ -381,11 +375,11 @@ class TestRunCommand:
         _init_repo(repo_nopromote)
         cfg_nopromote = repo_nopromote / "workflow.yaml"
         cfg_nopromote.write_text(
-            "name: NoPromoteTest\nversion: '1.0'\n"
+            "name: NoPromoteTest\n"
             "nodes:\n"
             "  - id: writer\n    name: Writer\n"
             "    worktree: isolated\n"
-            f"    execute:\n      url: {script}\n"
+            f"    run: [{script}]\n"
         )
         result_nopromote = runner.invoke(
             cli, ["run", str(cfg_nopromote), "--workdir", str(repo_nopromote)]
@@ -399,31 +393,13 @@ class TestRunCommand:
 
 
 class TestRunOptions:
-    def test_preset_unknown_raises(self, runner, tmp_path):
-        import shutil
-        echo_bin = shutil.which("echo") or "/bin/echo"
+    @pytest.mark.parametrize("flag", ["--preset", "-p"])
+    def test_removed_preset_flag_rejected(self, runner, tmp_path, flag):
         config = tmp_path / "simple.yaml"
-        # YAML with a single declared preset; --preset references one
-        # that doesn't exist.
-        config.write_text(
-            "name: Test\nversion: '1.0'\n"
-            "settings:\n"
-            "  presets:\n"
-            "    default:\n"
-            "      transport: cli\n"
-            "      provider: anthropic\n"
-            "      model: sonnet\n"
-            "      default: true\n"
-            "nodes:\n"
-            "  - id: node-1\n    name: Node 1\n"
-            f"    execute:\n      url: {echo_bin}\n      params:\n        args: ['hi']\n"
-        )
-        result = runner.invoke(
-            cli, ["run", str(config), "--preset", "bogus", "--workdir", str(tmp_path)]
-        )
-        assert result.exit_code != 0
-        combined = (result.output or "") + str(result.exception or "")
-        assert "bogus" in combined
+        config.write_text("nodes: [{id: hello, run: echo}]\n")
+        result = runner.invoke(cli, ["run", str(config), flag, "example"])
+        assert result.exit_code == 2
+        assert f"No such option: {flag}" in result.output
 
 
 class TestResumeCommand:
@@ -432,9 +408,9 @@ class TestResumeCommand:
         echo_bin = shutil.which("echo") or "/bin/echo"
         config = tmp_path / "simple.yaml"
         config.write_text(
-            "name: Test\nversion: '1.0'\nnodes:\n"
+            "name: Test\nnodes:\n"
             "  - id: a\n    name: A\n"
-            f"    execute:\n      url: {echo_bin}\n      params:\n        args: ['hi']\n"
+            f"    run: [{echo_bin}, 'hi']\n"
         )
         return config
 
@@ -481,8 +457,8 @@ class TestCliHelpers:
         from sqrlly.schema.models import Graph
 
         config = Graph(
-            name="test", version="1.0",
-            nodes=[{"id": "a", "name": "A", "execute": {"url": "t.md"}}],
+            name="test",
+            nodes=[{"id": "a", "name": "A", "agent": {"text": "test"}}],
         )
         id1 = _thread_id_for(config, str(tmp_path))
         id2 = _thread_id_for(config, str(tmp_path))
@@ -494,8 +470,8 @@ class TestCliHelpers:
         from sqrlly.schema.models import Graph
 
         config = Graph(
-            name="test", version="1.0",
-            nodes=[{"id": "a", "name": "A", "execute": {"url": "t.md"}}],
+            name="test",
+            nodes=[{"id": "a", "name": "A", "agent": {"text": "test"}}],
         )
         id_a = _thread_id_for(config, str(tmp_path / "a"))
         id_b = _thread_id_for(config, str(tmp_path / "b"))
@@ -504,71 +480,6 @@ class TestCliHelpers:
     def test_db_path(self, tmp_path):
         result = _db_path(str(tmp_path))
         assert result == str(Path(tmp_path) / CHECKPOINT_DB)
-
-
-class TestCollectSubgraphPresets:
-    """P1 regression — a subgraph node resolves its own preset, so the
-    CLI must collect subgraph-declared presets into the backend set."""
-
-    def _write(self, path: Path, text: str):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-
-    def test_collects_preset_from_referenced_subgraph(self, tmp_path):
-        from sqrlly.schema.models import Graph
-
-        self._write(tmp_path / "sub.yaml", (
-            "name: Sub\nversion: '1.0'\n"
-            "settings:\n"
-            "  presets:\n"
-            "    sub_default:\n"
-            "      transport: cli\n"
-            "      provider: anthropic\n"
-            "      model: sonnet\n"
-            "      default: true\n"
-            "nodes:\n"
-            "  - id: inner\n    name: Inner\n"
-            "    execute:\n      url: inner.md\n"
-        ))
-        parent = Graph(
-            name="parent", version="1.0",
-            nodes=[{"id": "s", "name": "S", "execute": {"url": "sub.yaml"}}],
-        )
-        collected = _collect_subgraph_presets(parent, str(tmp_path))
-        assert "sub_default" in collected
-        assert collected["sub_default"].model == "sonnet"
-
-    def test_no_subgraphs_returns_empty(self, tmp_path):
-        from sqrlly.schema.models import Graph
-
-        parent = Graph(
-            name="parent", version="1.0",
-            nodes=[{"id": "a", "name": "A", "execute": {"url": "a.md"}}],
-        )
-        assert _collect_subgraph_presets(parent, str(tmp_path)) == {}
-
-    def test_recurses_into_nested_subgraphs(self, tmp_path):
-        from sqrlly.schema.models import Graph
-
-        self._write(tmp_path / "leaf.yaml", (
-            "name: Leaf\nversion: '1.0'\n"
-            "settings:\n"
-            "  presets:\n"
-            "    leaf_preset:\n"
-            "      transport: cli\n      provider: anthropic\n"
-            "      model: haiku\n      default: true\n"
-            "nodes:\n  - id: x\n    name: X\n    execute:\n      url: x.md\n"
-        ))
-        self._write(tmp_path / "mid.yaml", (
-            "name: Mid\nversion: '1.0'\n"
-            "nodes:\n  - id: m\n    name: M\n    execute:\n      url: leaf.yaml\n"
-        ))
-        parent = Graph(
-            name="parent", version="1.0",
-            nodes=[{"id": "s", "name": "S", "execute": {"url": "mid.yaml"}}],
-        )
-        collected = _collect_subgraph_presets(parent, str(tmp_path))
-        assert "leaf_preset" in collected
 
 
 class TestPromoteConflict:
@@ -593,14 +504,14 @@ class TestPromoteConflict:
     def _cfg(self, repo, a, b, mode):
         cfg = repo / "workflow.yaml"
         cfg.write_text(
-            "name: ConflictTest\nversion: '1.0'\n"
+            "name: ConflictTest\n"
             "settings:\n"
             f"  on_promote_conflict: {mode}\n"
             "nodes:\n"
             "  - id: writer_a\n    name: A\n    worktree: isolated\n    promote: true\n"
-            f"    execute:\n      url: {a}\n"
+            f"    run: [{a}]\n"
             "  - id: writer_b\n    name: B\n    worktree: isolated\n    promote: true\n"
-            f"    execute:\n      url: {b}\n"
+            f"    run: [{b}]\n"
         )
         return cfg
 

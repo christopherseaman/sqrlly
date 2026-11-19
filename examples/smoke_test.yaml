@@ -1,15 +1,5 @@
-name: "Smoke Test"
-version: "0.1.0"
-
+name: Smoke Test
 nodes:
   - id: hello
-    name: "Hello World"
-    execute:
-      url: "examples/prompts/hello.md"
-settings:
-  presets:
-    default:
-      transport: cli
-      provider: openai
-      model: "gpt-5.6-luna"
-      default: true
+    name: Hello World
+    llm: hello.md

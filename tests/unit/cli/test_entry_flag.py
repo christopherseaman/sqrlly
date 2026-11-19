@@ -18,25 +18,18 @@ def _write_workflow(tmp_path: Path) -> Path:
     wf = tmp_path / "wf.yaml"
     wf.write_text(textwrap.dedent(f"""\
         name: entry-validate
-        version: "0.1.0"
         nodes:
           - id: a
             name: a
-            execute:
-              url: {echo}
-              params: {{args: ["-n", "a-out"]}}
+            run: [{echo}, "-n", "a-out"]
           - id: b
             name: b
             depends_on: [a]
-            execute:
-              url: {echo}
-              params: {{args: ["-n", "b-out"]}}
+            run: [{echo}, "-n", "b-out"]
           - id: c
             name: c
             depends_on: [b]
-            execute:
-              url: {echo}
-              params: {{args: ["-n", "c-out"]}}
+            run: [{echo}, "-n", "c-out"]
     """))
     return wf
 

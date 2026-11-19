@@ -3,9 +3,6 @@
 The complete field-by-field reference for a sqrlly workflow YAML. For an
 orientation and quickstart, see the [README](README.md).
 
-All defaults below are the actual defaults declared on the Pydantic
-models in `src/sqrlly/schema/models.py` and `src/sqrlly/schema/params.py`.
-
 ---
 
 ## Graph
@@ -14,8 +11,7 @@ The top-level document.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `name` | `str` | required | Workflow name. Part of the checkpoint thread id. |
-| `version` | `str` | required | Free-form version string. |
+| `name` | `str` | optional | Workflow name. Part of the checkpoint thread id. |
 | `nodes` | `list[Node]` | required | The workflow's nodes. |
 | `settings` | `Settings` | `Settings()` | Global settings (see below). |
 
@@ -23,10 +19,7 @@ Compile-time validation rejects: duplicate node ids; `depends_on`
 references to a missing or self node; `route` targets that are neither a
 real node id nor `__end__`; a node that `depends_on` an inline-route
 node; a node that sets both `fan_out` and `route` (incompatible
-dispatchers — route from a node downstream of the fan-out instead); a
-`params.preset` that names no preset in `settings.presets`.
-
----
+dispatchers — route from a node downstream of the fan-out instead).
 
 ## Settings
 
@@ -39,22 +32,18 @@ Unknown keys in `settings:` are rejected with a `ValidationError` — no silent 
 | Field | Type | Default | Effect |
 |---|---|---|---|
 | `max_retries` | `int` | `3` | Default retry budget when an evaluation fails. |
-| `backend_max_retries` | `int` | `0` | Retries of the SAME backend dispatch on a backend error (e.g. `claude exited 1` — a transient blip), with `retry_backoff` between attempts. Distinct from `max_retries` (the gate/evaluation budget). `0` = one attempt, terminal. An overload first walks the fixed opus→sonnet→haiku downgrade chain without consuming a retry; once the chain has no lower model (at once for a model outside the chain, e.g. every Codex model) each retry re-dispatches from the original model. Applies to prompt nodes and to `.md` LLM gate dispatches alike. |
-| `safe_mode` | `bool` | `false` | Run Claude with `--safe-mode` (`transport: cli`, `provider: anthropic` only): operator customizations — output styles, CLAUDE.md, skills, MCP, hooks — are disabled. It has no effect on Codex. The `--safe-mode` / `--no-safe-mode` CLI flag overrides this per run. |
+| `safe_mode` | `bool` | `false` | Run Claude with `--safe-mode` (`provider: anthropic` only): operator customizations — output styles, CLAUDE.md, skills, MCP, hooks — are disabled. It has no effect on Codex. The `--safe-mode` / `--no-safe-mode` CLI flag overrides this per run. |
 | `default_timeout` | `float \| None` | `None` | Per-node timeout (seconds); `None` = no timeout. |
 | `preamble_file` | `str \| None` | `None` | Prepended to every prompt before Jinja rendering. A missing file is a hard error. |
 | `retry_backoff` | `list[float]` | `[]` | `asyncio.sleep` seconds before each retry; clamps to the last value past the list length. |
 
 ### Models and backends
 
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `presets` | `dict[str, Preset]` | `{}` | Named execution bundles. See [Presets](#presets). |
-
-> The pre-rework `default_model` and `executor` settings no longer
-> exist. Backend selection is entirely through `presets`; there is no
-> auto-detection (empty `presets` is valid for script-only workflows —
-> LLM nodes then fail at dispatch).
+`settings.model` supplies a shared model for prompt nodes. Without a model selection the provider CLI chooses.
+`settings.defaults.agent` and `settings.defaults.llm` can select a provider and model per kind.
+Prompt kinds each default to two backend retries. Set `settings.defaults.agent.backend_max_retries` or `settings.defaults.llm.backend_max_retries` to change that budget.
+Node options override kind defaults. Each of the four kinds accepts a default timeout.
+`settings.prompts` sets the prompt directory relative to the YAML file.
 
 ### Concurrency
 
@@ -82,126 +71,13 @@ The memory gate composes (AND) with the semaphores — every gate must
 allow dispatch. In-flight jobs are never aborted by the gate; only new
 acquisitions wait.
 
-### URL fetch / remote
-
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `base_url` | `str \| None` | `None` | Default base for relative `execute.url`. |
-| `allow_remote_urls` | `bool` | `false` | Master switch for non-`file://` fetches. |
-| `allowed_url_hosts` | `list[str]` | `[]` | fnmatch host allow-list. `[]` = no filter. |
-| `url_headers` | `dict[str, dict[str, str]]` | `{}` | URL-prefix → headers; `${VAR}` expands from env at fetch time. |
-| `max_remote_fetch_bytes` | `int` | `5_000_000` | Body size cap (5 MB). Also applies to `file://` reads. |
-
----
-
-## Presets
-
-A preset is a named execution bundle under `settings.presets`. A node
-selects one by name via `params.preset`; the matching default applies
-otherwise. Two kinds, discriminated by a `kind` field (absent `kind`
-defaults to `llm`, so pre-`CommandPreset` YAML still parses).
-
-### LlmPreset (`kind: llm`)
-
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `kind` | `"llm"` | `"llm"` | Discriminator. |
-| `transport` | `"cli"` | `"cli"` | Invocation shape — a subprocess per call; see the provider table below. |
-| `provider` | `"openai" \| "anthropic"` | `"openai"` | CLI implementation/model family. `openai` maps to Codex CLI; `anthropic` maps to Claude. |
-| `model` | `str` | required | Model id. |
-| `default` | `bool` | `false` | Exactly one `LlmPreset` must be `true`. |
-| `permission_mode` | `"default" \| "acceptEdits" \| "bypassPermissions" \| "plan" \| None` | `None` | Claude CLI tool-use policy via `--permission-mode`. Rejected for Codex. |
-| `allowed_tools` | `list[str] \| None` | `None` | Claude CLI tools via `--allowedTools`. Rejected for Codex. |
-| `disallowed_tools` | `list[str] \| None` | `None` | Claude CLI tools via `--disallowedTools`. Rejected for Codex. |
-| `env` | `dict[str, str]` | `{}` | Environment overlay for the spawned backend process, e.g. `CLAUDE_CODE_EFFORT_LEVEL`. Overlaid on the inherited environment at spawn; never replaces it. Per-node tuning is done by selecting a preset variant via `params.preset`. |
-| `cli_args` | `list[str] \| None` | `None` | Extra args appended verbatim before the stdin prompt marker (escape hatch). |
-
-> Tool-use defaults (all unset): CLI providers receive no extra tool flags.
-> Claude-only
-> permission fields are rejected for the Codex provider; use `cli_args` for
-> documented Codex options.
-
-Granting `Task` in `allowed_tools` (with a `permission_mode` that permits
-it) enables an in-node *managed-team* pattern — Claude inside the node
-spawns and supervises sub-agent members itself. See SKILLS.md for the full
-coordinator pattern and its caveats (the members are sub-agents internal to
-one sqrlly node, not isolated sqrlly nodes).
-
-The supported providers are:
-
-| `provider` | Implementation |
-|---|---|
-| `openai` | `codex exec --skip-git-repo-check --model <model> -`; stdin carries the prompt. |
-| `anthropic` | `claude -p --model <model>`; stdin carries the prompt. |
-
-Each call is an independent subprocess: no warm state, real `asyncio`
-parallelism per call, and `close()` is a no-op.
-
-Omitting `transport` selects `cli`; omitting `provider` selects `openai`.
-Therefore a Codex preset needs only `model`. `provider: anthropic` selects
-the Claude CLI. Codex does not accept the
-Claude-specific `permission_mode`, `allowed_tools`, or `disallowed_tools`
-fields; use `cli_args` for documented Codex options. The api transport — direct calls to
-Anthropic / OpenAI / DeepSeek / custom OpenAI-compatible endpoints —
-was removed in 0.2.x; re-introduction remains on the roadmap.
-
-### CommandPreset (`kind: command`)
-
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `kind` | `"command"` | required | Discriminator. |
-| `command` | `str` | required | Interpreter command, e.g. `"uv run --no-project"`. |
-
-A `CommandPreset` overrides the default interpreter for a script node.
-The command is assembled as `shlex.split(command)` + the script path +
-`params.args`; the placeholders `{{file}}` and `{{args}}` allow explicit
-positioning. `CommandPreset` has no `default` — a script node opts in by
-naming the preset in `params.preset`; scripts without a preset use the
-built-in extension map.
-
-### The "exactly one default" rule
-
-When any `LlmPreset` exists in `settings.presets`, exactly one must have
-`default: true` — zero or more than one is a `ValidationError`.
-Command-preset-only workflows are exempt.
-
-### Declare presets explicitly
-
-sqrlly does not synthesize defaults from the local environment and
-does not pre-flight CLI availability. Empty `settings.presets` is
-valid for script-only workflows; any LLM-dispatching node will fail
-at its call site with a clear "no prompt backend wired" error. A
-missing CLI (`codex` or `claude`) surfaces as a backend error
-at the first prompt call, not as a pre-flight check. This keeps
-sqrlly out of the business of probing your toolchain and lets
-earlier workflow steps install dependencies that later steps need.
-
-`sqrlly run --preset <name>` overrides which `LlmPreset` is treated
-as the default at run time. The named preset must exist in
-`settings.presets`.
-
-### Secrets
-
-The selected local CLI owns authentication — no API keys are required by
-sqrlly. **Auth is per LLM CLI,
-not sqrlly's job**: authenticate each tool with its own normal login flow
-(`claude /login` or `codex login`). Workflow-defined values reach sqrlly through
-`settings.url_headers` `${VAR}` expansion: process env first, then a
-project-local `.env` file (discovered by walking up from CWD).
-sqrlly never reads machine-global keystores. Script nodes needing
-third-party credentials read their own env (`params.env` /
-inherited environment).
-
----
-
 ## Node
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
 | `id` | `str` | required | Unique id; referenced by `depends_on` and template `{{id}}`. |
-| `name` | `str` | required | Human-readable label. |
+| `name` | `str` | node id | Human-readable label. |
 | `description` | `str \| None` | `None` | Free text. |
-| `execute` | `Execute \| None` | `None` | Execution descriptor. Omit it with `evaluation:` for a gate-only node, or with `route:` for a standalone router. |
 | `depends_on` | `list[str]` | `[]` | Static DAG edges. Cannot reference an inline-route node. |
 | `evaluation` | `Evaluation \| None` | `None` | Quality gate. |
 | `output_contract` | `OutputContract \| None` | `None` | Required-files check after execution. |
@@ -212,116 +88,41 @@ inherited environment).
 | `worktree_group` | `str \| None` | `None` | Per-node shared-tree name; mutually exclusive with an explicit `worktree` mode. Nodes sharing a name share one worktree. See `settings.worktree_group`. |
 | `promote` | `bool` | `False` | After a **clean** run, apply this node's worktree git delta (adds/edits/deletes vs the fork point) to the base workdir. Discovers the footprint from git — no need to predict which files changed — so it handles open-ended work (bugfixes/refactors) including deletions. If `output_contract.required_files` is set, those entries (git pathspec; `*`/`**`/`?`/`[…]`) filter what's promoted; otherwise the whole delta is promoted. Only UNCOMMITTED changes are promoted: a node that commits inside its worktree fails the promote step with an error naming the node, before any file is written. Runs before GC. Top-level nodes only. An `off` node already writes to the base workdir, so `promote` is a no-op there. Multi-source reconciliation of *overlapping* isolated trees (3-way merge) is out of scope. |
 
-`Node` declares `extra="forbid"` — an unknown key (including the
-removed `model`, `prompt_file`, `inputs`, `outputs`) surfaces as a
-`ValidationError` naming the offending key. Per-model selection is now
-done with `params.preset`, not a node `model` field.
+The node schema rejects unknown keys.
 
-> **Footgun:** hyphenated node ids parse as subtraction in Jinja
-> templates (`{{my-id}}` → `my - id`). Use underscores. `validate` and
-> `run` emit an advisory warning for any hyphenated node id.
+Choose one kind for an executable node. Joins, standalone routers and standalone gates omit the kind.
+Use underscores in node ids interpolated in Jinja because hyphens parse as subtraction.
 
----
+## Node kinds
 
-## Execute
+| Kind | Scalar or list | Mapping |
+|---|---|---|
+| `agent` | Prompt filename | Exactly one of `prompt` or `text`, plus optional `model`, `provider`, `tools`, `cli_args`. |
+| `llm` | Prompt filename | Exactly one of `prompt` or `text`, plus optional `model` and `provider`. |
+| `run` | Command string or argv list | `cmd` and optional `env` mapping. |
+| `workflow` | Workflow filename | `file` and optional `with` mapping of child inputs. |
 
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `url` | `str \| None` | `None` | Path or URL to the resource to execute. |
-| `type` | `"join" \| None` | `None` | Topology sentinel; the only value is `join`. |
-| `mode` | `ExecuteMode \| None` | `None` | Override extension-driven dispatch. |
-| `params` | `dict` | `{}` | Mode-specific params; coerced + validated at dispatch. |
+Prompt files resolve under `settings.prompts`, defaulting to `prompts/` beside the declaring YAML.
+Child workflow filenames resolve relative to the declaring YAML.
+Use `{text: "Summarize {{draft}}"}` for an inline prompt.
+For `llm`, Claude disables tools and MCP servers. Codex uses a read-only sandbox with the shell and configured MCP servers disabled. Codex 0.170.0 can still expose built-in resource discovery.
+An agent accepts `tools: read`, `edit` (default), or `full`.
+A list of tool names requires `provider: anthropic`.
 
-Exactly one of `url` or `type: join` must be set. `type: join` rejects
-`params` and `mode`. `ExecuteMode` is one of `prompt`, `subgraph`,
-`exec` — it forces the dispatch *kind* when the URL extension is
-missing or misleading. To run a script under an arbitrary interpreter
-(a specific venv, `uv run`, …), name a **command preset** via
-`params.preset`, not `mode`.
+A `run` command starts a process directly. The scalar form uses shell-style quoting to split argv.
+Use the list form for templates or literal shell metacharacters. Each list item becomes one argument.
+Use `{{workflow_dir}}` to locate a script beside the YAML when its working directory differs.
 
 ```yaml
-execute:
-  url: "prompts/draft.md"
-  params:
-    preset: opus_preset
+nodes:
+  - {id: draft, agent: draft.md}
+  - {id: label, depends_on: [draft], llm: {text: "Label {{draft}}"}}
+  - {id: check, depends_on: [label], run: [python3, "{{workflow_dir}}/check.py", "{{label}}"]}
+  - {id: review, depends_on: [draft], workflow: {file: review.yaml, with: {source: "{{draft}}"}}}
+  - {id: complete, depends_on: [check, review]}
 ```
 
-```yaml
-execute:
-  type: join          # no-op fan-in marker
-```
-
-### Per-mode params
-
-Each mode's `params:` is validated by a Pydantic model with
-`extra="forbid"` — a typo like `arg:` for `args:` fails when `sqrlly validate` loads the workflow.
-
-| Mode (URL extension) | Model | Fields |
-|---|---|---|
-| Prompt (`.md`, `.txt`, `.prompt`) | `PromptParams` | `preset: str?`, `timeout: float?` |
-| Subgraph (`.yaml`, `.yml`) | `SubgraphParams` | `inputs: dict[str,str]`, `outputs: dict[str,str]` |
-| Script / binary (everything else) | `SubprocessParams` | `args: list[str]`, `env: dict[str,str]`, `preset: str?` |
-
-`PromptParams.preset` names an `LlmPreset`; `SubprocessParams.preset`
-names a `CommandPreset`. `mode:` overrides the extension-driven choice.
-An empty, query-only or fragment-only URL can inherit its path from
-`settings.base_url`. When the current file omits that base, validation accepts
-any one complete parameter shape for these references. Dispatch checks the
-resolved mode after applying inherited settings.
-
-### URL dispatch table
-
-| URL pattern | Handler | Params |
-|---|---|---|
-| `*.md` / `*.txt` / `*.prompt` (`file://`) | Prompt → `PromptBackend` | `PromptParams` |
-| `*.md` (`https://`, allowed) | Prompt after fetch | `PromptParams` |
-| `*.yaml` / `*.yml` (`file://`) | Subgraph (compile-time) | `SubgraphParams` |
-| `*.py` / `*.js` / `*.mjs` / `*.ts` / `*.sh` (`file://`) | Script (interpreter dispatch) | `SubprocessParams` |
-| `/abs/path` or extensionless (`file://`) | Direct exec | `SubprocessParams` |
-| `type: join` / `execute: None` | no-op | — |
-
-Script interpreter map: `.py` → `python3`, `.js` / `.mjs` → `node`,
-`.ts` → `tsx`, `.sh` → `bash`. A `CommandPreset` overrides the
-interpreter.
-
-### URL resolution
-
-`resolve_url(url, base_url, workdir)` applies three rules in order:
-
-1. **Explicit protocol passthrough** — a URL with `://` is canonicalized (lowercase host) and returned.
-2. **Absolute path → `file://`** — a URL starting with `/` becomes `file:///abs/path`.
-3. **Relative resolves against base** — against `settings.base_url` if set, else against `--workdir`.
-
-### Remote URL gates
-
-Non-`file://` URLs pass only when **all** gates clear; defaults
-reproduce a "local files only" policy.
-
-| Gate | Setting | Effect |
-|---|---|---|
-| Master switch | `allow_remote_urls` | Must be `true` for any non-`file://` fetch. |
-| Host allow-list | `allowed_url_hosts` | fnmatch; empty = no filter. |
-| Size cap | `max_remote_fetch_bytes` | Default 5 MB; also applied to `file://` reads. |
-| Headers | `url_headers` | Per-URL-prefix; `${VAR}` expands from env. |
-
-A per-compile cache keyed by canonical URL fetches each URL at most once
-per `build_workflow_graph` call.
-
-> **⚠️ `file://` is not confined — treat workflow YAML as trusted
-> input.** The "local files only" default is about *remote-vs-local*,
-> not a sandbox. A `file://` path — absolute (`/etc/passwd`) or
-> `../`-relative — resolves to that exact location and reads/executes
-> with the orchestrator process's full filesystem access; the gates
-> above apply only to *remote* schemes. There is no workdir confinement
-> on local paths. Don't run workflow files from untrusted sources.
-
-> **Remote execution scope.** Only remote **prompt** templates
-> (`.md` / `.txt` / `.prompt`) are fetched-and-run today. Remote
-> **script** and **binary** execution is not wired — a non-`file://`
-> URL on a script/binary node halts with a clear error ("Remote script
-> execution not yet wired … use `file://`").
-
----
+A node with only an id and dependencies joins its predecessors without launching a process.
 
 ## Evaluation
 
@@ -386,8 +187,7 @@ prompt template as `{{_retry_reason}}`.
 ## Route — inline forward-edge dispatch
 
 `Node.route` declares where flow goes next. A node with `route:` and no
-`execute:` is a standalone router; a node with both runs its execute
-body (and eval), then a synthetic dispatcher resolves the route.
+kind is a standalone router. An executable node finishes its body and gate before routing.
 
 ### Shapes
 
@@ -468,7 +268,7 @@ presence is the activation; there is no enable flag.
 | `promote` | `bool` | `false` | When true, each Send branch's worktree delta is promoted back to base at the end of a clean run (top-level nodes only, before GC), through `reconcile_promotions` + `on_promote_conflict` + `promote_exclude` — the native merge-back for an isolated parallel build. Distinct from `Node.promote` (which promotes the parent's own manifest-only worktree delta, not the branch deltas); setting `node.promote: true` on a fan-out parent is a no-op, and `sqrlly validate` warns to steer you to `fan_out.promote` instead. |
 
 The manifest is read from the parent node's JSON output, falling back to
-`manifest_path`. Each Send branch runs `template.execute` (and
+`manifest_path`. Each Send branch runs the template's kind (and
 `template.evaluation`, with its own inline retry loop). Each branch's
 template renders against a per-item Jinja context: dep outputs,
 `{{<parent_id>}}` (the parent's output), and every key on the manifest
@@ -484,19 +284,12 @@ item.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `execute` | `Execute` | required | What each Send branch runs. |
+| `agent`, `llm`, `run`, `workflow` | kind | | Operation for each branch. |
 | `evaluation` | `Evaluation \| None` | `None` | Optional gate applied to each branch (with its own inline retry loop). |
-| `worktree` | `"auto" \| "isolated" \| "off"` | `null` (inherit `settings.worktree`) | Per-fan-out isolation override. Lets one workflow run an isolated build fan-out AND a shared-base planner fan-out under one top-level `settings.worktree`: this value overrides `settings.worktree` for every branch of THIS fan-out. `off` runs branches in the shared base workdir (their writes are visible to a downstream join node); `isolated`/`auto` give each branch its own git worktree. Same optional-override semantics as `Node.worktree`. Applies to both subgraph (`.yaml`) and script (`.md`/`.py`) templates. |
+| `worktree` | `"auto" \| "isolated" \| "off"` | `null` (inherit `settings.worktree`) | Per-fan-out isolation override. Lets one workflow run an isolated build fan-out AND a shared-base planner fan-out under one top-level `settings.worktree`: this value overrides `settings.worktree` for every branch of THIS fan-out. `off` runs branches in the shared base workdir (their writes are visible to a downstream join node); `isolated`/`auto` give each branch its own git worktree. Same optional-override semantics as `Node.worktree`. Applies to both workflow and executable templates. |
 
-**FanOutFinalNode**: `id: str`, `name: str` (required),
-`description: str?`, `execute: Execute?`, `evaluation: Evaluation?`,
-`output_contract: OutputContract?` (enforced via the standard
-execution path, like a top-level node's).
-
-When `template.execute.url` ends in `.yaml`, each Send runs a per-child
-subgraph instead of a single executor call.
-
----
+Final nodes take an id, an optional name and description, one kind, an optional evaluation and an optional output contract.
+A `workflow` template loads a child graph per item.
 
 ## Fan-out resume behavior
 
@@ -505,47 +298,6 @@ On `--resume` after a failed run, fan-out children that failed are re-run; sibli
 When using `--resume-from <fan_out_parent>`, the parent re-fans over its manifest, but only non-completed children from that fan-out are dispatched — completed siblings remain frozen.
 
 ---
-
-## Node types in depth
-
-### Prompt nodes
-
-`.md` / `.txt` / `.prompt` files are read, optionally prepended with
-`settings.preamble_file`, then rendered with full Jinja2. Template
-context:
-
-- `{{dep_id}}` — raw output of each dep; `{{dep_id_structured}}` — parsed structured output when present; `{{dep_id_worktree}}` — the dep's git worktree path.
-- Fan-out parent dep: `{{dep_branches}}` (JSON id→output), `{{dep_branch_worktrees}}` (JSON list of worktree paths), `{{dep_branch_map}}` (JSON id→`{output, worktree}`, the preferred id-keyed pairing). Worktree paths are **absolute** (resolved from `base_workdir`), so a fan-in consumer can read a sibling branch tree directly without re-resolving.
-- `{{_retry_reason}}` — auto-injected on retry (previous score, threshold, attempt, feedback).
-- `{{evals}}` — `evals[id]` → latest eval result dict for any node, or `{}`.
-- Inline-route goto target: `{{sender_id}}`, `{{sender}}`, `{{sender_structured}}`, `{{sender_worktree}}`.
-- Fan-out child: every manifest-item key plus `{{<parent_id>}}`.
-- Subgraph: whatever `params.inputs` projects in.
-
-### Script and binary nodes
-
-Scripts Jinja-render `params.args` and `params.env` against the dep
-context, then run via `asyncio.create_subprocess_exec`. Exit code zero
-is success; non-zero surfaces `stderr` as the error. A `CommandPreset`
-overrides the interpreter.
-
-### Subgraph nodes
-
-A node whose `execute.url` is a `.yaml` references another graph, loaded
-with the same `Graph` schema and recursively compiled.
-`params.inputs` projects parent context into the subgraph;
-`params.outputs` maps named subgraph node outputs back. Compile-time
-guards: cycle detection over the URL-reference DAG, and a fixed
-nesting-depth cap (`MAX_SUBGRAPH_DEPTH = 10`).
-
-### Join
-
-`execute: { type: join }` — a no-op fan-in topology marker. No params.
-
-### Gate-only by elision
-
-A node with `evaluation:` and no `execute:` runs the gate against an
-empty output — useful as a synthetic checkpoint between phases.
 
 ## Failure kinds (JSONL `node_failed.kind`)
 
@@ -573,7 +325,7 @@ and a persistent `infra` is a structurally-absent path or a permanently-failing
 setup. So a transient kind is worth a **bounded** retry, never an unbounded one:
 consumers must cap retries (worst case: waste ≤ N attempts, then halt). sqrlly
 does not emit a `retryable` boolean — that would freeze a settings-dependent
-policy (`backend_max_retries` defaults to `0`) into the wire contract; the
+policy into the wire contract; the
 consumer maps `kind` → retry over this stable vocabulary.
 
 **Fan-out granularity.** `failed_kinds` keys a fan-out child at

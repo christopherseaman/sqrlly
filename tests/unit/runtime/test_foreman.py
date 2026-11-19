@@ -16,7 +16,7 @@ import pytest
 
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.foreman import ForemanExecutor
-from sqrlly.schema.models import Execute, Node, Settings
+from sqrlly.schema.models import Node, Settings
 from helpers import init_git_repo
 
 _PWD = shutil.which("pwd") or "/bin/pwd"
@@ -27,14 +27,10 @@ def _init_git_repo(path):
     init_git_repo(path, files={"README": "init"})
 
 def _cmd_phase(node_id: str, command: str = "pwd", args=None) -> Node:
-    """Build a Stage-5b execute-URL node from a bare command name.
-
-    `command="pwd"` → `execute.url=/usr/bin/pwd`; args go in execute.params.args.
-    """
-    url = shutil.which(command) or f"/bin/{command}"
+    binary = shutil.which(command) or f"/bin/{command}"
     return Node(
         id=node_id, name=node_id,
-        execute=Execute(url=url, params={"args": args or []}),
+        run=[binary, *(args or [])],
     )
 
 
@@ -71,7 +67,7 @@ class TestOutputContractWorktree:
         validation must target `result.worktree`, not the base workdir
         (which would report the file missing — the HIGH#2 bug)."""
         from sqrlly.runtime.gates import validate_output_contract
-        from sqrlly.schema.models import Execute, Node, OutputContract
+        from sqrlly.schema.models import Node, OutputContract
 
         _init_git_repo(tmp_path)
         script = tmp_path / "writer.sh"
@@ -79,7 +75,7 @@ class TestOutputContractWorktree:
         script.chmod(0o755)
         node = Node(
             id="writer", name="writer",
-            execute=Execute(url=str(script)),
+            run=[str(script)],
             output_contract=OutputContract(
                 base_directory=".", required_files=["report.md"]
             ),
@@ -194,7 +190,7 @@ class TestWorktreePool:
         try:
             node = Node(
                 id="p", name="p",
-                execute=Execute(url=_PWD, params={"args": []}),
+                run=[_PWD],
                 worktree="off",
             )
             result = await foreman.execute(node, {})
@@ -215,7 +211,7 @@ class TestWorktreePool:
         try:
             node = Node(
                 id="p", name="p",
-                execute=Execute(url=_PWD, params={"args": []}),
+                run=[_PWD],
                 worktree="isolated",
             )
             result = await foreman.execute(node, {})
@@ -270,9 +266,9 @@ class TestWorktreePool:
         inner = DispatchExecutor(workdir=str(tmp_path))
         foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
         try:
-            a = Node(id="a", name="a", execute=Execute(url=_PWD, params={"args": []}),
+            a = Node(id="a", name="a", run=[_PWD],
                      worktree_group="team")
-            b = Node(id="b", name="b", execute=Execute(url=_PWD, params={"args": []}),
+            b = Node(id="b", name="b", run=[_PWD],
                      worktree_group="team")
             ra = await foreman.execute(a, {})
             rb = await foreman.execute(b, {})
@@ -288,9 +284,9 @@ class TestWorktreePool:
         inner = DispatchExecutor(workdir=str(tmp_path))
         foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
         try:
-            a = Node(id="a", name="a", execute=Execute(url=_PWD, params={"args": []}), worktree_group="team-a")
-            b = Node(id="b", name="b", execute=Execute(url=_PWD, params={"args": []}), worktree_group="team-b")
-            c = Node(id="c", name="c", execute=Execute(url=_PWD, params={"args": []}), worktree="isolated")
+            a = Node(id="a", name="a", run=[_PWD], worktree_group="team-a")
+            b = Node(id="b", name="b", run=[_PWD], worktree_group="team-b")
+            c = Node(id="c", name="c", run=[_PWD], worktree="isolated")
             await foreman.execute(a, {}); await foreman.execute(b, {}); await foreman.execute(c, {})
             paths = {foreman.get_worktree(x) for x in ("a", "b", "c")}
             assert len(paths) == 3
@@ -304,7 +300,7 @@ class TestWorktreePool:
         foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
         try:
             node = Node(id="p", name="p",
-                        execute=Execute(url=_PWD, params={"args": []}), worktree="off")
+                        run=[_PWD], worktree="off")
             result = await foreman.execute(node, {})            # workdir=None
             assert Path(result.output.strip()).resolve() == Path(tmp_path).resolve()
         finally:
@@ -318,7 +314,7 @@ class TestWorktreePool:
         foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
         try:
             node = Node(id="p", name="p",
-                        execute=Execute(url=_PWD, params={"args": []}), worktree="off")
+                        run=[_PWD], worktree="off")
             result = await foreman.execute(node, {}, workdir=str(sub))
             assert Path(result.output.strip()).resolve() == sub.resolve()
         finally:
@@ -335,7 +331,7 @@ class TestWorktreePool:
         foreman = ForemanExecutor(inner=inner, base_workdir=".")
         try:
             node = Node(id="p", name="p",
-                        execute=Execute(url=_PWD, params={"args": []}),
+                        run=[_PWD],
                         worktree="isolated")
             result = await foreman.execute(node, {})
             wt = foreman.get_worktree("p")
@@ -369,7 +365,7 @@ class TestWorktreePool:
         try:
             node = Node(
                 id="worker", name="worker",
-                execute=Execute(url=_PWD, params={"args": []}),
+                run=[_PWD],
                 worktree_group="team",
             )
             # The orphan is not silently reused: the worktree-add refusal now
@@ -388,9 +384,9 @@ class TestWorktreePool:
         inner = DispatchExecutor(workdir=str(tmp_path))
         foreman = ForemanExecutor(inner=inner, base_workdir=str(tmp_path))
         try:
-            a = Node(id="a", name="a", execute=Execute(url=_PWD, params={"args": []}), worktree_group="team")
-            b = Node(id="b", name="b", execute=Execute(url=_PWD, params={"args": []}), worktree_group="team")
-            c = Node(id="c", name="c", execute=Execute(url=_PWD, params={"args": []}))  # auto -> per-node
+            a = Node(id="a", name="a", run=[_PWD], worktree_group="team")
+            b = Node(id="b", name="b", run=[_PWD], worktree_group="team")
+            c = Node(id="c", name="c", run=[_PWD])  # auto -> per-node
             for n in (a, b, c):
                 await foreman.execute(n, {})
             grp = foreman.get_worktree("a"); iso = foreman.get_worktree("c")

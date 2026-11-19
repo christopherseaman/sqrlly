@@ -1,19 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from difflib import get_close_matches
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self, Union
+from typing import Any, Literal, Self
 
+import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
-    Discriminator,
     Field,
-    Tag,
+    PositiveInt,
+    PrivateAttr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
-from sqrlly.schema.params import validate_authored_params
+from sqrlly.schema.v1 import (
+    KINDS, Agent, Defaults, Name, Prompt, Run, Workflow, WorkflowLoader,
+    repository_root, require_reference,
+)
 
 
 # Worktree isolation modes. `none` is an accepted alias for `off`.
@@ -168,51 +175,6 @@ class Route(BaseModel):
         return self
 
 
-ExecuteMode = Literal["prompt", "subgraph", "exec"]
-
-
-class Execute(BaseModel):
-    """Stage 5b/5c execution shape.
-
-    Two orthogonal modes, exactly one of which is active per node:
-
-      1. URL mode (`url:` set, `type:` unset) — dispatched by URL
-         extension/scheme to one of: prompt, subgraph, script, exec.
-         Authors can override the extension-driven choice with
-         ``mode:`` when the URL doesn't carry a recognizable extension
-         (or carries a misleading one).
-      2. Join sentinel (`type: "join"`) — no-op topology marker.
-
-    Forward-edge dispatch (``cases:`` / ``else:``) lives on
-    ``Node.route`` (a separate ``Route`` block), not on Execute.
-    Stage 5c lifted route out of Execute so a single node can both
-    execute AND dispatch downstream from a route ladder.
-    """
-    model_config = ConfigDict(populate_by_name=True)
-    url: str | None = None
-    type: Literal["join"] | None = None
-    mode: ExecuteMode | None = None
-    params: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_shape(self) -> Self:
-        modes_set = sum([
-            self.url is not None,
-            self.type == "join",
-        ])
-        if modes_set != 1:
-            raise ValueError(
-                "Execute must set exactly one of: url, type=join "
-                f"(got url={self.url!r}, type={self.type!r})"
-            )
-        if self.type == "join":
-            if self.params or self.mode:
-                raise ValueError(
-                    "Execute type=join takes no params or mode"
-                )
-        return self
-
-
 class DimensionCheck(BaseModel):
     # `threshold` matches `Evaluation.threshold`; `min` stays accepted
     # as a YAML alias for back-compat with pre-rename workflows.
@@ -247,10 +209,35 @@ class OutputContract(BaseModel):
                 for f in self.required_files]
 
 
-class FanOutTemplate(BaseModel):
+class KindStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent: Agent | None = None
+    llm: Prompt | None = None
+    run: Run | None = None
+    workflow: Workflow | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _count_kinds(cls, value: Any) -> Any:
+        if isinstance(value, dict) and len(value.keys() & set(KINDS)) > 1:
+            raise ValueError(f"choose at most one kind: {', '.join(KINDS)}")
+        if isinstance(value, dict):
+            for key in value:
+                if key not in cls.model_fields:
+                    closest = get_close_matches(str(key), cls.model_fields, n=1, cutoff=0)[0]
+                    raise ValueError(f"unknown key {key!r}, closest legal key: {closest}")
+                if key in KINDS and value[key] is None:
+                    raise ValueError(f"{key} requires a value")
+        return value
+
+    @property
+    def kind(self) -> str | None:
+        return next((kind for kind in KINDS if getattr(self, kind) is not None), None)
+
+
+class FanOutTemplate(KindStep):
     """Template for nodes spawned during fan-out over a manifest."""
     model_config = ConfigDict(extra="forbid")
-    execute: Execute
     evaluation: Evaluation | None = None
     # Per-fan-out worktree-isolation override. None (default) inherits
     # settings.worktree — same optional-override semantics as Node.worktree.
@@ -267,13 +254,12 @@ class FanOutTemplate(BaseModel):
         return _normalize_worktree(v)
 
 
-class FanOutFinalNode(BaseModel):
+class FanOutFinalNode(KindStep):
     """A node that runs after fan-out completes, consuming aggregate output."""
     model_config = ConfigDict(extra="forbid")
-    id: str
-    name: str
+    id: Name
+    name: Name = Field(default_factory=lambda data: data["id"])
     description: str | None = None
-    execute: Execute | None = None
     evaluation: Evaluation | None = None
     # Enforced via the standard execution-node path (the final node runs
     # through `_make_execution_node`), so it scaffolds + validates just
@@ -302,105 +288,25 @@ class FanOut(BaseModel):
     promote: bool = False
 
 
-class LlmPreset(BaseModel):
-    """Named bundle of LLM execution config — referenced by name from
-    prompt nodes via ``params.preset:`` (or the ``default: true`` one).
-
-    The ``--preset`` CLI flag overrides at run time. Resolution order:
-    CLI flag > ``params.preset:`` > the preset marked ``default: true``.
-
-    One transport is supported: ``transport: cli`` — subprocess-per-call
-    Codex/OpenAI (the default provider) or Claude (no warm state, real
-    ``asyncio`` parallelism per call). Omitted ``provider`` means ``openai``;
-    ``provider: anthropic`` selects the Claude CLI.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    kind: Literal["llm"] = "llm"
-    transport: Literal["cli"] = "cli"
-    provider: Literal["anthropic", "openai"] = "openai"
-    model: str
-    default: bool = False
-
-    # Tool-use permissions. Claude CLI maps these fields to its exact flags.
-    # Codex accepts its own options through cli_args, so these Claude-only
-    # fields are rejected for provider: openai. All unset → no tools.
-    permission_mode: Literal[
-        "default", "acceptEdits", "bypassPermissions", "plan"
-    ] | None = None
-    allowed_tools: list[str] | None = None
-    disallowed_tools: list[str] | None = None
-    # Escape hatch: extra args appended verbatim to the selected CLI's argv
-    # for anything the provider-specific fields don't cover.
-    cli_args: list[str] | None = None
-    # Per-preset environment overlay for the spawned backend process
-    # (e.g. CLAUDE_CODE_EFFORT_LEVEL). Overlaid on os.environ at spawn —
-    # never replaces it. Mirrors SubprocessParams.env for script nodes.
-    env: dict[str, str] = {}
-
-    @model_validator(mode="after")
-    def _tool_fields_require_anthropic(self) -> Self:
-        if self.provider == "openai" and any(
-            (self.permission_mode, self.allowed_tools, self.disallowed_tools)
-        ):
-            raise ValueError(
-                "permission_mode and tool allow/deny lists are only supported "
-                "by provider: anthropic"
-            )
-        return self
-
-
-class CommandPreset(BaseModel):
-    """Named interpreter/command bundle — referenced by name from script
-    nodes via ``params.preset:``. Replaces the hardwired
-    extension→interpreter map for nodes that opt in.
-
-    ``command`` is a command string (``"uv run"``, ``"python3.12 -X dev"``,
-    ``"deno run"``). At dispatch the command is ``shlex.split``, then the
-    resolved script path + ``params.args`` are appended — unless the
-    command contains the literal token ``{{file}}`` and/or ``{{args}}``,
-    in which case those tokens are substituted in place (token-level, not
-    string interpolation). Command presets carry no ``default`` — script
-    nodes opt in by name; no-preset scripts use the extension map.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    kind: Literal["command"] = "command"
-    command: str
-
-
-def _preset_discriminator(v: Any) -> str:
-    """Discriminator for the Preset union. Absent ``kind`` defaults to
-    ``"llm"`` so pre-command-preset YAML (which has no ``kind:`` field)
-    keeps parsing as an LlmPreset."""
-    if isinstance(v, dict):
-        return v.get("kind", "llm")
-    return getattr(v, "kind", "llm")
-
-
-# A preset is either an LLM bundle or a command bundle. Pydantic
-# dispatches on ``kind`` (callable discriminator → absent kind = llm).
-Preset = Annotated[
-    Union[
-        Annotated[LlmPreset, Tag("llm")],
-        Annotated[CommandPreset, Tag("command")],
-    ],
-    Discriminator(_preset_discriminator),
-]
-
-
 class Settings(BaseModel):
+    _workflow_dir: Path | None = PrivateAttr(default=None)
+    _preamble_path: Path | None = PrivateAttr(default=None)
+
+    def preamble_path(self, base_dir: Path) -> Path | None:
+        if self.preamble_file is None:
+            return None
+        return self._preamble_path or base_dir / self.preamble_file
+
+    @property
+    def workflow_dir(self) -> Path | None:
+        return self._workflow_dir
+
+    model: Name | None = None
+    prompts: Name = "prompts/"
+    defaults: Defaults = Defaults()
     model_config = ConfigDict(extra="forbid")
 
     max_retries: int = 3
-    # Transient-backend-error retry budget. DISTINCT from `max_retries`
-    # (the evaluation/gate budget, which retries on a low gate score).
-    # This retries the SAME backend dispatch when the backend raises
-    # (e.g. `claude exited 1` — a transient blip), up to this many times
-    # with `retry_backoff` between attempts. An OverloadError walks the
-    # model-downgrade chain first and counts here only once the chain has
-    # no lower model. 0 (default) = one attempt, terminal.
-    backend_max_retries: int = 0
     # Run Claude with `--safe-mode` (cli transport only): operator
     # customizations — output styles, CLAUDE.md, skills, MCP, hooks — are
     # disabled, so workflow generation stays reproducible and free of e.g.
@@ -411,7 +317,7 @@ class Settings(BaseModel):
     default_timeout: float | None = None
     preamble_file: str | None = None
     retry_backoff: list[float] = []
-    max_parallel_jobs: int = 4
+    max_parallel_jobs: PositiveInt = 4
     # Memory back-pressure: block new dispatches while host memory
     # percent is ABOVE this value (`psutil.virtual_memory().percent`).
     # Default ``None`` = disabled. Composes (AND) with
@@ -479,61 +385,12 @@ class Settings(BaseModel):
         _check_worktree_group_exclusive(self.worktree, self.worktree_group)
         return self
 
-    # Stage 5b — execute.url remote URL gates
-    base_url: str | None = None  # default base for relative urls in execute.url
-    allow_remote_urls: bool = False  # master switch for non-file:// fetches
-    allowed_url_hosts: list[str] = []  # fnmatch host patterns; [] = no filter
-    url_headers: dict[str, dict[str, str]] = {}  # prefix → headers; ${VAR} expands
-    max_remote_fetch_bytes: int = 5_000_000  # 5 MB cap
-    # Named presets — workflow-level bundles of execution config.
-    # Nodes reference one by name via ``params.preset:``; otherwise
-    # the preset marked ``default: true`` applies. Empty is valid for
-    # script-only workflows (no LLM dispatch); sqrlly does not
-    # synthesize defaults from the environment. LLM dispatch with no
-    # preset wired fails at the call site.
-    presets: dict[str, Preset] = {}
-
-    @model_validator(mode="after")
-    def _validate_default_preset(self) -> Self:
-        """Exactly one LlmPreset must be ``default: true`` when any
-        LlmPreset is declared. CommandPresets have no ``default`` —
-        script nodes opt in by name, so a default never applies to them.
-        """
-        llm_presets = {
-            name: p for name, p in self.presets.items()
-            if isinstance(p, LlmPreset)
-        }
-        if not llm_presets:
-            return self
-        defaults = [name for name, p in llm_presets.items() if p.default]
-        if len(defaults) == 0:
-            raise ValueError(
-                f"settings.presets has {len(llm_presets)} LLM preset(s) "
-                f"({sorted(llm_presets)!r}) but none marked "
-                f"default: true — exactly one must be the default"
-            )
-        if len(defaults) > 1:
-            raise ValueError(
-                f"settings.presets has multiple default: true LLM presets "
-                f"({sorted(defaults)!r}); exactly one allowed"
-            )
-        return self
 
 
-class Node(BaseModel):
-    """Stage-5b node: execution is described by a single optional `execute:` block.
-
-    Legacy fields (`prompt_file`, `execution`, `config`, `inputs`, `outputs`)
-    were removed in the hard cutover. `extra="forbid"` makes that loud:
-    users on pre-Stage-5b YAML get a clear ValidationError pointing at the
-    unsupported key, instead of silent drop-on-the-floor.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    name: str
+class Node(KindStep):
+    id: Name
+    name: Name = Field(default_factory=lambda data: data["id"])
     description: str | None = None
-    execute: Execute | None = None
     depends_on: list[str] = []
     evaluation: Evaluation | None = None
     output_contract: OutputContract | None = None
@@ -573,7 +430,12 @@ class Node(BaseModel):
     def effective_timeout(self, settings: Settings) -> float | None:
         if self.timeout is not None:
             return self.timeout
-        return settings.default_timeout
+        if self.kind:
+            timeout = getattr(settings.defaults, self.kind).timeout
+            if timeout is not None:
+                return timeout
+        # The legacy dispatch deadline applies to each leaf inside a workflow.
+        return None if self.workflow else settings.default_timeout
 
     def effective_worktree(self, settings: Settings) -> tuple[str, str | None]:
         """Resolve isolation by scope specificity. Returns (kind, group):
@@ -583,9 +445,18 @@ class Node(BaseModel):
             return ("group", self.worktree_group)
         if self.worktree is not None:
             return (self.worktree, None)
+        if self.kind in ("agent", "run"):
+            mode = getattr(settings.defaults, self.kind).worktree
+            if mode is not None:
+                return (mode, None)
         if settings.worktree_group is not None:
             return ("group", settings.worktree_group)
         return (settings.worktree, None)
+
+    def effective_promote(self, settings: Settings) -> bool:
+        if "promote" not in self.model_fields_set and self.kind in ("run", "agent"):
+            return bool(getattr(settings.defaults, self.kind).promote)
+        return self.promote
 
     def effective_max_retries(self, settings: Settings) -> int:
         if self.evaluation and self.evaluation.max_retries is not None:
@@ -594,28 +465,54 @@ class Node(BaseModel):
 
 
 class Graph(BaseModel):
-    name: str
-    version: str
+    model_config = ConfigDict(extra="forbid")
+
+    name: Name = "workflow"
     nodes: list[Node]
     settings: Settings = Settings()
 
+    @property
+    def workflow_dir(self) -> Path | None:
+        return self.settings.workflow_dir
+
     @model_validator(mode="after")
-    def _validate_execute_params(self) -> Self:
+    def _validate_steps(self, info: ValidationInfo) -> Self:
+        context = info.context or {}
+        path = context.get("workflow_path")
+        if path and self.settings.preamble_file is not None:
+            self.settings._preamble_path = path.parent.resolve() / self.settings.preamble_file
+        if resolve_settings := context.get("resolve_settings"):
+            self.settings = resolve_settings(self.settings)
+        if path:
+            self.settings._workflow_dir = path.parent.resolve()
+            if "name" not in self.model_fields_set:
+                self.name = path.stem
+        directory = self.workflow_dir
+        root = repository_root(directory) if directory else None
+        if directory and (preamble := self.settings.preamble_path(directory)) is not None:
+            require_reference(root, preamble, "settings.preamble_file")
+        defaults = self.settings.defaults.agent
+        if isinstance(defaults.tools, list) and defaults.provider != "anthropic":
+            raise ValueError("agent tool-name lists require provider: anthropic")
         for node in self.nodes:
-            steps: list[Node | FanOutTemplate | FanOutFinalNode] = [node]
+            steps: list[KindStep] = [node]
             if node.fan_out:
                 if node.fan_out.template:
                     steps.append(node.fan_out.template)
                 steps.extend(node.fan_out.final_nodes)
             for step in steps:
-                execute = step.execute
-                if execute and execute.url is not None and execute.params:
-                    try:
-                        validate_authored_params(
-                            execute.url, execute.params, execute.mode, self.settings.base_url,
-                        )
-                    except ValueError as exc:
-                        raise ValueError(f"Node {node.id!r} execute.params: {exc}") from exc
+                if step.agent:
+                    tools = defaults.tools if step.agent.tools is None else step.agent.tools
+                    if isinstance(tools, list) and (step.agent.provider or defaults.provider) != "anthropic":
+                        raise ValueError(f"{node.id}: agent tool-name lists require provider: anthropic")
+                if directory:
+                    prompt = step.agent or step.llm
+                    if prompt and prompt.prompt:
+                        require_reference(root, directory / self.settings.prompts / prompt.prompt,
+                                          f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
+                    elif step.workflow:
+                        require_reference(root, directory / step.workflow.file, f"{node.id}.workflow",
+                                          ' ({text: "..."} is for inline agent or llm prompts)')
         return self
 
     @model_validator(mode="after")
@@ -688,50 +585,12 @@ class Graph(BaseModel):
                     )
         return self
 
-    @model_validator(mode="after")
-    def _validate_preset_refs(self) -> Self:
-        """Every ``params.preset:`` reference must name a preset
-        declared in ``settings.presets`` (or rely on the auto-detect
-        default when presets is empty).
 
-        Without this, a typo (``params: {preset: 'smrt'}``) silently
-        survives validate-time and crashes the first time the node
-        runs with ``RuntimeError("no backend is registered")``.
-        Subgraph nodes are validated against the subgraph's own
-        ``settings.presets`` (merged settings are computed at runtime;
-        we only see the leaf-level declaration here).
-        """
-        declared = set(self.settings.presets)
-        for node in self.nodes:
-            if node.execute is None:
-                continue
-            preset_ref = node.execute.params.get("preset")
-            if preset_ref is None:
-                continue
-            if not declared:
-                raise ValueError(
-                    f"Node '{node.id}' references preset {preset_ref!r} "
-                    f"but settings.presets is empty"
-                )
-            if preset_ref not in declared:
-                raise ValueError(
-                    f"Node '{node.id}' references preset {preset_ref!r} "
-                    f"which is not declared in settings.presets "
-                    f"(declared: {sorted(declared)!r})"
-                )
-            # A command preset fully specifies the interpreter — it and
-            # execute.mode (the handler/interpreter selector) are
-            # mutually exclusive. Setting both is contradictory.
-            referenced = self.settings.presets[preset_ref]
-            if (
-                isinstance(referenced, CommandPreset)
-                and node.execute.mode is not None
-            ):
-                raise ValueError(
-                    f"Node '{node.id}' references command preset "
-                    f"{preset_ref!r} AND sets execute.mode="
-                    f"{node.execute.mode!r} — mutually exclusive; the "
-                    f"command preset already specifies the interpreter. "
-                    f"Drop execute.mode."
-                )
-        return self
+
+def load_workflow(
+    path: str | Path, *, resolve_settings: Callable[[Settings], Settings] | None = None,
+) -> Graph:
+    path = Path(path)
+    with path.open(encoding="utf-8") as stream:
+        raw = yaml.load(stream, Loader=WorkflowLoader)
+    return Graph.model_validate(raw, context={"workflow_path": path, "resolve_settings": resolve_settings})

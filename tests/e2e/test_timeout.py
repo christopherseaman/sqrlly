@@ -28,7 +28,7 @@ class TestTimeoutCommandNode:
                 {
                     "id": "slow",
                     "name": "Slow",
-                    "execute": {"url": _SLEEP, "params": {"args": ["10"]}},
+                    "run": [_SLEEP, "10"],
                     "timeout": 0.5,
                 },
             ]
@@ -62,7 +62,7 @@ class TestTimeoutCommandNode:
                 {
                     "id": "slow",
                     "name": "Slow",
-                    "execute": {"url": _SLEEP, "params": {"args": ["10"]}},
+                    "run": [_SLEEP, "10"],
                 },
             ],
             default_timeout=0.5,
@@ -94,7 +94,7 @@ class TestTimeoutGateValidator:
                 {
                     "id": "gated",
                     "name": "Gated",
-                    "execute": {"url": _ECHO, "params": {"args": ["-n", "ok"]}},
+                    "run": [_ECHO, "-n", "ok"],
                     "evaluation": {
                         "validator": str(slow_validator),
                         "threshold": 0.8,
@@ -211,11 +211,11 @@ class TestBranchTimeout:
                 {
                     "id": "parent",
                     "name": "Parent",
-                    "execute": {"url": _ECHO, "params": {"args": ["-n", "ok"]}},
+                    "run": [_ECHO, "-n", "ok"],
                     "timeout": 0.3,
                     "fan_out": {
                         "manifest_path": "manifest.json",
-                        "template": {"execute": {"url": "template.md"}},
+                        "template": {"agent": "template.md"},
                     },
                 },
             ]

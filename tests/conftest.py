@@ -38,12 +38,11 @@ def pytest_collection_modifyitems(config, items):
 def minimal_config_dict():
     return {
         "name": "Test Workflow",
-        "version": "1.0.0",
         "nodes": [
             {
                 "id": "node-1",
                 "name": "First Node",
-                "execute": {"url": "nodes/node-1.md"},
+                "agent": "nodes/node-1.md",
             }
         ],
     }
@@ -53,17 +52,16 @@ def minimal_config_dict():
 def multi_phase_config_dict():
     return {
         "name": "Multi Node",
-        "version": "1.0.0",
         "nodes": [
             {
                 "id": "node-1",
                 "name": "First",
-                "execute": {"url": "nodes/node-1.md"},
+                "agent": "nodes/node-1.md",
             },
             {
                 "id": "node-2",
                 "name": "Second",
-                "execute": {"url": "nodes/node-2.md"},
+                "agent": "nodes/node-2.md",
                 "depends_on": ["node-1"],
             },
         ],
@@ -75,15 +73,14 @@ def parallel_config_dict():
     """Diamond dependency: A -> (B, C) -> D"""
     return {
         "name": "Parallel Workflow",
-        "version": "1.0.0",
         "nodes": [
-            {"id": "a", "name": "A", "execute": {"url": "a.md"}},
-            {"id": "b", "name": "B", "execute": {"url": "b.md"}, "depends_on": ["a"]},
-            {"id": "c", "name": "C", "execute": {"url": "c.md"}, "depends_on": ["a"]},
+            {"id": "a", "name": "A", "agent": "a.md"},
+            {"id": "b", "name": "B", "agent": "b.md", "depends_on": ["a"]},
+            {"id": "c", "name": "C", "agent": "c.md", "depends_on": ["a"]},
             {
                 "id": "d",
                 "name": "D",
-                "execute": {"url": "d.md"},
+                "agent": "d.md",
                 "depends_on": ["b", "c"],
             },
         ],

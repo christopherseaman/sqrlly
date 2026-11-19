@@ -9,8 +9,7 @@ repo. Narrative documentation lives elsewhere:
 - **`README.md`** — what the project is, install, quickstart, concept
   tour, CLI overview, examples gallery (PyPI-facing front page).
 - **`SCHEMA.md`** — the exhaustive field-by-field schema reference
-  (Settings / Node / Execute / presets / route / evaluation), URL
-  dispatch table, route-predicate namespace.
+  for node kinds, settings, routing and evaluation.
 - **`SKILLS.md`** — agent skill doc: instructions for an AI coding
   agent authoring and running sqrlly workflows (Codex skill format).
 - **[GitHub issues](https://github.com/christopherseaman/sqrlly/issues)** — all
@@ -20,7 +19,7 @@ repo. Narrative documentation lives elsewhere:
 - **`CHANGELOG.md`** — release history.
 - **`docs/reference/grammar-1.0.md`** — the spec for the 1.0 line (node
   grammar, eval and route, outputs, worktrees). Issues that build 1.0 cite
-  its sections; the rest of this file describes 0.10.
+  its sections; the remaining 1.0 stages are tracked by issue.
 
 Read those when narrative context is needed; this file stays focused on
 day-to-day operator concerns (build, test, layout, limitations,
@@ -96,8 +95,7 @@ uv run pytest -m live -v                     # restored live-roundtrip (cli-only
 uv run pytest tests/architecture/test_layers.py  # layer rule enforcement
 
 uv run sqrlly validate config.yaml
-uv run sqrlly run config.yaml             # uses settings.presets (required)
-uv run sqrlly run config.yaml -p <name>   # force a named preset from settings.presets
+uv run sqrlly run config.yaml
 uv run sqrlly run config.yaml --resume    # resume from checkpoint
 uv run sqrlly run config.yaml --entry <node>  # cold-start: run <node> + downstream, no checkpoint
 uv run sqrlly run config.yaml --safe-mode  # Claude-only clean mode; no effect on Codex
@@ -140,12 +138,8 @@ default; `minor` and `major` need explicit operator approval.
 Three-layer split (enforced by `tests/architecture/test_layers.py`):
 
 **`src/sqrlly/schema/`** — Pydantic models (no langgraph imports).
-- `models.py` — `Graph`, `Node`, `Settings`, `Execute`, `Evaluation`,
-  `DimensionCheck`, `RouteCase`, `RouteElse`, `Route`, `OutputContract`,
-  `FanOut`, `FanOutTemplate`, `FanOutFinalNode`, `LlmPreset`,
-  `CommandPreset`.
-- `params.py` — `PromptParams`, `SubgraphParams`,
-  `SubprocessParams` + `coerce_params()` resolver.
+- `models.py` defines the graph, nodes, settings, gates, routing and fan-out.
+- `v1.py` defines the agent, llm, run and workflow payloads.
 
 **`src/sqrlly/compile/`** — YAML → LangGraph (no cli imports).
 - `graph.py` — `build_workflow_graph()`, edge wiring, gate + fan-out
@@ -172,8 +166,7 @@ Three-layer split (enforced by `tests/architecture/test_layers.py`):
   footgun checks (non-fatal); surfaced by `validate` + `run`.
 
 **`src/sqrlly/runtime/`** — executors, backends, gates, foreman
-(no compile/langgraph imports, except `url.py` which is also
-langgraph-free).
+(no compile/langgraph imports).
 - `state.py` — `WorkflowState` TypedDict + `REDUCERS`.
 - `result.py` — `ExecutionResult`, `NodeExecutor` Protocol,
   `PromptBackend` Protocol, `OverloadError`.
@@ -194,24 +187,14 @@ langgraph-free).
   `settings.on_promote_conflict` (HEAD check→discover→plan→apply).
 - `settings_merge.py` — `merge_settings(parent, child)` for
   scope-aware inheritance.
-- `url.py` — `resolve_url`, `fetch_url` (plain dict fetch cache),
-  remote URL gates.
-- `secrets.py` — project-local `.env` discovery + parsing
-  (`_find_dotenv` / `_load_dotenv_once`), consumed by `url.py`'s
-  header `${VAR}` expansion.
 - `worktree_share.py` — `write_worktree_excludes` / `materialize_shares` / `ensure_setup` (worktree dep sharing: info/exclude write, read-only symlinks, sentinel-gated rehydrate).
-- `executor/dispatch.py` — `DispatchExecutor` (10-row URL dispatch; owns
+- `executor/dispatch.py` — `DispatchExecutor` (node kind dispatch; owns
   the `max_parallel_jobs` dispatch semaphore — always applied, foreman or
   not, so a non-git fan-out is still throttled).
 - `executor/prompt.py` — module functions `apply_preamble` +
   `execute_with_downgrade` (template render, eval preamble, model
   downgrade); flattened from the former `PromptExecutor` class.
-- `executor/preset.py` — `resolve_preset_name` / `build_preset_registry`
-  (named-preset → backend registry; CLI `--preset` override).
-- `executor/backends/{cli,factory}.py` — the CLI backend
-  (subprocess-per-call Codex or Claude) and
-  `factory.create_backend_from_preset`, which builds it from an
-  `LlmPreset`.
+- `executor/backends/cli.py` invokes Codex or Claude as a local subprocess.
 - `executor/backends/_overload.py` — `maybe_raise_overload` +
   `OVERLOAD_SUBSTRINGS` (transient-error text mapped to
   `OverloadError`).
@@ -222,7 +205,7 @@ langgraph-free).
   `JsonlLogger`.
 - `view.py` — `view` command: self-contained HTML workflow viewer.
 - `init.py` — `init` command: scaffolds a minimal workflow
-  (`workflow.yaml` + `prompts/hello.md`) for `pipx`-installed users
+  (`workflow.yaml` with a greeting command) for `pipx`-installed users
   with no repo on disk. `init --skill` instead installs the agent
   skill doc (repo-root `SKILLS.md`, `force-include`d into the wheel as
   `sqrlly/_skill.md`) into a working repo at
@@ -308,9 +291,6 @@ resolver sees) — distinct from faking what an external system returns.
   `1→N`), declared `final_nodes` render as chained real steps, and the
   parent's dependents fan in `N→1` from the chain exit — only the
   realized per-manifest child NODES (created at run time) are absent.
-- **Remote script/binary execution not wired** — `http(s)://` urls
-  fetch-and-run for *prompt* nodes only; `_dispatch_script` /
-  `_dispatch_binary` require `file://` and halt on a remote scheme.
 - **Worktree cleanup is opt-in** — `settings.worktree_gc: on_success`
   reclaims end-of-run on a clean exit; default `never` keeps trees under
   `<workdir>/.sqrlly/` for inspection and `--resume`. `git worktree
@@ -345,8 +325,8 @@ resolver sees) — distinct from faking what an external system returns.
 - **Per-fan-out worktree override** — `fan_out.template.worktree` (`auto`/`isolated`/`off`, default inherit) overrides `settings.worktree` for one fan-out's branches, so a single workflow can mix an isolated build fan-out with a shared-base planner fan-out. Threaded two ways to match the two fan-out execution paths: subgraph templates gate isolation in `compile/subgraph.py::make_fan_out_subgraph_invoker` (new `template_worktree` arg overrides the `_isolate` computation); non-subgraph (`.md`/`.py`/script) templates set the synthetic child node's `worktree` in `compile/dynamic.py::_make_fan_out_node` so `effective_worktree` resolves it at the foreman gate. `off` runs branches in the base workdir (writes visible to a join node).
 - **Bad-manifest fan-out fails the run (recoverable)** — the `_fan_<id>` dispatcher (`compile/graph.py::_make_fan_dispatcher`) FAILS the parent node with a `make_failure_update` `Command(goto=END)` — NOT a raise — on either (a) a `_read_manifest` `ManifestError` (unreadable / invalid-JSON / mis-shaped `manifest_path`, raised in `_read_manifest`) or (b) a DUPLICATE child id (literal duplicate, or the `::unknown` collapse of ≥2 id-less items; a dict item missing `id` also WARNs in `_normalize_items`). Failing the node (not raising) puts the parent in `failed_nodes` so bare `--resume` dirties it via `prior_failed` and re-fans once the manifest is fixed; a raise would leave the parent completed-but-not-failed (the gate committed one super-step earlier) and bare `--resume` would freeze it and re-fail deterministically. The parent can land in BOTH `completed_nodes` (gate committed) and `failed_nodes` (`_fan_` failed) in that checkpoint — `compile/resume.py::compute_skip_set`'s dirty subtraction handles it. (Note: `_read_manifest` still RAISES `ManifestError` when called directly, e.g. via `cli/main.py`; only the dispatcher converts it.)
 - **JSONL `gate_evaluated` precedes `node_completed`/`node_failed`** — the collapsed gate emits its EvaluationRecord and its outcome (completed / failed) in ONE super-step update, so `runtime/logging.py::_emit_update_events` orders `gate_evaluated` BEFORE both `node_completed` and `node_failed` ("gate ran, then the node settled"). For the pre-collapse split top-level pair the record already landed a super-step earlier, so this preserves that order; it is a VISIBLE JSONL order change for fan-out children and dynamic gated parents (whose single merged update previously emitted `node_completed` first). In-repo consumers (`terminal.py`, `view.py`) are order-insensitive.
-- **Backend transient-error retry is opt-in** — `settings.backend_max_retries`
-  (default `0`) retries the SAME backend dispatch on a backend exception
+- `settings.defaults.agent.backend_max_retries` and `settings.defaults.llm.backend_max_retries`
+  (default `2`) control retries of the SAME backend dispatch on a backend exception
   (a `claude exited 1` blip) up to N times with `retry_backoff` between
   attempts, wrapped around the `OverloadError`→downgrade loop in
   `runtime/executor/prompt.py::execute_with_downgrade`. Distinct from the
@@ -392,7 +372,7 @@ resolver sees) — distinct from faking what an external system returns.
 - **No first-class managed-team / oversight node** — there is no supervised
   coordinator primitive, and none is planned near-term. The supported approach
   is an authoring pattern: a prompt node granted the `Task` tool
-  (`allowed_tools: ["Task"]`) runs a coordinator prompt and spawns/supervises
+  (`agent.tools: [Task]` with `provider: anthropic`) runs a coordinator prompt and spawns/supervises
   sub-agent members via Claude's own agent loop (oversight inside one node).
   Members are sub-agents within that single node, NOT isolated sqrlly nodes
   (no per-member worktree/gate/promote). See `SKILLS.md` for the full pattern.
@@ -406,10 +386,6 @@ resolver sees) — distinct from faking what an external system returns.
 - **`tests/__init__.py` must NOT exist** — its presence breaks
   `from helpers import ...` and `from mock_executor import ...` in
   tests. Removing it is the supported state.
-- **Secret resolution** — `runtime/secrets.py` provides project-local
-  `.env` discovery/parsing only (never machine-global keystores),
-  consumed by `url.py::_expand_vars` (header `${VAR}` expansion:
-  process env first, then `.env` walking up from CWD).
 
 ## Quick references
 

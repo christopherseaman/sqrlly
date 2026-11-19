@@ -258,9 +258,9 @@ def assemble_success_update(node: Node, result: ExecutionResult) -> dict[str, An
     }
     if result.structured_output is not None:
         update["node_structured_outputs"] = {node.id: result.structured_output}
-    if result.model is not None:
+    if result.model is not None or result.provider is not None:
         update["node_models"] = {
-            node.id: {"model": result.model, "preset": result.preset}
+            node.id: {"model": result.model, "provider": result.provider}
         }
     return update
 
@@ -459,7 +459,7 @@ def _scope_dep_outputs_for_gate(
     deps = list(node.depends_on or [])
     is_gate_only = (
         not deps
-        and node.execute is None
+        and node.kind is None
         and node.evaluation is not None
     )
 
@@ -503,25 +503,18 @@ async def _run_eval_core(
     dep_outputs, dep_structured, dep_worktrees = _scope_dep_outputs_for_gate(
         node, state,
     )
-    # Gate LLM model: the default preset's model. Gates ignore the
-    # node's params.preset — they're a separate dispatch and use the
-    # workflow-level default. Falls back to "sonnet" only when no
-    # presets are declared (script-only workflows that somehow declare
-    # an LLM gate — unusual, but harmless default).
-    default_gate_model = "sonnet"
-    for preset in s.presets.values():
-        if preset.default:
-            default_gate_model = preset.model
-            break
+    evaluation = node.evaluation
+    if s.workflow_dir:
+        evaluation = evaluation.model_copy(update={"validator": str(s.workflow_dir / evaluation.validator)})
     eval_call = run_evaluation(
-        node.evaluation,
+        evaluation,
         node_id,
         workdir=state.get("workdir", "."),
         node_output=node_output,
         workflow_name=config.name,
         attempt_number=retries + 1,
         backend=backend,
-        default_model=default_gate_model,
+        default_model=s.defaults.llm.model or s.model,
         dep_outputs=dep_outputs,
         dep_structured_outputs=dep_structured,
         dep_worktrees=dep_worktrees,
@@ -714,7 +707,7 @@ def _make_gate_node(
     synthetic id, not ``node.id``.
 
     ``executor`` (threaded from the registration site) is used for
-    ``executor.get_backend()`` when the validator is an LLM ``.md`` judge;
+    ``executor.get_backend(effective_settings or config.settings)`` when the validator is an LLM ``.md`` judge;
     ``None`` yields the pinned no-PromptBackend ``ValueError`` if such a
     validator runs.
 
@@ -773,7 +766,7 @@ def _make_gate_node(
         history = list(state.get("evaluations", {}).get(node_id, []))
         retries = state.get("retries", {}).get(node_id, 0)
         backend = (
-            executor.get_backend()
+            executor.get_backend(effective_settings or config.settings)
             if (executor is not None and hasattr(executor, "get_backend"))
             else None
         )

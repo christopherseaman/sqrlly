@@ -68,28 +68,18 @@ def _build_chain(workdir: Path) -> Graph:
     worker = _worker_path(workdir)
     return Graph(
         name="resume-chain",
-        version="0.1.0",
         nodes=[
             {
                 "id": "a", "name": "a",
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(worker), "a"]},
-                },
+                "run": [_PYTHON, str(worker), "a"],
             },
             {
                 "id": "b", "name": "b", "depends_on": ["a"],
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(worker), "b"]},
-                },
+                "run": [_PYTHON, str(worker), "b"],
             },
             {
                 "id": "c", "name": "c", "depends_on": ["b"],
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(worker), "c"]},
-                },
+                "run": [_PYTHON, str(worker), "c"],
             },
         ],
     )
@@ -264,21 +254,14 @@ def _build_gated_chain(workdir: Path) -> Graph:
     validator.write_text(_VALIDATOR_SRC)
     return Graph(
         name="resume-gated",
-        version="0.1.0",
         nodes=[
             {
                 "id": "up", "name": "up",
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(worker), "up"]},
-                },
+                "run": [_PYTHON, str(worker), "up"],
             },
             {
                 "id": "g", "name": "g", "depends_on": ["up"],
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(worker), "g"]},
-                },
+                "run": [_PYTHON, str(worker), "g"],
                 "evaluation": {
                     "validator": str(validator),
                     "threshold": 0.9,
@@ -301,35 +284,22 @@ def _build_fanout_chain(workdir: Path) -> Graph:
     manifest = json.dumps({"items": [{"id": "x"}]})
     return Graph(
         name="resume-fanout",
-        version="0.1.0",
         nodes=[
             {
                 "id": "up", "name": "up",
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(worker), "up"]},
-                },
+                "run": [_PYTHON, str(worker), "up"],
             },
             {
                 "id": "fan", "name": "fan", "depends_on": ["up"],
-                "execute": {
-                    "url": _ECHO,
-                    "params": {"args": ["-n", manifest]},
-                },
+                "run": [_ECHO, "-n", manifest],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": _ECHO,
-                            "params": {"args": ["-n", "child-{{id}}"]},
-                        },
+                        "run": [_ECHO, "-n", "child-{{id}}"],
                     },
                     "final_nodes": [
                         {
                             "id": "agg", "name": "agg",
-                            "execute": {
-                                "url": _PYTHON,
-                                "params": {"args": [str(worker), "agg"]},
-                            },
+                            "run": [_PYTHON, str(worker), "agg"],
                         }
                     ],
                 },
@@ -428,27 +398,17 @@ def _build_failable_fanout(workdir: Path) -> Graph:
     )
     return Graph(
         name="resume-failable-fanout",
-        version="0.1.0",
         nodes=[
             {
                 "id": "up", "name": "up",
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(worker), "up"]},
-                },
+                "run": [_PYTHON, str(worker), "up"],
             },
             {
                 "id": "cfan", "name": "cfan", "depends_on": ["up"],
-                "execute": {
-                    "url": _ECHO,
-                    "params": {"args": ["-n", manifest]},
-                },
+                "run": [_ECHO, "-n", manifest],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": _PYTHON,
-                            "params": {"args": [str(worker), "{{id}}"]},
-                        },
+                        "run": [_PYTHON, str(worker), "{{id}}"],
                     },
                 },
             },
@@ -519,20 +479,13 @@ def _build_dup_manifest_fanout(workdir: Path) -> Graph:
     parent.write_text(_DUP_PARENT_SRC)
     return Graph(
         name="resume-dup-manifest",
-        version="0.1.0",
         nodes=[
             {
                 "id": "dp", "name": "dp",
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(parent)]},
-                },
+                "run": [_PYTHON, str(parent)],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": _ECHO,
-                            "params": {"args": ["-n", "child-{{id}}"]},
-                        },
+                        "run": [_ECHO, "-n", "child-{{id}}"],
                     },
                 },
             },
@@ -600,20 +553,13 @@ def _build_drift_fanout(workdir: Path, drift_policy: str = "fail") -> Graph:
     dispatcher.write_text(_DRIFT_DISPATCHER_SRC)
     return Graph(
         name="resume-drift-fanout",
-        version="0.1.0",
         nodes=[
             {
                 "id": "cfan", "name": "cfan",
-                "execute": {
-                    "url": _PYTHON,
-                    "params": {"args": [str(dispatcher)]},
-                },
+                "run": [_PYTHON, str(dispatcher)],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": _PYTHON,
-                            "params": {"args": [str(worker), "{{id}}"]},
-                        },
+                        "run": [_PYTHON, str(worker), "{{id}}"],
                     },
                 },
             },
@@ -627,21 +573,14 @@ def _build_drift_fanout(workdir: Path, drift_policy: str = "fail") -> Graph:
 # (not f-string, to keep the literal `{{childid}}` Jinja var intact).
 _MEMBER_SUBGRAPH_TMPL = """
 name: member
-version: "0.1.0"
 nodes:
   - id: step1
     name: step1
-    execute:
-      url: "__PY__"
-      params:
-        args: ["__WORKER__", "{{childid}}", "step1"]
+    run: ["__PY__", "__WORKER__", "{{childid}}", "step1"]
   - id: step2
     name: step2
     depends_on: [step1]
-    execute:
-      url: "__PY__"
-      params:
-        args: ["__WORKER__", "{{childid}}", "step2"]
+    run: ["__PY__", "__WORKER__", "{{childid}}", "step2"]
 """
 
 
@@ -661,17 +600,13 @@ def _build_subgraph_template_fanout(workdir: Path) -> Graph:
     )
     return Graph(
         name="resume-subgraph-template-fanout",
-        version="0.1.0",
         nodes=[
             {
                 "id": "cfan", "name": "cfan",
-                "execute": {"url": _ECHO, "params": {"args": ["-n", manifest]}},
+                "run": [_ECHO, "-n", manifest],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": str(member),
-                            "params": {"inputs": {"childid": "{{id}}"}},
-                        },
+                        "workflow": {"file": str(member), "with": {"childid": "{{id}}"}},
                     },
                 },
             },
@@ -755,15 +690,12 @@ class TestResumeManifestDrift:
             "print(json.dumps({'items': items}))\n"
         )
         config = Graph(
-            name="resume-drain-fanout", version="0.1.0",
+            name="resume-drain-fanout",
             nodes=[{
                 "id": "cfan", "name": "cfan",
-                "execute": {"url": _PYTHON, "params": {"args": [str(dispatcher)]}},
+                "run": [_PYTHON, str(dispatcher)],
                 "fan_out": {
-                    "template": {"execute": {
-                        "url": _PYTHON,
-                        "params": {"args": [str(worker), "{{id}}"]},
-                    }},
+                    "template": {"run": [_PYTHON, str(worker), "{{id}}"]},
                 },
             }],
             settings={"on_manifest_drift": "fail"},

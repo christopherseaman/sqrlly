@@ -29,8 +29,7 @@ class TestLoadGraph:
     def test_loads_valid_graph(self, tmp_path):
         rel = _write_yaml(tmp_path, "ok.yaml", {
             "name": "G",
-            "version": "1.0.0",
-            "nodes": [{"id": "x", "name": "X", "execute": {"url": "x.md"}}],
+            "nodes": [{"id": "x", "name": "X", "agent": {"text": "test"}}],
         })
         g = load_graph(rel, base_dir=tmp_path)
         assert isinstance(g, Graph)
@@ -41,7 +40,7 @@ class TestLoadGraph:
             load_graph("nope.yaml", base_dir=tmp_path)
 
     def test_raises_on_invalid_schema(self, tmp_path):
-        rel = _write_yaml(tmp_path, "bad.yaml", {"name": "G", "version": "1.0.0"})
+        rel = _write_yaml(tmp_path, "bad.yaml", {"name": "G"})
         from pydantic import ValidationError
         with pytest.raises(ValidationError):
             load_graph(rel, base_dir=tmp_path)
@@ -52,13 +51,13 @@ class TestDetectConfigCycle:
 
     def test_no_cycle_passes(self, tmp_path):
         _write_yaml(tmp_path, "leaf.yaml", {
-            "name": "Leaf", "version": "1.0",
-            "nodes": [{"id": "x", "name": "X", "execute": {"url": "x.md"}}],
+            "name": "Leaf",
+            "nodes": [{"id": "x", "name": "X", "agent": {"text": "test"}}],
         })
         _write_yaml(tmp_path, "root.yaml", {
-            "name": "Root", "version": "1.0",
+            "name": "Root",
             "nodes": [
-                {"id": "uses_leaf", "name": "Uses Leaf", "execute": {"url": "leaf.yaml"}}
+                {"id": "uses_leaf", "name": "Uses Leaf", "workflow": "leaf.yaml"}
             ],
         })
         # No exception
@@ -66,9 +65,9 @@ class TestDetectConfigCycle:
 
     def test_self_reference_cycle(self, tmp_path):
         _write_yaml(tmp_path, "loop.yaml", {
-            "name": "Loop", "version": "1.0",
+            "name": "Loop",
             "nodes": [
-                {"id": "self", "name": "Self", "execute": {"url": "loop.yaml"}}
+                {"id": "self", "name": "Self", "workflow": "loop.yaml"}
             ],
         })
         with pytest.raises(SubgraphCycleError) as exc:
@@ -77,12 +76,12 @@ class TestDetectConfigCycle:
 
     def test_two_step_cycle(self, tmp_path):
         _write_yaml(tmp_path, "a.yaml", {
-            "name": "A", "version": "1.0",
-            "nodes": [{"id": "x", "name": "X", "execute": {"url": "b.yaml"}}],
+            "name": "A",
+            "nodes": [{"id": "x", "name": "X", "workflow": "b.yaml"}],
         })
         _write_yaml(tmp_path, "b.yaml", {
-            "name": "B", "version": "1.0",
-            "nodes": [{"id": "y", "name": "Y", "execute": {"url": "a.yaml"}}],
+            "name": "B",
+            "nodes": [{"id": "y", "name": "Y", "workflow": "a.yaml"}],
         })
         with pytest.raises(SubgraphCycleError) as exc:
             detect_config_cycle("a.yaml", base_dir=tmp_path)
@@ -98,9 +97,9 @@ from sqrlly.schema.models import Settings as _Settings
 
 def _write_trivial_sub(tmp_path) -> str:
     sub = {
-        "name": "sub", "version": "1.0",
+        "name": "sub",
         "nodes": [{"id": "n", "name": "n",
-                   "execute": {"url": "/bin/sh", "params": {"args": ["-c", "true"]}}}],
+                   "run": ["/bin/sh", "-c", "true"]}],
     }
     (tmp_path / "sub.yaml").write_text(_yaml.safe_dump(sub))
     return "sub.yaml"
@@ -132,7 +131,7 @@ class _StubCompiled:
         return {"node_outputs": {"n": "done"}, "failed_nodes": set()}
 
 
-def _stub_compile_fn(c, executor=None, _depth=0, effective_settings=None):
+def _stub_compile_fn(c, executor=None, _depth=0, effective_settings=None, logger=None):
     return _StubCompiled()
 
 
@@ -175,44 +174,9 @@ async def test_fanout_invoker_branch_acquire_follows_effective_worktree(
         assert result.worktree is None
 
 
-class TestNodeFieldsForSubgraph:
-    """Schema validation for the Stage-5b subgraph shape: `execute.url` points
-    at a `.yaml` file; `params.inputs` / `params.outputs` carry projection."""
-
-    def test_subgraph_url_only(self):
-        g = Graph(
-            name="P", version="1.0",
-            nodes=[{
-                "id": "sub", "name": "Sub",
-                "execute": {
-                    "url": "child.yaml",
-                    "params": {"inputs": {"topic": "{{intake}}"}},
-                },
-            }],
-        )
-        n = g.nodes[0]
-        assert n.execute is not None
-        assert n.execute.url == "child.yaml"
-        assert n.execute.params == {"inputs": {"topic": "{{intake}}"}}
-
-    def test_outputs_default_empty_when_omitted(self):
-        g = Graph(
-            name="P", version="1.0",
-            nodes=[{"id": "sub", "name": "Sub", "execute": {"url": "child.yaml"}}],
-        )
-        n = g.nodes[0]
-        # Default: no params at all → empty dict
-        assert n.execute.params == {}
-
-    def test_subgraph_with_explicit_outputs(self):
-        g = Graph(
-            name="P", version="1.0",
-            nodes=[{
-                "id": "sub", "name": "Sub",
-                "execute": {
-                    "url": "child.yaml",
-                    "params": {"outputs": {"key": "{{terminal}}"}},
-                },
-            }],
-        )
-        assert g.nodes[0].execute.params["outputs"] == {"key": "{{terminal}}"}
+def test_workflow_inputs():
+    node = Graph(nodes=[{"id": "sub", "workflow": {
+        "file": "child.yaml", "with": {"topic": "{{intake}}"},
+    }}]).nodes[0]
+    assert node.workflow.file == "child.yaml"
+    assert node.workflow.inputs == {"topic": "{{intake}}"}

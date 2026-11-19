@@ -21,7 +21,6 @@ def collect_warnings(config: Graph) -> list[str]:
         + _worktree_setup_exclude_warnings(config)
         + _fanout_parent_promote_warnings(config)
         + _fanout_resume_drift_warnings(config)
-        + _remote_url_warnings(config)
     )
 
 
@@ -47,37 +46,6 @@ def _fanout_resume_drift_warnings(config: Graph) -> list[str]:
                 f"'id's, else completed children are re-billed and the failed "
                 f"child orphaned. Set 'settings.on_manifest_drift: warn' to "
                 f"opt into intentional re-fanning."
-            )
-    return out
-
-
-def _remote_url_warnings(config: Graph) -> list[str]:
-    """SECURITY: flag any node that fetches a prompt/validator over the
-    network (an ``http(s)://`` URL). Remote fetch is opt-in and gated,
-    but pulling execution inputs from a remote source is a trust
-    boundary — surface it loudly at ``validate``/``run`` so it can never
-    be silent. (Runtime fetch also logs a warning; see runtime/url.py.)
-    """
-    out: list[str] = []
-
-    def is_remote(url: object) -> bool:
-        return isinstance(url, str) and url.lower().startswith(
-            ("http://", "https://")
-        )
-
-    for node in config.nodes:
-        if node.execute is not None and is_remote(node.execute.url):
-            out.append(
-                f"node '{node.id}': fetches its execution input from a "
-                f"REMOTE url ({node.execute.url}) — ensure the source is "
-                f"trusted; remote content runs with the orchestrator's "
-                f"full privileges."
-            )
-        ev = node.evaluation
-        if ev is not None and is_remote(getattr(ev, "validator", None)):
-            out.append(
-                f"node '{node.id}': gate validator is a REMOTE url "
-                f"({ev.validator}) — ensure the source is trusted."
             )
     return out
 

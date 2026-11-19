@@ -38,13 +38,10 @@ async def test_fan_out_promote_merges_branch_deltas(tmp_path):
     # A branch worker subgraph: writes out/<item>.txt in its worktree.
     sub = base / "worker.yaml"
     sub.write_text(yaml.safe_dump({
-        "name": "worker", "version": "0.1.0",
+        "name": "worker",
         "nodes": [{
             "id": "write", "name": "write",
-            "execute": {
-                "url": "/bin/sh",
-                "params": {"args": ["-c", "mkdir -p out && echo {{item}} > out/{{item}}.txt"]},
-            },
+            "run": ["/bin/sh", "-c", "mkdir -p out && echo {{item}} > out/{{item}}.txt"],
         }],
         "settings": {},
     }))
@@ -52,12 +49,12 @@ async def test_fan_out_promote_merges_branch_deltas(tmp_path):
     manifest.write_text(json.dumps([{"id": "a", "item": "a"}, {"id": "b", "item": "b"}]))
 
     cfg = Graph(**{
-        "name": "fp", "version": "0.1.0",
+        "name": "fp",
         "nodes": [{
             "id": "build", "name": "build",
             "fan_out": {
                 "manifest_path": "items.json",
-                "template": {"execute": {"url": "worker.yaml", "params": {"inputs": {"item": "{{item}}"}}}},
+                "template": {"workflow": {"file": "worker.yaml", "with": {"item": "{{item}}"}}},
                 "promote": True,
             },
         }],

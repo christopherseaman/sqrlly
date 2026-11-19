@@ -34,7 +34,6 @@ from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
     DimensionCheck,
     Evaluation,
-    Execute,
     Graph,
     Node,
     Route,
@@ -84,15 +83,11 @@ class TestInlineRouteIncludeEval:
         # state["_route_eval_preamble"], not on what a backend received.
         config = Graph(
             name="inline-route-eval",
-            version="0.1.0",
             nodes=[
                 Node(
                     id="classify",
                     name="C",
-                    execute=Execute(
-                        url=_PYTHON,
-                        params={"args": ["-c", "print('initial draft')"]},
-                    ),
+                    run=[_PYTHON, "-c", "print('initial draft')"],
                     evaluation=Evaluation(
                         validator=str(validator),
                         threshold=0.8,
@@ -117,10 +112,7 @@ class TestInlineRouteIncludeEval:
                 Node(
                     id="rewrite",
                     name="R",
-                    execute=Execute(
-                        url=_PYTHON,
-                        params={"args": ["-c", "print('rewrite ran')"]},
-                    ),
+                    run=[_PYTHON, "-c", "print('rewrite ran')"],
                 ),
             ],
         )

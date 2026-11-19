@@ -4,9 +4,9 @@ Written 2026-11-19. Delete or rewrite this file when it goes stale. Rules for is
 
 ## State
 
-- PyPI holds v0.10.0. The CLI still loads 0.10 YAML. The independent 1.0 schema lives in `src/sqrlly/schema/v1.py` and loads draft workflows through `load_workflow(path)`.
+- PyPI holds v0.10.0. On main, the CLI loads kind-key workflows through `schema.models.load_workflow`. The spike in `schema/v1.py` also describes the remaining 1.0 grammar.
 - The 1.0 design is final in `docs/reference/grammar-1.0.md`. Its decision table lists no open decision.
-- `CLAUDE.md`, `SCHEMA.md`, `SKILLS.md` and `README.md` describe 0.10.
+- `CLAUDE.md`, `SCHEMA.md`, `SKILLS.md` and `README.md` describe the current CLI.
 
 ## Next: the grammar changes
 
@@ -16,13 +16,13 @@ Work the issues in this order. Each issue body has `Known`, `Where` and `Done wh
 |---|---|---|---|
 | 1 | #36 | Spike the 1.0 schema models and a draft skill doc | complete |
 | 1 | #37 | Delete dead surface, validate params at load (pending a 0.10.x release) | complete |
-| 2 | #38 | Replace execute and presets with kind keys | ready |
-| 3 | #39 | Replace gates with eval and the route case list | blocked by #38 |
-| 3 | #40 | Add `outputs.files` and `outputs.schema` | blocked by #38 |
-| 3 | #41 | Snapshot refs, settle-time promote, new worktree defaults | blocked by #38 |
-| 4 | #42 | Move fan-out to `for_each` | blocked by #38, #40 |
+| 2 | #38 | Replace execute and presets with kind keys | complete |
+| 3 | #39 | Replace gates with eval and the route case list | ready |
+| 3 | #40 | Add `outputs.files` and `outputs.schema` | ready |
+| 3 | #41 | Snapshot refs, settle-time promote, new worktree defaults | ready |
+| 4 | #42 | Move fan-out to `for_each` | blocked by #40 |
 
-An agent given only `docs/reference/skills-1.0-draft.md` authored five workflows covering linear dependencies, fan-out, eval with escalation, schema routing and subgraphs. All five and the referenced child loaded with the spike. #38 switches the engine to this grammar and migrates 10 example files and about 53 test files.
+An agent given only `docs/reference/skills-1.0-draft.md` authored five workflows covering linear dependencies, fan-out, eval with escalation, schema routing and subgraphs. All five and the referenced child loaded with the spike. The ten migrated examples use the engine’s kind keys.
 
 ## Grammar in one screen
 

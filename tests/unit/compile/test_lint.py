@@ -12,7 +12,7 @@ from helpers import make_config
 
 
 def _node(node_id: str) -> dict:
-    return {"id": node_id, "name": node_id, "execute": {"url": "t.md"}}
+    return {"id": node_id, "name": node_id, "agent": {"text": "test"}}
 
 
 class TestHyphenatedIdWarnings:
@@ -43,9 +43,9 @@ class TestHyphenatedIdWarnings:
         parent = {
             "id": "fan",
             "name": "fan",
-            "execute": {"url": "echo"},
+            "run": ["echo"],
             "fan_out": {
-                "template": {"execute": {"url": "t.md"}},
+                "template": {"agent": {"text": "test"}},
                 "final_nodes": [{"id": "merge-results", "name": "Merge"}],
             },
         }
@@ -59,12 +59,12 @@ class TestHyphenatedIdWarnings:
 
 
 def _fan_node(node_id: str, *, manifest_path: str | None = None) -> dict:
-    fo: dict = {"template": {"execute": {"url": "t.md"}}}
+    fo: dict = {"template": {"agent": {"text": "test"}}}
     if manifest_path is not None:
         fo["manifest_path"] = manifest_path
     return {
         "id": node_id, "name": node_id,
-        "execute": {"url": "echo"}, "fan_out": fo,
+        "run": ["echo"], "fan_out": fo,
     }
 
 
@@ -97,7 +97,7 @@ class TestManifestDriftLint:
 
 def _gated_node(node_id: str, *, threshold: float, blocking: bool) -> dict:
     return {
-        "id": node_id, "name": node_id, "execute": {"url": "t.md"},
+        "id": node_id, "name": node_id, "agent": {"text": "test"},
         "evaluation": {"validator": "gate.py", "threshold": threshold,
                        "blocking": blocking},
     }
@@ -125,9 +125,9 @@ class TestAdvisoryGateWarnings:
 
     def test_nonblocking_fan_out_final_node_gate_warns(self):
         parent = {
-            "id": "fan", "name": "fan", "execute": {"url": "echo"},
+            "id": "fan", "name": "fan", "run": ["echo"],
             "fan_out": {
-                "template": {"execute": {"url": "t.md"}},
+                "template": {"agent": {"text": "test"}},
                 "final_nodes": [{
                     "id": "gate_2c", "name": "Gate",
                     "evaluation": {"validator": "g.py", "threshold": 0.85,
@@ -141,10 +141,10 @@ class TestAdvisoryGateWarnings:
 
     def test_nonblocking_fan_out_template_gate_warns(self):
         parent = {
-            "id": "fan", "name": "fan", "execute": {"url": "echo"},
+            "id": "fan", "name": "fan", "run": ["echo"],
             "fan_out": {
                 "template": {
-                    "execute": {"url": "t.md"},
+                    "agent": {"text": "test"},
                     "evaluation": {"validator": "g.py", "threshold": 0.7,
                                    "blocking": False},
                 },
@@ -159,11 +159,11 @@ class TestFanoutParentPromoteWarnings:
         from sqrlly.compile.lint import collect_warnings
         from sqrlly.schema.models import Graph
         cfg = Graph(**{
-            "name": "t", "version": "0.0.0",
+            "name": "t",
             "nodes": [{
                 "id": "build", "name": "build", "promote": True,
                 "fan_out": {"manifest_path": "m.json",
-                            "template": {"execute": {"url": "w.yaml"}}},
+                            "template": {"workflow": "w.yaml"}},
             }],
             "settings": {},
         })
@@ -174,11 +174,11 @@ class TestFanoutParentPromoteWarnings:
         from sqrlly.compile.lint import collect_warnings
         from sqrlly.schema.models import Graph
         cfg = Graph(**{
-            "name": "t", "version": "0.0.0",
+            "name": "t",
             "nodes": [{
                 "id": "build", "name": "build",
                 "fan_out": {"manifest_path": "m.json",
-                            "template": {"execute": {"url": "w.yaml"}},
+                            "template": {"workflow": "w.yaml"},
                             "promote": True},
             }],
             "settings": {},
@@ -209,26 +209,3 @@ class TestWorktreeSetupExcludeWarnings:
             worktree_setup=["pnpm install --prefer-offline"],
         )
         assert not any("prisma generate" in w for w in collect_warnings(config))
-
-
-class TestRemoteUrlWarning:
-    """SECURITY lint: a remote http(s) execution input is flagged at
-    validate/run so it is never silent."""
-
-    def test_remote_prompt_url_flagged(self):
-        from sqrlly.compile.lint import collect_warnings
-        from sqrlly.schema.models import Graph, Node, Execute
-        g = Graph(name="w", version="1", nodes=[
-            Node(id="a", name="A",
-                 execute=Execute(url="https://prompts.example.com/p.md")),
-        ], settings={"allow_remote_urls": True})
-        warns = collect_warnings(g)
-        assert any("REMOTE" in w and "a" in w for w in warns)
-
-    def test_local_url_not_flagged(self):
-        from sqrlly.compile.lint import collect_warnings
-        from sqrlly.schema.models import Graph, Node, Execute
-        g = Graph(name="w", version="1", nodes=[
-            Node(id="a", name="A", execute=Execute(url="prompts/p.md")),
-        ])
-        assert not any("REMOTE" in w for w in collect_warnings(g))

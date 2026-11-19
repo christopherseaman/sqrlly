@@ -15,7 +15,6 @@ import yaml
 from pydantic import ValidationError
 
 from sqrlly.schema.models import (
-    Execute,
     Graph,
     Node,
     Route,
@@ -79,7 +78,7 @@ def _cmd(id: str, **kw):
     import shutil
     return Node(
         id=id, name=id,
-        execute=Execute(url=shutil.which("echo") or "/bin/echo", params={"args": [id]}),
+        run=[shutil.which("echo") or "/bin/echo", id],
         **kw,
     )
 
@@ -98,7 +97,7 @@ def _route(id: str, cases: list[dict], else_target: str, **kw):
 
 def test_graph_validator_resolves_real_goto():
     config = Graph(
-        name="t", version="1.0",
+        name="t",
         nodes=[
             _cmd("a"),
             _route("r", [{"when": "True", "goto": "a"}], "__end__", depends_on=["a"]),
@@ -111,7 +110,7 @@ def test_graph_validator_resolves_real_goto():
 def test_graph_validator_rejects_unresolved_goto():
     with pytest.raises(ValidationError) as ei:
         Graph(
-            name="t", version="1.0",
+            name="t",
             nodes=[
                 _cmd("a"),
                 _route(
@@ -130,7 +129,7 @@ def test_graph_validator_rejects_unresolved_goto():
 def test_graph_validator_rejects_unresolved_else():
     with pytest.raises(ValidationError) as ei:
         Graph(
-            name="t", version="1.0",
+            name="t",
             nodes=[
                 _cmd("a"),
                 _route(
@@ -146,7 +145,7 @@ def test_graph_validator_rejects_unresolved_else():
 
 def test_graph_validator_accepts_end_sentinel():
     config = Graph(
-        name="t", version="1.0",
+        name="t",
         nodes=[
             _cmd("a"),
             _route(
@@ -161,7 +160,7 @@ def test_graph_validator_accepts_end_sentinel():
 def test_graph_validator_rejects_route_in_depends_on():
     with pytest.raises(ValidationError) as ei:
         Graph(
-            name="t", version="1.0",
+            name="t",
             nodes=[
                 _cmd("a"),
                 _route("r", [{"when": "True", "goto": "a"}], "__end__", depends_on=["a"]),

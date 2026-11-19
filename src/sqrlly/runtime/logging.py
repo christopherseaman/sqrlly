@@ -39,7 +39,7 @@ def _emit_update_events(emitter: Any, update: dict[str, Any]) -> None:
     ``{node_name: partial_state_update}``; the partial update is the
     delta the node returned (after reducer application). The event
     types we surface — ``node_model`` (LLM nodes only: which
-    preset/model ran), ``node_completed``, ``node_failed``,
+    provider and model ran), ``node_completed``, ``node_failed``,
     ``gate_evaluated``, ``node_retried`` — each correspond to a
     specific shape inside that delta. We read them directly here
     rather than diffing successive snapshots.
@@ -67,7 +67,7 @@ def _emit_update_events(emitter: Any, update: dict[str, Any]) -> None:
             "event": "node_model",
             "node": node,
             "model": info.get("model"),
-            "preset": info.get("preset"),
+            "provider": info.get("provider"),
         })
 
     for node, records in (update.get("evaluations") or {}).items():

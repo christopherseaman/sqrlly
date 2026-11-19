@@ -1,62 +1,26 @@
-name: "Compose and Validate Paper"
-version: "1.0.0"
-
-# Standalone-runnable subgraph used by examples/absurd-paper/workflow.yaml
-# via `config: subgraphs/compose_and_validate.yaml`. The parent projects
-# the five body-section outputs (abstract / intro / methods / results /
-# discussion) as `inputs:`; the subgraph composes the paper, persists it
-# to disk, and runs a structural-integrity check.
-#
-# Demonstrates Stage 4c recursive subgraph composition:
-#  - Multi-step subgraph (reconcile → persist → submission_check).
-#  - Standalone-runnable: `sqrlly run subgraphs/compose_and_validate.yaml`
-#    works if you provide the five inputs as state overrides.
-#  - Inputs declared via parent's `inputs:` projection.
-
+name: Compose and Validate Paper
 nodes:
   - id: reconcile
-    name: "Compose Paper"
-    # Stitches all five sections into one full-paper markdown — a large
-    # single generation, so it gets a generous ceiling (the body-section
-    # nodes each run under the 180s default).
+    name: Compose Paper
     timeout: 600.0
+    llm: reconcile.md
 
-    execute:
-      url: "examples/absurd-paper/prompts/reconcile.md"
   - id: persist
-    name: "Persist Paper to Disk"
+    name: Persist Paper to Disk
     depends_on: [reconcile]
     output_contract:
-      base_directory: "output"
-      required_files: ["paper.md"]
-    execute:
-      url: "examples/absurd-paper/scripts/persist_paper.py"
-      params:
-        preset: uv_script
-        args:
-          - "{{reconcile}}"
-          - "output/paper.md"
+      base_directory: output
+      required_files:
+      - paper.md
+    run: [uv, run, --script, '{{workflow_dir}}/../scripts/persist_paper.py', '{{reconcile}}', output/paper.md]
 
   - id: submission_check
-    name: "Submission Structural Check"
+    name: Submission Structural Check
     depends_on: [persist]
     evaluation:
-      validator: "examples/absurd-paper/gates/submission_check.py"
+      validator: ../gates/submission_check.py
       threshold: 1.0
       blocking: true
 settings:
-  # Run in the workdir (no per-node worktrees) so `persist` writes
-  # `output/paper.md` to the same shared location the parent's
-  # `render_pdf` reads — see the parent workflow's worktree note.
-  worktree: off
-  presets:
-    default:
-      transport: cli
-      provider: openai
-      model: gpt-5.6-luna
-      default: true
-    uv_script:
-      kind: command
-      # `persist_paper.py` runs under PATH-resolved `uv` (stdlib-only, no
-      # PEP 723 deps) — same interpreter story as the parent workflow.
-      command: "uv run --script"
+  worktree: 'off'
+  prompts: ../prompts

@@ -266,10 +266,10 @@ class ForemanExecutor:
         """Snapshot of node_id → worktree path, for state persistence."""
         return dict(self._worktrees)
 
-    def get_backend(self) -> PromptBackend | None:
+    def get_backend(self, settings: Settings | None = None) -> PromptBackend | None:
         """Pass through to inner executor's backend (for .md LLM gates)."""
         if hasattr(self._inner, "get_backend"):
-            return self._inner.get_backend()
+            return self._inner.get_backend(settings)
         return None
 
     async def close(self) -> None:

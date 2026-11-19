@@ -39,7 +39,6 @@ from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
     DimensionCheck,
     Evaluation,
-    Execute,
     Graph,
     Node,
     Settings,
@@ -50,7 +49,7 @@ from mock_executor import MockExecutor
 
 def _config_with(node: Node, **settings_kwargs) -> Graph:
     return Graph(
-        name="T", version="1.0",
+        name="T",
         nodes=[node],
         settings=Settings(**settings_kwargs),
     )
@@ -60,10 +59,6 @@ def _validator(tmp_path, name: str, score: str) -> str:
     path = tmp_path / name
     path.write_text(f"import sys\nsys.stdin.read()\nprint({score!r})\n")
     return str(path)
-
-
-def _exec(url: str = "t.md") -> Execute:
-    return Execute(url=url)
 
 
 def _gate(node, config, *, exec_id="p1", pass_targets=("b",), executor=None):
@@ -76,7 +71,7 @@ def _gate(node, config, *, exec_id="p1", pass_targets=("b",), executor=None):
 def _gated_node(retry_threshold: float = 0.8, **eval_kwargs) -> Node:
     return Node(
         id="p1", name="P1",
-        execute=Execute(url="t.md"),
+        agent={"text": "test"},
         evaluation=Evaluation(
             validator="v.py", threshold=retry_threshold, **eval_kwargs,
         ),
@@ -116,7 +111,7 @@ class TestGateWritesRecord:
         """A passing script gate writes the record AND completed_nodes in
         one Command — the collapse's core inversion vs the split eval body."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -138,7 +133,7 @@ class TestGateWritesRecord:
     async def test_invocation_increments_with_retries_state(self, tmp_path):
         """State pre-populated with retries=2 yields invocation=2 on the record."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -156,7 +151,7 @@ class TestGateWritesRecord:
         """A prior record in state.evaluations + this run's new record; the
         Command update carries only the NEW record (reducer appends it)."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -183,7 +178,7 @@ class TestGateWritesRecord:
             '}))\n'
         )
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=str(validator),
                 dimensions=[
@@ -211,7 +206,7 @@ class TestGatePass:
     async def test_pass_single_target_returns_command_goto_target(self, tmp_path):
         """Score above threshold → Command(goto=target) with record+completed."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -231,7 +226,7 @@ class TestGatePass:
     async def test_pass_multiple_targets_fans_out_via_list(self, tmp_path):
         """Multi-pass targets → goto receives a list (LangGraph fans out)."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -249,7 +244,7 @@ class TestGatePass:
     async def test_pass_terminal_gated_node_routes_to_END(self, tmp_path):
         """Terminal gated node has pass_targets=[END]."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -269,7 +264,7 @@ class TestGateRetry:
     async def test_retry_returns_command_goto_exec(self, tmp_path):
         """Score below threshold + budget left → Command(goto=exec_id)."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.3"), threshold=0.8,
             ),
@@ -294,7 +289,7 @@ class TestGateRetry:
         """A gated fan-out final's retry goes to its synthetic exec_id, not
         node.id — the gate factory keeps the retry target parameterized."""
         node = Node(
-            id="_final_p_f0", name="F0", execute=_exec(),
+            id="_final_p_f0", name="F0", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.3"), threshold=0.8,
             ),
@@ -313,7 +308,7 @@ class TestGateRetry:
     async def test_retry_increments_existing_counter(self, tmp_path):
         """retries=2 in state → bumped to 3 in update."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.3"), threshold=0.8,
             ),
@@ -335,7 +330,7 @@ class TestGateFail:
         """Below threshold + budget exhausted + blocking=True → goto END,
         failed_nodes set, errors populated with 'Evaluation failed'."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.3"),
                 threshold=0.8, blocking=True,
@@ -362,7 +357,7 @@ class TestGateFail:
         """Below threshold + budget exhausted + blocking=False → routes as
         pass (completed_nodes set) but records a non-blocking error."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.3"),
                 threshold=0.8, blocking=False,
@@ -389,7 +384,7 @@ class TestGateReadsLatestRecord:
         """With prior failing records in history, the gate runs a fresh
         validator and classifies on THIS run's score (a passing one)."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -438,7 +433,7 @@ class TestGateGuards:
         validator would raise if the validator ran — proves it did not)."""
         # An LLM (.md) validator so a validator call would raise on backend=None.
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(validator="check.md", threshold=0.8),
         )
         gate = _gate(node, _config_with(node), pass_targets=["b"], executor=None)
@@ -454,7 +449,7 @@ class TestGateGuards:
     async def test_resume_skip_terminal_routes_END(self):
         """Step 2 with a terminal gated node (pass_targets=[END])."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(validator="check.md", threshold=0.8),
         )
         gate = _gate(node, _config_with(node), pass_targets=[END], executor=None)
@@ -494,7 +489,7 @@ class TestGateGuards:
         """Step 4 companion: an empty-string output ("" from a join node)
         counts as PRESENT — the gate proceeds and writes a record."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.9"), threshold=0.8,
             ),
@@ -510,7 +505,7 @@ class TestGateGuards:
         """Step 6: node_id in completed_nodes → the validator STILL runs
         (record written), verdict deliberately not enforced, goto=pass."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(
                 validator=_validator(tmp_path, "v.py", "0.3"),  # would FAIL
                 threshold=0.8,
@@ -536,7 +531,7 @@ class TestGateGuards:
         gate proceeds into validation. With no backend the LLM validator
         raises ValueError — proving the guard didn't short-circuit."""
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(validator="check.md", threshold=0.8),
         )
         gate = _gate(node, _config_with(node), pass_targets=["b"], executor=None)
@@ -555,7 +550,7 @@ class TestGateInfraFailure:
         validator = tmp_path / "slow.py"
         validator.write_text("import time, sys\nsys.stdin.read()\ntime.sleep(5)\nprint('0.9')\n")
         node = Node(
-            id="p1", name="P1", execute=_exec(),
+            id="p1", name="P1", agent={"text": "test"},
             evaluation=Evaluation(validator=str(validator), threshold=0.8),
             timeout=1,
         )
@@ -577,7 +572,7 @@ class _StubBackendExecutor(MockExecutor):
         super().__init__()
         self._backend = CLIBackend(argv_prefix=(str(stub),))
 
-    def get_backend(self):
+    def get_backend(self, settings=None):
         return self._backend
 
 
@@ -600,12 +595,12 @@ def _stub_cli(tmp_path, fail_first: int):
 async def _run_llm_gated(tmp_path, fail_first: int):
     (tmp_path / "judge.md").write_text("Judge: {{ output }}")
     node = Node(
-        id="p1", name="P1", execute=_exec(),
+        id="p1", name="P1", agent={"text": "test"},
         evaluation=Evaluation(validator="judge.md", threshold=0.8),
     )
     executor = _StubBackendExecutor(_stub_cli(tmp_path, fail_first))
     graph = build_workflow_graph(
-        _config_with(node, backend_max_retries=1), executor,
+        _config_with(node, defaults={"llm": {"backend_max_retries": 1}}), executor,
     )
     state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
     calls = len((tmp_path / "calls").read_text().splitlines())

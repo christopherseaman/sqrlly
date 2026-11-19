@@ -7,17 +7,17 @@ import pytest
 from sqrlly.compile._manifest import _read_manifest
 from sqrlly.runtime.result import ManifestError
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import Execute, FanOut, Node, FanOutTemplate, Settings
+from sqrlly.schema.models import FanOut, Node, FanOutTemplate, Settings
 
 
 def _phase_with_dynamic(manifest_path=None) -> Node:
     return Node(
         id="p1", name="P1",
-        execute=Execute(url="t.md"),
+        agent={"text": "test"},
         fan_out=FanOut(
             
             manifest_path=manifest_path,
-            template=FanOutTemplate(execute=Execute(url="sub.md")),
+            template=FanOutTemplate(agent={"text": "test"}),
         ),
     )
 
@@ -139,7 +139,7 @@ class TestReadManifestFromDisk:
 
 class TestReadManifestEdgeCases:
     def test_no_fan_out(self):
-        node = Node(id="p1", name="P1", execute=Execute(url="t.md"))
+        node = Node(id="p1", name="P1", agent={"text": "test"})
         state = make_initial_state()
         result = _read_manifest(state, node)
         assert result == []

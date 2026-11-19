@@ -2,7 +2,7 @@
 
 Lets users who installed via ``pipx install sqrlly`` get a working
 workflow on disk without cloning the repo. The scaffold is intentionally
-minimal: one prompt node, one prompt file, one CLI-transport preset.
+minimal: one command that prints a greeting.
 
 ``init --skill`` instead installs the agent skill doc (the repo's
 ``SKILLS.md``) into a working repo at ``.agents/skills/sqrlly/SKILL.md``
@@ -71,16 +71,6 @@ EXAMPLES: dict[str, dict] = {
 }
 
 
-def _rewrite_example_urls(yaml_text: str, name: str) -> str:
-    """Strip the ``examples/<name>/`` prefix wherever it appears in a
-    scaffolded example's YAML (workflow + subgraphs) — quoted
-    ``url:``/``validator:`` path values AND header-comment run commands —
-    so the copy is self-contained and runnable from its own directory.
-    Absolute paths (e.g. ``/usr/bin/echo``) and refs to other examples
-    don't carry the prefix, so they're left untouched."""
-    return yaml_text.replace(f"examples/{name}/", "")
-
-
 def _load_example_file(src_repo_relpath: str) -> str:
     """Read a bundled example file. In an installed wheel it lives at
     ``sqrlly/_examples/<rest>`` (force-included; ``<rest>`` is the path with
@@ -105,10 +95,7 @@ def _load_example_file(src_repo_relpath: str) -> str:
 def init_example(name: str, directory: str) -> None:
     """Scaffold the curated example ``name`` into ``directory``.
 
-    Writes each catalog file (creating subdirs like ``gates/``/``scripts/``),
-    rewriting every YAML's ``examples/<name>/`` URL prefixes (workflow +
-    subgraphs) so the copy is self-contained. Refuses to clobber an existing
-    ``workflow.yaml``.
+    Paths in the bundled workflows resolve relative to their YAML files.
     """
     if name not in EXAMPLES:
         raise click.ClickException(
@@ -124,10 +111,6 @@ def init_example(name: str, directory: str) -> None:
         )
     for dest_rel, src_rel in EXAMPLES[name]["files"].items():
         text = _load_example_file(src_rel)
-        # Rewrite every YAML (workflow + subgraphs) — subgraph files also
-        # carry ``examples/<name>/`` prefixes on their prompt/gate URLs.
-        if dest_rel.endswith((".yaml", ".yml")):
-            text = _rewrite_example_urls(text, name)
         out = target / dest_rel
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
@@ -156,32 +139,11 @@ def init_list_examples() -> None:
 
 
 _WORKFLOW_YAML = """\
-# Minimal sqrlly workflow — scaffolded by `sqrlly init`.
-#
-# Edit `prompts/hello.md` to change the prompt. To add quality gates,
-# routing, fan-out, subgraphs, or more presets:
-#   https://github.com/christopherseaman/sqrlly/blob/main/README.md
-#   https://github.com/christopherseaman/sqrlly/blob/main/SCHEMA.md
-
-name: "My sqrlly workflow"
-version: "0.1.0"
-
+name: My sqrlly workflow
 nodes:
   - id: hello
-    name: "Hello"
-    execute:
-      url: "prompts/hello.md"
-
-settings:
-  presets:
-    default:
-      transport: cli
-      provider: openai       # uses Codex CLI; anthropic selects Claude
-      model: gpt-5.6-luna
-      default: true
+    run: [echo, Hello from sqrlly!]
 """
-
-_HELLO_MD = "Write a one-sentence friendly greeting.\n"
 
 
 def init_command(directory: str) -> None:
@@ -193,8 +155,6 @@ def init_command(directory: str) -> None:
     """
     target = Path(directory)
     workflow_path = target / "workflow.yaml"
-    prompt_dir = target / "prompts"
-    prompt_path = prompt_dir / "hello.md"
 
     if workflow_path.exists():
         raise click.ClickException(
@@ -203,9 +163,7 @@ def init_command(directory: str) -> None:
         )
 
     target.mkdir(parents=True, exist_ok=True)
-    prompt_dir.mkdir(parents=True, exist_ok=True)
     workflow_path.write_text(_WORKFLOW_YAML)
-    prompt_path.write_text(_HELLO_MD)
 
     display = str(target) if str(target) != "." else "the current directory"
     click.echo(f"Scaffolded sqrlly workflow into {display}.")

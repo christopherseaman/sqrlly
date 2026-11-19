@@ -45,24 +45,17 @@ def _write_sub_yaml(tmp_path: Path) -> str:
     """
     sub = {
         "name": "write-sub",
-        "version": "1.0",
         "nodes": [
             {
                 "id": "gen",
                 "name": "Generate",
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c", "echo generated-{{item_id}} > gen.txt"]},
-                },
+                "run": ["/bin/sh", "-c", "echo generated-{{item_id}} > gen.txt"],
             },
             {
                 "id": "polish",
                 "name": "Polish",
                 "depends_on": ["gen"],
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c", "echo polished-{{item_id}} > polish.txt"]},
-                },
+                "run": ["/bin/sh", "-c", "echo polished-{{item_id}} > polish.txt"],
             },
         ],
     }
@@ -78,21 +71,14 @@ def _build_parent_config(tmp_path: Path, sub_yaml: str) -> Graph:
     # printf avoids echo quoting issues with JSON strings
     return Graph(
         name="subgraph-fanout-worktree-test",
-        version="1.0",
         nodes=[
             {
                 "id": _PARENT_ID,
                 "name": "Writer Pool",
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c", f"printf '%s' '{manifest}'"]},
-                },
+                "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": sub_yaml,
-                            "params": {"inputs": {"item_id": "{{id}}"}},
-                        },
+                        "workflow": {"file": sub_yaml, "with": {"item_id": "{{id}}"}},
                     },
                 },
             },

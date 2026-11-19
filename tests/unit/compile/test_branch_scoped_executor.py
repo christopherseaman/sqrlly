@@ -1,6 +1,6 @@
 import pytest
 from sqrlly.compile.subgraph import _strip_worktree, _BranchScopedExecutor
-from sqrlly.schema.models import Node, Settings, Execute
+from sqrlly.schema.models import Node, Settings
 from sqrlly.runtime.result import ExecutionResult
 
 
@@ -34,7 +34,7 @@ async def test_wrapper_pins_workdir_and_neutralizes_node():
     rec = _Recorder()
     wrapped = _BranchScopedExecutor(rec, "/branch/tree")
     node = Node(id="inner", name="inner", worktree="isolated",
-                execute=Execute(url="/bin/true", params={"args": []}))
+                run=["/bin/true"])
     result = await wrapped.execute(node, {})
     assert result.success
     seen_node, seen_workdir = rec.calls[0]

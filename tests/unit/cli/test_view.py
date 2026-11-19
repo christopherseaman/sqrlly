@@ -30,7 +30,7 @@ def _node(id, **overrides):
     base = {
         "id": id,
         "name": id.upper(),
-        "execute": {"url": "/usr/bin/echo"},
+        "run": ["/usr/bin/echo"],
         **overrides,
     }
     return base
@@ -105,9 +105,9 @@ class TestMermaidEmitter:
             {
                 "id": "parent",
                 "name": "Parent",
-                "execute": {"url": "/usr/bin/echo"},
+                "run": ["/usr/bin/echo"],
                 "fan_out": {
-                    "template": {"execute": {"url": "/usr/bin/echo"}},
+                    "template": {"run": ["/usr/bin/echo"]},
                 },
             },
         ])
@@ -121,9 +121,9 @@ class TestMermaidEmitter:
             {
                 "id": "parent",
                 "name": "Parent",
-                "execute": {"url": "/usr/bin/echo"},
+                "run": ["/usr/bin/echo"],
                 "fan_out": {
-                    "template": {"execute": {"url": "prompts/worker.md"}},
+                    "template": {"llm": "worker.md"},
                 },
             },
         ])
@@ -141,16 +141,16 @@ class TestMermaidEmitter:
             {
                 "id": "parent",
                 "name": "Parent",
-                "execute": {"url": "/usr/bin/echo"},
+                "run": ["/usr/bin/echo"],
                 "fan_out": {
-                    "template": {"execute": {"url": "prompts/worker.md"}},
+                    "template": {"llm": "worker.md"},
                 },
             },
             {
                 "id": "synthesize",
                 "name": "Synthesize",
                 "depends_on": ["parent"],
-                "execute": {"url": "prompts/synth.md"},
+                "llm": "synth.md",
             },
         ])
         out = render_mermaid(config)
@@ -165,14 +165,14 @@ class TestMermaidEmitter:
             {
                 "id": "parent",
                 "name": "Parent",
-                "execute": {"url": "/usr/bin/echo"},
+                "run": ["/usr/bin/echo"],
                 "fan_out": {
-                    "template": {"execute": {"url": "prompts/worker.md"}},
+                    "template": {"llm": "worker.md"},
                     "final_nodes": [
                         {"id": "merge", "name": "Merge",
-                         "execute": {"url": "prompts/merge.md"}},
+                         "llm": "merge.md"},
                         {"id": "polish", "name": "Polish",
-                         "execute": {"url": "prompts/polish.md"}},
+                         "llm": "polish.md"},
                     ],
                 },
             },
@@ -180,7 +180,7 @@ class TestMermaidEmitter:
                 "id": "publish",
                 "name": "Publish",
                 "depends_on": ["parent"],
-                "execute": {"url": "prompts/pub.md"},
+                "llm": "pub.md",
             },
         ])
         out = render_mermaid(config)
@@ -197,9 +197,9 @@ class TestMermaidEmitter:
             {
                 "id": "parent",
                 "name": "Parent",
-                "execute": {"url": "/usr/bin/echo"},
+                "run": ["/usr/bin/echo"],
                 "fan_out": {
-                    "template": {"execute": {"url": "prompts/worker.md"}},
+                    "template": {"llm": "worker.md"},
                 },
             },
         ])
@@ -212,7 +212,7 @@ class TestMermaidEmitter:
             {
                 "id": "sub_node",
                 "name": "Sub",
-                "execute": {"url": "examples/foo/workflow.yaml"},
+                "workflow": "examples/foo/workflow.yaml",
             },
         ])
         out = render_mermaid(config)
@@ -223,7 +223,7 @@ class TestMermaidEmitter:
             {
                 "id": "gated",
                 "name": "Gated",
-                "execute": {"url": "/usr/bin/echo"},
+                "run": ["/usr/bin/echo"],
                 "evaluation": {
                     "validator": "/usr/bin/true",
                     "threshold": 1.0,
@@ -289,8 +289,8 @@ class TestMermaidEmitter:
                 "id": "dispatcher",
                 "name": "Dispatcher",
                 "depends_on": ["planner"],
-                "execute": {"url": "/usr/bin/echo"},
-                "fan_out": {"template": {"execute": {"url": "/usr/bin/echo"}}},
+                "run": ["/usr/bin/echo"],
+                "fan_out": {"template": {"run": ["/usr/bin/echo"]}},
             },
             _node("reconcile", depends_on=["dispatcher"]),
             {
@@ -330,7 +330,7 @@ class TestExtractNodeConfig:
         node = config.nodes[0]
         cfg = extract_node_config(node)
         assert cfg["id"] == "a"
-        assert cfg["execute"]["url"] == "/usr/bin/echo"
+        assert cfg["run"] == {"cmd": ["/usr/bin/echo"]}
         # Defaults shouldn't pollute the panel.
         assert "evaluation" not in cfg
         assert "fan_out" not in cfg
@@ -340,7 +340,7 @@ class TestExtractNodeConfig:
             {
                 "id": "g",
                 "name": "G",
-                "execute": {"url": "/usr/bin/echo"},
+                "run": ["/usr/bin/echo"],
                 "evaluation": {
                     "validator": "/usr/bin/true",
                     "threshold": 0.7,
@@ -464,7 +464,7 @@ class TestRenderView:
         assert '"has_log": true' in html
 
     def test_payload_contains_node_configs_and_statuses(self):
-        config = make_config([_node("a"), _node("b")])
+        config = make_config([_node("a"), {"id": "b", "llm": {"text": "Describe </script>."}}])
         events = [{"event": "node_completed", "node": "a"}]
         html = render_view(config, events=events)
         # Extract the embedded JSON
@@ -473,7 +473,7 @@ class TestRenderView:
         end = html.index("</script>", start)
         payload = json.loads(html[start:end])
         assert "a" in payload["node_configs"]
-        assert "b" in payload["node_configs"]
+        assert payload["node_configs"]["b"]["llm"] == {"text": "Describe </script>."}
         assert payload["statuses"]["a"]["status"] == "passed"
         assert payload["statuses"]["b"]["status"] == "untouched"
 
@@ -487,9 +487,9 @@ class TestViewCommand:
     def test_view_writes_html_authoring_mode(self, tmp_path):
         yaml_path = tmp_path / "wf.yaml"
         yaml_path.write_text(
-            "name: Test\nversion: '1.0'\nnodes:\n"
+            "name: Test\nnodes:\n"
             "  - id: a\n    name: A\n"
-            "    execute:\n      url: /usr/bin/echo\n      params:\n        args: ['hi']\n"
+            "    run: [/usr/bin/echo, hi]\n"
         )
 
         runner = CliRunner()
@@ -508,9 +508,9 @@ class TestViewCommand:
     def test_view_with_log_marks_debug_mode(self, tmp_path):
         yaml_path = tmp_path / "wf.yaml"
         yaml_path.write_text(
-            "name: Test\nversion: '1.0'\nnodes:\n"
+            "name: Test\nnodes:\n"
             "  - id: a\n    name: A\n"
-            "    execute:\n      url: /usr/bin/echo\n"
+            "    run: [/usr/bin/echo]\n"
         )
         log_path = tmp_path / "out.jsonl"
         log_path.write_text(
@@ -534,9 +534,9 @@ class TestViewCommand:
     def test_view_explicit_out_path(self, tmp_path):
         yaml_path = tmp_path / "wf.yaml"
         yaml_path.write_text(
-            "name: Test\nversion: '1.0'\nnodes:\n"
+            "name: Test\nnodes:\n"
             "  - id: a\n    name: A\n"
-            "    execute:\n      url: /usr/bin/echo\n"
+            "    run: [/usr/bin/echo]\n"
         )
         out = tmp_path / "custom.html"
 

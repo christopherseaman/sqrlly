@@ -8,12 +8,12 @@ import asyncio
 
 import pytest
 
-from sqrlly.runtime.executor.backends.factory import create_backend_from_preset
+from sqrlly.runtime.executor.backends.factory import create_backend
 from sqrlly.runtime.gates import run_evaluation_llm
-from sqrlly.schema.models import Evaluation, LlmPreset
+from sqrlly.schema.models import Evaluation
 
 CLI_TIMEOUT = 180
-MODEL = "gpt-5.6-luna"
+MODEL = None
 
 
 @pytest.mark.cli
@@ -38,7 +38,7 @@ class TestEvaluateGateLLMPositivePath:
         )
 
         evaluation = Evaluation(validator="llm_gate.md", threshold=0.8)
-        backend = create_backend_from_preset(LlmPreset(model=MODEL))
+        backend = create_backend()
         try:
             async with asyncio.timeout(CLI_TIMEOUT):
                 result = await run_evaluation_llm(

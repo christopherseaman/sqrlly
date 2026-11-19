@@ -44,18 +44,18 @@ def _build(workdir: Path) -> Graph:
         "import sys; sys.stdin.read(); print('0.0')\n",
     )
     return Graph(
-        name="failure-kinds", version="0.1.0",
+        name="failure-kinds",
         nodes=[
             {"id": "bad", "name": "bad",
-             "execute": {"url": _PYTHON, "params": {"args": [fail]}}},
+             "run": [_PYTHON, fail]},
             {"id": "blocked", "name": "blocked", "depends_on": ["bad"],
-             "execute": {"url": _PYTHON, "params": {"args": [ok]}}},
+             "run": [_PYTHON, ok]},
             {"id": "gate_fail", "name": "gate_fail",
-             "execute": {"url": _PYTHON, "params": {"args": [ok]}},
+             "run": [_PYTHON, ok],
              "evaluation": {"validator": validator, "threshold": 0.9,
                             "blocking": True, "max_retries": 0}},
             {"id": "slow", "name": "slow", "timeout": 1.0,
-             "execute": {"url": _PYTHON, "params": {"args": [slow]}}},
+             "run": [_PYTHON, slow]},
         ],
     )
 
@@ -100,9 +100,9 @@ async def test_infra_abort_settles_as_node_failed_not_traceback(tmp_path):
     init_git_repo(tmp_path, files={"f": "x"})
     ok = _script(tmp_path, "ok.py", "print('ok')\n")
     config = Graph(
-        name="infra-kind", version="0.1.0",
+        name="infra-kind",
         nodes=[{"id": "build", "name": "build",
-                "execute": {"url": _PYTHON, "params": {"args": [ok]}}}],
+                "run": [_PYTHON, ok]}],
         settings={"worktree": "isolated", "worktree_setup": ["sh -c 'exit 7'"]},
     )
     buf = StringIO()
@@ -141,21 +141,19 @@ async def test_subgraph_fanout_child_infra_abort_settles(tmp_path):
     init_git_repo(tmp_path, files={"f": "x"})
     ok = _script(tmp_path, "ok.py", "print('ok')\n")
     (tmp_path / "member.yaml").write_text(yaml.safe_dump({
-        "name": "member", "version": "1.0",
+        "name": "member",
         "nodes": [{"id": "step", "name": "step",
-                   "execute": {"url": _PYTHON, "params": {"args": [ok]}}}],
+                   "run": [_PYTHON, ok]}],
     }))
     manifest = json.dumps({"items": [{"id": "alpha"}, {"id": "beta"}]})
     config = Graph(
-        name="sg-fanout-infra", version="0.1.0",
+        name="sg-fanout-infra",
         nodes=[{
             "id": "cfan", "name": "cfan",
-            "execute": {"url": "/bin/sh",
-                        "params": {"args": ["-c", f"printf '%s' '{manifest}'"]}},
+            "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"],
             "fan_out": {
                 "template": {
-                    "execute": {"url": "member.yaml",
-                                "params": {"inputs": {"x": "{{id}}"}}},
+                    "workflow": {"file": "member.yaml", "with": {"x": "{{id}}"}},
                     "worktree": "isolated",
                 },
             },

@@ -1,69 +1,39 @@
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Callable
-
+"""Translate workflow tool policies to provider CLI arguments."""
 from sqrlly.runtime.executor.backends.cli import CLIBackend
-from sqrlly.runtime.result import PromptBackend
-
-if TYPE_CHECKING:
-    from sqrlly.schema.models import LlmPreset
 
 
-def _build_claude_cli(preset: "LlmPreset") -> PromptBackend:
+def create_backend(
+    provider: str = "openai", *, tools: str | list[str] | None = None,
+    cli_args: list[str] | None = None, safe_mode: bool = False,
+) -> CLIBackend:
+    if provider == "anthropic":
+        if isinstance(tools, list):
+            args = ["--tools", ",".join(tools), "--allowedTools", ",".join(tools)]
+        elif tools is None:
+            args = ["--tools", "", "--strict-mcp-config"]
+        else:
+            modes = {"read": "plan", "edit": "acceptEdits", "full": "bypassPermissions"}
+            args = ["--permission-mode", modes[tools]]
+        if safe_mode:
+            args.append("--safe-mode")
+        return CLIBackend(("claude", "-p"), cli_args=[*args, *(cli_args or [])])
+
+    modes = {None: "read-only", "read": "read-only", "edit": "workspace-write",
+             "full": "danger-full-access"}
+    args = ["--sandbox", modes[tools]]
+    if tools is None:
+        for feature in (
+            "shell_tool", "view_image", "apps", "plugins", "multi_agent_v2",
+            "goals", "computer_use", "image_generation", "code_mode", "hooks",
+        ):
+            args.extend(["--disable", feature])
+        for setting in (
+            "agents.enabled=false", 'web_search="disabled"',
+            "tools.experimental_request_user_input.enabled=false",
+            "tools.update_plan.enabled=false",
+        ):
+            args.extend(["-c", setting])
     return CLIBackend(
-        argv_prefix=("claude", "-p"),
-        permission_mode=preset.permission_mode,
-        allowed_tools=preset.allowed_tools,
-        disallowed_tools=preset.disallowed_tools,
-        cli_args=preset.cli_args,
-        env=preset.env,
+        ("codex", "exec", "--skip-git-repo-check"),
+        cli_args=[*args, *(cli_args or [])], prompt_arg="-", disable_codex_mcp=tools is None,
     )
-
-
-def _build_codex_cli(preset: "LlmPreset") -> PromptBackend:
-    return CLIBackend(
-        argv_prefix=("codex", "exec", "--skip-git-repo-check"),
-        prompt_arg="-",
-        cli_args=preset.cli_args,
-        env=preset.env,
-    )
-
-
-# (transport, provider) → builder. Adding a transport means
-# a new row + builder; the schema literal in ``LlmPreset.transport`` must
-# also list it so YAML validation accepts the value.
-_BACKEND_BUILDERS: dict[tuple[str, str], Callable[["LlmPreset"], PromptBackend]] = {
-    ("cli", "anthropic"): _build_claude_cli,
-    ("cli", "openai"): _build_codex_cli,
-}
-
-
-def create_backend_from_preset(
-    preset: "LlmPreset", *, safe_mode: bool = False,
-) -> PromptBackend:
-    """Instantiate a PromptBackend matching the preset's transport+provider.
-
-    The preset's ``model`` is consulted per-call via ``send_prompt(model=...)``;
-    backends are stateless w.r.t. model selection. Two presets differing only
-    in model share an instance shape, but each preset gets its own backend
-    instance at the registry level for lifecycle clarity (separate ``close()``
-    paths, separate semaphore accounting if added later).
-
-    ``safe_mode`` appends ``--safe-mode`` to a cli backend's argv, so the
-    invocation ignores the operator's Claude customizations (output styles,
-    CLAUDE.md, skills, MCP, hooks) — keeping workflow generation reproducible
-    and free of e.g. an "explanatory" output style leaking commentary into
-    node output. It is a ``claude`` CLI flag, so it only applies to
-    ``transport: cli, provider: anthropic`` presets.
-    """
-    if (
-        safe_mode
-        and preset.transport == "cli"
-        and preset.provider == "anthropic"
-    ):
-        existing = preset.cli_args or []
-        if "--safe-mode" not in existing:
-            preset = preset.model_copy(
-                update={"cli_args": [*existing, "--safe-mode"]},
-            )
-    return _BACKEND_BUILDERS[(preset.transport, preset.provider)](preset)

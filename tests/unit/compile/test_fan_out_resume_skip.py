@@ -7,7 +7,7 @@ import pytest
 
 from sqrlly.compile.dynamic import _make_fan_out_node
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import Execute, FanOut, FanOutTemplate, Node, Graph, Settings
+from sqrlly.schema.models import FanOut, FanOutTemplate, Node, Graph, Settings
 from mock_executor import MockExecutor
 
 
@@ -16,13 +16,13 @@ def _fan_parent():
         id="fan", name="Fan",
         fan_out=FanOut(
             manifest_path="m.json",
-            template=FanOutTemplate(execute=Execute(url="t.md")),
+            template=FanOutTemplate(agent={"text": "test"}),
         ),
     )
 
 
 def _make(parent, executor):
-    cfg = Graph(name="T", version="1.0", nodes=[parent], settings=Settings())
+    cfg = Graph(name="T", nodes=[parent], settings=Settings())
     return _make_fan_out_node(
         parent, cfg, executor,
         compile_fn=lambda *a, **k: None, base_dir=".", depth=0,

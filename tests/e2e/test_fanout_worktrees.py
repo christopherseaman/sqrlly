@@ -39,21 +39,14 @@ def _build_fan_out_config(workdir: Path) -> Graph:
     manifest = json.dumps({"items": [{"id": "0"}, {"id": "1"}]})
     return Graph(
         name="fanout-worktree-test",
-        version="0.1.0",
         nodes=[
             {
                 "id": "parent",
                 "name": "parent",
-                "execute": {
-                    "url": _ECHO,
-                    "params": {"args": ["-n", manifest]},
-                },
+                "run": [_ECHO, "-n", manifest],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": _ECHO,
-                            "params": {"args": ["-n", "child-{{id}}"]},
-                        },
+                        "run": [_ECHO, "-n", "child-{{id}}"],
                     },
                 },
             },

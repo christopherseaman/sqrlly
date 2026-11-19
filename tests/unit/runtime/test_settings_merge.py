@@ -101,18 +101,6 @@ class TestComposesNested:
 
 
 class TestMultiFieldCarriage:
-    def test_url_security_fields_compose_correctly(self):
-        parent = Settings(
-            allow_remote_urls=True,
-            allowed_url_hosts=["*.parent.com"],
-            url_headers={"https://parent.com/": {"X": "p"}},
-        )
-        child = Settings(allowed_url_hosts=["*.child.com"])
-        merged = merge_settings(parent, child)
-        assert merged.allow_remote_urls is True   # inherited
-        assert merged.allowed_url_hosts == ["*.child.com"]  # child wins
-        assert merged.url_headers == {"https://parent.com/": {"X": "p"}}  # inherited
-
     def test_max_parallel_jobs_inherited_when_child_unset(self):
         parent = Settings(max_parallel_jobs=8)
         child = Settings()
@@ -134,53 +122,19 @@ class TestRoundTripConstraint:
         s2 = Settings(**s.model_dump(exclude_unset=True))
         assert "max_retries" in s2.model_fields_set
 
-    def test_fields_set_lost_after_full_dump_round_trip(self):
-        """Documents the gotcha — full dump round-trip loses authorship.
-        merge_settings must NOT be passed a Settings created this way."""
-        s = Settings(max_retries=7)
-        s_dumped = Settings(**s.model_dump())
-        # All fields show up as "set" because we passed them all explicitly.
-        # That's precisely the wrong shape for merge_settings — every
-        # field would win over parent. Hence the function's docstring
-        # warning.
-        assert len(s_dumped.model_fields_set) > 1
-
-
-class TestPresetsInheritance:
-    """Presets are a dict-shaped field; ``model_fields_set`` handles them
-    the same as scalar fields — child either inherits or wholly replaces.
-
-    Today's behavior is whole-dict replace. Key-wise additive merge
-    (subgraph adds a preset while inheriting parent's others) is a
-    deferred refinement — subgraph authors copy parent presets when
-    they want to extend rather than replace.
-    """
-
-    def _preset(self, model="x", default=False):
-        from sqrlly.schema.models import LlmPreset
-        return LlmPreset(
-            transport="cli", provider="anthropic", model=model, default=default,
-        )
-
-    def test_subgraph_no_presets_inherits_parent(self):
-        parent = Settings(presets={
-            "cheap": self._preset(model="haiku"),
-            "smart": self._preset(model="opus", default=True),
-        })
-        child = Settings()
+    def test_nested_defaults_preserve_sibling_options(self):
+        parent = Settings(defaults={"agent": {"model": "sonnet", "backend_max_retries": 4}})
+        child = Settings(defaults={"agent": {"model": "opus"}})
         merged = merge_settings(parent, child)
-        assert sorted(merged.presets) == ["cheap", "smart"]
-        assert merged.presets["smart"].default is True
+        assert merged.defaults.agent.model == "opus"
+        assert merged.defaults.agent.backend_max_retries == 4
 
-    def test_subgraph_declares_presets_replaces_parent(self):
-        parent = Settings(presets={
-            "cheap": self._preset(model="haiku"),
-            "smart": self._preset(model="opus", default=True),
-        })
-        child = Settings(presets={
-            "interactive": self._preset(model="sonnet", default=True),
-        })
-        merged = merge_settings(parent, child)
-        # Whole-replace: parent's presets are gone, child's is alone.
-        assert sorted(merged.presets) == ["interactive"]
-        assert merged.presets["interactive"].default is True
+
+class TestModelInheritance:
+    def test_parent_model_supplies_child_default(self):
+        parent = Settings(model="sonnet")
+        assert merge_settings(parent, Settings()).model == "sonnet"
+
+    def test_child_model_overrides_parent(self):
+        parent = Settings(model="sonnet")
+        assert merge_settings(parent, Settings(model="opus")).model == "opus"

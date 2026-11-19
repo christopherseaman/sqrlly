@@ -216,7 +216,7 @@ class TestGateNodePassFail:
                 {
                     "id": "a",
                     "name": "A",
-                    "execute": {"url": _CAT, "params": {"args": [str(payload)]}},
+                    "run": [_CAT, str(payload)],
                     "evaluation": {
                         "validator": str(validator),
                         "threshold": 1.0,
@@ -226,7 +226,7 @@ class TestGateNodePassFail:
                 {
                     "id": "b",
                     "name": "B",
-                    "execute": {"url": _ECHO, "params": {"args": ["b done"]}},
+                    "run": [_ECHO, "b done"],
                     "depends_on": ["a"],
                 },
             ]
@@ -250,7 +250,7 @@ class TestGateNodePassFail:
                 {
                     "id": "a",
                     "name": "A",
-                    "execute": {"url": _ECHO, "params": {"args": ["not json"]}},
+                    "run": [_ECHO, "not json"],
                     "evaluation": {
                         "validator": str(validator),
                         "threshold": 1.0,
@@ -261,7 +261,7 @@ class TestGateNodePassFail:
                 {
                     "id": "b",
                     "name": "B",
-                    "execute": {"url": _ECHO, "params": {"args": ["b done"]}},
+                    "run": [_ECHO, "b done"],
                     "depends_on": ["a"],
                 },
             ]
@@ -285,7 +285,7 @@ class TestGateNodePassFail:
                 {
                     "id": "a",
                     "name": "A",
-                    "execute": {"url": _ECHO, "params": {"args": ["bad"]}},
+                    "run": [_ECHO, "bad"],
                     "evaluation": {
                         "validator": str(validator),
                         "threshold": 1.0,
@@ -296,7 +296,7 @@ class TestGateNodePassFail:
                 {
                     "id": "b",
                     "name": "B",
-                    "execute": {"url": _ECHO, "params": {"args": ["b done"]}},
+                    "run": [_ECHO, "b done"],
                     "depends_on": ["a"],
                 },
             ]
@@ -405,10 +405,7 @@ class TestGateEnvironment:
                 {
                     "id": "a",
                     "name": "A",
-                    "execute": {
-                        "url": _PYTHON,
-                        "params": {"args": [str(counter_script)]},
-                    },
+                    "run": [_PYTHON, str(counter_script)],
                     "evaluation": {
                         "validator": str(validator),
                         "threshold": 1.0,
@@ -467,10 +464,7 @@ class TestRetryBackoff:
                 {
                     "id": "a",
                     "name": "A",
-                    "execute": {
-                        "url": _PYTHON,
-                        "params": {"args": [str(counter_script)]},
-                    },
+                    "run": [_PYTHON, str(counter_script)],
                     "evaluation": {
                         "validator": str(validator),
                         "threshold": 1.0,
@@ -807,7 +801,7 @@ class TestRetryWithFeedback:
             {
                 "id": "p",
                 "name": "P",
-                "execute": {"url": _ECHO, "params": {"args": ["out"]}},
+                "run": [_ECHO, "out"],
                 "evaluation": {
                     "validator": str(validator),
                     "threshold": 0.5,
@@ -859,7 +853,7 @@ class TestRetryWithFeedback:
             {
                 "id": "p",
                 "name": "P",
-                "execute": {"url": _PYTHON, "params": {"args": [str(runner)]}},
+                "run": [_PYTHON, str(runner)],
                 "evaluation": {
                     "validator": str(validator),
                     "threshold": 0.8,
@@ -1241,7 +1235,7 @@ class TestGateScopingByDeps:
         node = Node(
             id="writer", name="Writer",
             depends_on=["research"],
-            execute={"url": "/usr/bin/echo"},
+            run=["echo"],
             evaluation={"validator": "/usr/bin/true", "threshold": 1.0},
         )
         state = {
@@ -1284,7 +1278,7 @@ class TestGateScopingByDeps:
         node = Node(
             id="writer", name="Writer",
             depends_on=["research"],
-            execute={"url": "/usr/bin/echo"},
+            run=["echo"],
             evaluation={"validator": "/usr/bin/true", "threshold": 1.0},
         )
         state = {"node_outputs": {}}

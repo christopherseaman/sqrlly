@@ -664,7 +664,7 @@ from sqrlly.schema.models import Settings, Graph
 
 def _config_with_phase(node: Node, **settings_kwargs) -> Graph:
     return Graph(
-        name="T", version="1.0", nodes=[node],
+        name="T", nodes=[node],
         settings=Settings(**settings_kwargs),
     )
 

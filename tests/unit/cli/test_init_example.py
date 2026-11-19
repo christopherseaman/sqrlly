@@ -21,41 +21,6 @@ def test_catalog_has_curated_examples():
             assert src.startswith("examples/")           # repo-relative source
 
 
-def test_rewrite_strips_example_prefix_keeps_absolute():
-    text = (
-        'nodes:\n'
-        '  - id: g\n'
-        '    execute:\n'
-        '      url: "examples/jokes/generate.md"\n'
-        '    evaluation:\n'
-        '      validator: "examples/jokes/gates/validate_jokes.py"\n'
-        '  - id: e\n'
-        '    execute:\n'
-        '      url: /usr/bin/echo\n'
-    )
-    out = initmod._rewrite_example_urls(text, "jokes")
-    assert 'url: "generate.md"' in out
-    assert 'validator: "gates/validate_jokes.py"' in out
-    assert "examples/jokes/" not in out
-    assert "url: /usr/bin/echo" in out                   # absolute untouched
-
-
-def test_rewrite_only_touches_named_example():
-    text = '      url: "examples/other/x.md"\n'
-    assert initmod._rewrite_example_urls(text, "jokes") == text  # different name
-
-
-def test_rewrite_strips_prefix_in_comments():
-    text = (
-        "# Demo:\n"
-        "#   sqrlly run examples/jokes/workflow.yaml --preset cli\n"
-        "nodes: []\n"
-    )
-    out = initmod._rewrite_example_urls(text, "jokes")
-    assert "sqrlly run workflow.yaml --preset cli" in out
-    assert "examples/jokes/" not in out
-
-
 def test_load_example_file_reads_repo_source():
     # In a source checkout the wheel resource is absent; the repo fallback
     # returns the real file content.
@@ -68,15 +33,14 @@ def test_load_example_file_unknown_raises():
         initmod._load_example_file("examples/nope/nope.yaml")
 
 
-def test_init_example_scaffolds_files_and_rewrites(tmp_path):
+def test_init_example_scaffolds_source_files(tmp_path):
     initmod.init_example("jokes", str(tmp_path))
     assert (tmp_path / "workflow.yaml").is_file()
     assert (tmp_path / "generate.md").is_file()
     assert (tmp_path / "select.md").is_file()
     assert (tmp_path / "gates" / "validate_jokes.py").is_file()
     wf = (tmp_path / "workflow.yaml").read_text()
-    assert "examples/jokes/" not in wf          # rewrite applied
-    assert 'url: "generate.md"' in wf
+    assert wf == initmod._load_example_file("examples/jokes/workflow.yaml")
 
 
 def test_init_example_single_file_lands_as_workflow_yaml(tmp_path):

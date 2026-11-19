@@ -2,27 +2,16 @@
 import asyncio
 from pathlib import Path
 
-import yaml
+from sqrlly.cli.main import load_config
 
 from sqrlly.compile.graph import build_workflow_graph
-from sqrlly.runtime.executor.backends.factory import create_backend_from_preset
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import Graph
 
 
 async def main():
-    config = Graph(**yaml.safe_load(Path("examples/jokes/workflow.yaml").read_text()))
-    # Build one backend per declared preset, keyed by name.
-    prompt_backends = {
-        name: create_backend_from_preset(preset)
-        for name, preset in config.settings.presets.items()
-    }
-    executor = DispatchExecutor(
-        workdir=".",
-        prompt_backends=prompt_backends,
-        settings=config.settings,
-    )
+    config = load_config(str(Path(__file__).with_name("workflow.yaml")))
+    executor = DispatchExecutor(workdir=".", settings=config.settings)
     compiled = build_workflow_graph(config, executor)
     state = make_initial_state(workflow_name=config.name, workdir=".")
     result = await compiled.ainvoke(state)

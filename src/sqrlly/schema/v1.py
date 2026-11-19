@@ -98,6 +98,22 @@ class Workflow(File):
         return {"file": value} if isinstance(value, str) else value
 
 
+def repository_root(directory: Path) -> Path | None:
+    # Linked worktrees have a .git file at their own root.
+    return next((p for p in (directory, *directory.parents) if (p / ".git").exists()), None)
+
+
+def require_reference(root: Path | None, path: Path, key: str, hint: str = "") -> None:
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError) as err:
+        raise ValueError(f"{key}: cannot resolve {path}: {err}") from err
+    if root is not None and not resolved.is_relative_to(root):
+        raise ValueError(f"{key}: {path} resolves outside repository {root}")
+    if not resolved.is_file():
+        raise ValueError(f"{key}: file not found: {path}{hint}")
+
+
 class SchemaOutput(Record):
     schema_file: Name | None = Field(None, alias="schema")
 
@@ -270,21 +286,7 @@ class Graph(Record):
 
     def _check_files(self, directory: Path) -> None:
         directory = directory.resolve()
-        # Linked worktrees have a .git file at their own root.
-        root = next(
-            (parent for parent in (directory, *directory.parents) if (parent / ".git").exists()),
-            None,
-        )
-
-        def require(path: Path, key: str, hint: str = "") -> None:
-            try:
-                resolved = path.resolve()
-            except (OSError, RuntimeError) as err:
-                raise ValueError(f"{key}: cannot resolve {path}: {err}") from err
-            if root is not None and not resolved.is_relative_to(root):
-                raise ValueError(f"{key}: {path} resolves outside repository {root}")
-            if not resolved.is_file():
-                raise ValueError(f"{key}: file not found: {path}{hint}")
+        root = repository_root(directory)
 
         for node in self.nodes:
             for step in (node, node.eval):
@@ -292,15 +294,15 @@ class Graph(Record):
                     continue
                 prompt = step.agent or step.llm
                 if prompt and prompt.prompt:
-                    require(directory / self.settings.prompts / prompt.prompt,
+                    require_reference(root, directory / self.settings.prompts / prompt.prompt,
                             f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
                 if step.outputs and step.outputs.schema_file:
-                    require(directory / step.outputs.schema_file, f"{node.id}.outputs.schema")
+                    require_reference(root, directory / step.outputs.schema_file, f"{node.id}.outputs.schema")
             if node.workflow:
-                require(directory / node.workflow.file, f"{node.id}.workflow",
+                require_reference(root, directory / node.workflow.file, f"{node.id}.workflow",
                         ' ({text: "..."} is for inline agent or llm prompts)')
             if isinstance(node.for_each, File):
-                require(directory / node.for_each.file, f"{node.id}.for_each.file")
+                require_reference(root, directory / node.for_each.file, f"{node.id}.for_each.file")
 
 
 class WorkflowLoader(yaml.SafeLoader):

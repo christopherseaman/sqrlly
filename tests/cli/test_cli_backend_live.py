@@ -11,14 +11,14 @@ the collection-time pre-flight in ``tests/conftest.py`` and the
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
 from sqrlly.compile.graph import build_workflow_graph
-from sqrlly.runtime.executor.backends.factory import create_backend_from_preset
+from sqrlly.runtime.executor.backends.factory import create_backend
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import LlmPreset
 
 from helpers import make_config
 
@@ -60,7 +60,7 @@ class TestJokeWorkflowCLIIntegration:
                 {
                     "id": "generate",
                     "name": "Generate Jokes",
-                    "execute": {"url": "generate.md"},
+                    "llm": "generate.md",
                     "evaluation": {
                         "validator": str(validator),
                         "threshold": 1.0,
@@ -71,24 +71,13 @@ class TestJokeWorkflowCLIIntegration:
                 {
                     "id": "select",
                     "name": "Select Best",
-                    "execute": {"url": "select.md"},
+                    "llm": "select.md",
                     "depends_on": ["generate"],
                 },
             ],
-            presets={
-                "default": {
-                    "transport": "cli", "provider": "openai",
-                    "model": "gpt-5.6-luna", "default": True,
-                },
-            },
+            prompts=".",
         )
-
-        backend = create_backend_from_preset(config.settings.presets["default"])
-        executor = DispatchExecutor(
-            workdir=str(tmp_path),
-            prompt_backends={"default": backend},
-            settings=config.settings,
-        )
+        executor = DispatchExecutor(workdir=str(tmp_path), settings=config.settings)
         try:
             graph = build_workflow_graph(config, executor)
             result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
@@ -109,11 +98,9 @@ class TestJokeWorkflowCLIIntegration:
 @pytest.mark.cli
 class TestClaudeProviderLive:
     @pytest.mark.asyncio
-    async def test_anthropic_preset_round_trip(self, tmp_path):
-        """An anthropic preset dispatches through a real ``claude -p`` subprocess."""
-        backend = create_backend_from_preset(
-            LlmPreset(provider="anthropic", model="haiku")
-        )
+    async def test_anthropic_llm_round_trip(self, tmp_path):
+        """An Anthropic llm node dispatches through a real ``claude -p`` subprocess."""
+        backend = create_backend("anthropic")
         try:
             result = await backend.send_prompt(
                 "Reply with exactly the single word: pong", "haiku", str(tmp_path)
@@ -121,3 +108,36 @@ class TestClaudeProviderLive:
             assert result.output.strip().strip(".").lower() == "pong"
         finally:
             await backend.close()
+
+
+@pytest.mark.cli
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_llm_cannot_read_local_file(tmp_path, provider):
+    from secrets import token_hex
+
+    token = token_hex(16)
+    (tmp_path / "probe.txt").write_text(token)
+    backend = create_backend(provider)
+    result = await backend.send_prompt(
+        "Use a file tool to read probe.txt. Reply with only its contents, "
+        "or only UNAVAILABLE if you cannot access the file.",
+        None, str(tmp_path), timeout=90,
+    )
+    assert token not in result.output
+    assert result.output.strip().upper().rstrip(".") == "UNAVAILABLE"
+
+
+@pytest.mark.cli
+@pytest.mark.asyncio
+async def test_codex_llm_disables_configured_mcp(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text('[mcp_servers."test.server"]\ncommand = "false"\n')
+    backend = create_backend()
+    args = await backend._disabled_mcp_args(str(tmp_path))
+    configured = subprocess.check_output(
+        ["codex", "mcp", "list", "--json", *args], cwd=tmp_path, text=True,
+    )
+    assert [(server["name"], server["enabled"]) for server in json.loads(configured)] == [
+        ("test.server", False)
+    ]

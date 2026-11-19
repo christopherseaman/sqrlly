@@ -58,14 +58,14 @@ def _has_inline_route(node: Node) -> bool:
 def _is_route(node: Node) -> bool:
     """Standalone route — node whose only forward dispatch is a route
     block, no execute body."""
-    return _has_inline_route(node) and node.execute is None
+    return _has_inline_route(node) and node.kind is None
 
 
 def _has_synthetic_route(node: Node) -> bool:
     """Node that pairs `execute:` with inline `route:` — needs a
     synthetic `_route_<id>` dispatcher node post-execute (and post-
     eval if present)."""
-    return _has_inline_route(node) and node.execute is not None
+    return _has_inline_route(node) and node.kind is not None
 
 
 def _collect_route_targets(node: Node) -> set[str]:
@@ -421,7 +421,7 @@ def build_workflow_graph(
             f"Subgraph nesting exceeded MAX_SUBGRAPH_DEPTH={MAX_SUBGRAPH_DEPTH}"
         )
 
-    base_dir = Path(_base_dir) if _base_dir is not None else Path(".")
+    base_dir = config.workflow_dir or Path(_base_dir or ".")
 
     builder = StateGraph(WorkflowState)
     terminal_ids = set(find_terminal_nodes(config))
@@ -458,7 +458,7 @@ def build_workflow_graph(
             # Cycle detection happens once at top-level — nested calls
             # see _depth>0 so they skip this and rely on the depth cap.
             if _depth == 0:
-                detect_config_cycle(node_subgraph_path(node), base_dir=base_dir)
+                detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings)
         if _is_route(node):
             route_node_ids.add(node.id)
         if _has_inline_route(node):
@@ -475,26 +475,24 @@ def build_workflow_graph(
     # ``effective_settings`` (Phase 3) is the pre-merged scope view from
     # the subgraph wrapper; threaded into the recursive call so subgraph
     # nodes receive their own scope's settings.
-    def compile_fn(c, executor=None, _depth=0, effective_settings=None):
+    def compile_fn(c, executor=None, _depth=0, effective_settings=None, logger=None):
         return build_workflow_graph(
             c, executor=executor, _depth=_depth,
             _base_dir=base_dir, logger=logger,
             effective_settings=effective_settings,
         )
 
+    def build_subgraph(node):
+        child = load_graph(node.workflow.file, base_dir, settings)
+        return make_subgraph_node(
+            node, child, compile_fn, executor, _depth, logger,
+            timeout=node.effective_timeout(settings),
+        )
+
     # Execution nodes for every configured node.
     for node in config.nodes:
         if node.id in subgraph_node_ids:
-            sub_config = load_graph(node_subgraph_path(node), base_dir=base_dir)
-            wrapper = make_subgraph_node(
-                node, sub_config,
-                compile_fn=compile_fn,
-                executor=executor,
-                depth=_depth,
-                logger=logger,
-                parent_settings=settings,  # subgraph wrapper merges with sub's settings
-            )
-            builder.add_node(node.id, wrapper)
+            builder.add_node(node.id, build_subgraph(node))
         elif node.id in route_node_ids:
             # Standalone inline `Node.route` with no execute. Dispatched
             # via Command from the node fn itself.
@@ -548,6 +546,7 @@ def build_workflow_graph(
             builder.add_node(
                 fid, _make_final_fan_out_node(
                     node, final_node, config, executor, is_first=(idx == 0),
+                    build_subgraph=build_subgraph,
                     effective_settings=settings,
                 ),
             )

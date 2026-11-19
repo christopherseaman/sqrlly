@@ -175,7 +175,7 @@ class TestFlowCStructuredOutputRouting:
         config = make_config([
             {
                 "id": "produce", "name": "produce", "depends_on": [],
-                "execute": {"url": _ECHO, "params": {"args": ["produced"]}},
+                "run": [_ECHO, "produced"],
             },
             _route_node(
                 "decide",
@@ -211,7 +211,7 @@ class TestFlowCStructuredOutputRouting:
         config = make_config([
             {
                 "id": "produce", "name": "produce", "depends_on": [],
-                "execute": {"url": _ECHO, "params": {"args": ["produced"]}},
+                "run": [_ECHO, "produced"],
             },
             _route_node(
                 "decide",

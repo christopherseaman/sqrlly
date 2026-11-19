@@ -1,63 +1,32 @@
-name: "Run All Examples (parallel)"
-version: "0.1.0"
-
-# Top-level harness that runs every shipped example as a subgraph in
-# parallel. Demonstrates two Stage 4-5b primitives at once:
-#
-#   - Subgraph composition via `execute.url: <path>.yaml` — each child
-#     reference compiles the target workflow as a subgraph and projects
-#     its terminal output up as `node_outputs[child_id]`.
-#   - Non-fan-out parallelization — child nodes have no `depends_on:`
-#     between them, so LangGraph's super-step semantics fire them all
-#     in the same step. `settings.max_parallel_jobs` (default 4) caps
-#     concurrency via foreman's asyncio.Semaphore.
-#
-# Each subgraph carries its own `settings.presets`; the CLI collects
-# them so subgraph nodes resolve their presets to real backends.
-# `--preset <name>` overrides.
-#
-# Usage:
-#   uv run sqrlly run examples/run_all_examples.yaml
-#   uv run sqrlly run examples/run_all_examples.yaml --dry-run   # topology only
-
+name: Run All Examples (parallel)
 nodes:
   - id: smoke
-    name: "Smoke test"
-    execute:
-      url: "examples/smoke_test.yaml"
+    name: Smoke test
+    workflow: smoke_test.yaml
 
   - id: jokes
-    name: "Joke generator"
-    execute:
-      url: "examples/jokes/workflow.yaml"
+    name: Joke generator
+    workflow: jokes/workflow.yaml
 
   - id: route_classify
-    name: "Route classifier"
-    execute:
-      url: "examples/route_classify/workflow.yaml"
+    name: Route classifier
+    workflow: route_classify/workflow.yaml
 
   - id: pipeline_style
-    name: "Pipeline-style authoring"
-    execute:
-      url: "examples/pipeline_style/workflow.yaml"
+    name: Pipeline-style authoring
+    workflow: pipeline_style/workflow.yaml
 
   - id: explicit_join
-    name: "Explicit join"
-    execute:
-      url: "examples/explicit_join.yaml"
+    name: Explicit join
+    workflow: explicit_join.yaml
 
   - id: absurd_paper
-    name: "Absurd academic paper"
-    execute:
-      url: "examples/absurd-paper/workflow.yaml"
+    name: Absurd academic paper
+    workflow: absurd-paper/workflow.yaml
 
-  - id: command_preset
-    name: "Command preset demo"
-    execute:
-      url: "examples/command_preset/workflow.yaml"
-
+  - id: run_command
+    name: Run a Python script with uv
+    workflow: run_command/workflow.yaml
 settings:
-  # Concurrency cap of 6 lets all six subgraphs start in the same
-  # super-step. Drop this if rate limits matter.
   max_parallel_jobs: 6
   default_timeout: 600.0

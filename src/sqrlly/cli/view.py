@@ -45,20 +45,12 @@ def _flatten_goto(target: str | list[str] | None) -> list[str]:
 
 
 def _node_shape(node: Node) -> tuple[str, str]:
-    """Return (open, close) Mermaid shape delimiters for a node.
-
-    - Plain execute → rectangle ``[...]``
-    - Fan-out parent → hexagon ``{{...}}``
-    - Subgraph reference (``execute.url`` ends in .yaml/.yml) →
-      subroutine ``[[...]]``
-    - Route-only (no execute) → diamond ``{...}``
-    """
+    """Return Mermaid delimiters for the authored node."""
     if node.fan_out is not None:
         return "{{", "}}"
-    if node.execute is None:
+    if node.route and node.kind is None:
         return "{", "}"
-    url = node.execute.url or ""
-    if url.endswith(".yaml") or url.endswith(".yml"):
+    if node.workflow:
         return "[[", "]]"
     return "[", "]"
 
@@ -195,8 +187,13 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
         standin = _fresh(f"{node.id}__items")
         fan_standin[node.id] = standin
         template = node.fan_out.template
-        turl = (template.execute.url or "") if template else ""
-        tname = turl.rsplit("/", 1)[-1] if turl else "template"
+        tname = template.kind if template and template.kind else "template"
+        if template and template.kind in ("llm", "agent"):
+            prompt = getattr(template, template.kind).prompt
+            if prompt:
+                tname = Path(prompt).name
+        elif template and template.workflow:
+            tname = Path(template.workflow.file).name
         safe_t = tname.replace('"', "'")
         fan_decls.append(
             f'        {standin}[/"×N per item: {safe_t}"/]:::fanout'
@@ -305,21 +302,8 @@ def extract_node_config(node: Node) -> dict[str, Any]:
         cfg["depends_on"] = list(node.depends_on)
     if node.timeout is not None:
         cfg["timeout"] = node.timeout
-    if node.execute:
-        ex: dict[str, Any] = {}
-        if node.execute.url:
-            ex["url"] = node.execute.url
-        if node.execute.type:
-            ex["type"] = node.execute.type
-        if node.execute.mode:
-            ex["mode"] = node.execute.mode
-        if node.execute.params:
-            ex["params"] = (
-                node.execute.params.model_dump(exclude_none=True)
-                if hasattr(node.execute.params, "model_dump")
-                else node.execute.params
-            )
-        cfg["execute"] = ex
+    if node.kind:
+        cfg[node.kind] = getattr(node, node.kind).model_dump(by_alias=True, exclude_unset=True)
     if node.evaluation:
         ev: dict[str, Any] = {}
         if node.evaluation.validator:
@@ -340,7 +324,7 @@ def extract_node_config(node: Node) -> dict[str, Any]:
         if node.fan_out.manifest_path:
             fo["manifest_path"] = node.fan_out.manifest_path
         if node.fan_out.template:
-            fo["template"] = "(per-child execute block)"
+            fo["template"] = node.fan_out.template.model_dump(by_alias=True, exclude_unset=True)
         if node.fan_out.final_nodes:
             fo["final_nodes"] = [n.id for n in node.fan_out.final_nodes]
         cfg["fan_out"] = fo
@@ -488,7 +472,6 @@ def render_view(
     payload = {
         "workflow": {
             "name": graph.name,
-            "version": graph.version,
         },
         "node_configs": node_configs,
         "statuses": {nid: s.to_json() for nid, s in statuses.items()},
@@ -501,9 +484,8 @@ def render_view(
     )
     return template.render(
         mermaid=mermaid,
-        payload_json=json.dumps(payload, indent=2),
-        workflow_name=graph.name,
-        workflow_version=graph.version,
+        payload=payload,
+        workflow_name=graph.name or "Workflow",
         has_log=events is not None,
     )
 

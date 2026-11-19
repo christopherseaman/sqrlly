@@ -25,15 +25,10 @@ uv add sqrlly                   # or: pip install sqrlly
 
 LLM dispatch uses a local authenticated agent CLI. Codex is the default:
 
-- `transport: cli`, `provider: openai` — `codex exec` subprocess-per-call
+- `provider: openai` — `codex exec` subprocess-per-call
   (no warm process, real `asyncio` parallelism). Requires `codex` on PATH.
-- `transport: cli`, `provider: anthropic` — the opt-in `claude -p`
+- `provider: anthropic` — the opt-in `claude -p`
   subprocess backend. Requires `claude` on PATH.
-
-The direct-API backends (Anthropic / OpenAI / DeepSeek / custom
-OpenAI-compatible endpoints) were removed in 0.2.x while the project
-consolidates around local agent CLIs; restoring `transport: api` remains
-on the roadmap.
 
 **Auth is per-CLI, not sqrlly's job.** Each CLI you point sqrlly at
 handles its own credentials independently. Authenticate Codex or Claude
@@ -55,21 +50,19 @@ sqrlly init my-workflow
 cd my-workflow && sqrlly run workflow.yaml
 ```
 
-`sqrlly init` scaffolds `workflow.yaml` (one prompt node, CLI preset) and `prompts/hello.md` you can edit in place.
+`sqrlly init` writes a workflow with one `run` node that prints a greeting.
 
-For something more substantive, the shipped example is two nodes — generate jokes, gate them, pick the best (`examples/jokes/`):
+The jokes example generates candidates, scores them and selects a winner.
 
 ```yaml
 name: "Joke Generator"
-version: "0.1.0"
-
+settings: {prompts: .}
 nodes:
   - id: generate
     name: "Generate Jokes"
-    execute:
-      url: "examples/jokes/generate.md"
+    llm: generate.md
     evaluation:
-      validator: "examples/jokes/gates/validate_jokes.py"
+      validator: "gates/validate_jokes.py"
       threshold: 1.0
       blocking: true
       max_retries: 2
@@ -77,16 +70,7 @@ nodes:
   - id: select
     name: "Select Best Joke"
     depends_on: ["generate"]
-    execute:
-      url: "examples/jokes/select.md"
-
-settings:
-  presets:
-    default:
-      transport: cli
-      provider: openai
-      model: gpt-5.6-luna
-      default: true
+    llm: select.md
 ```
 
 ```bash
@@ -99,56 +83,31 @@ sqrlly run examples/jokes/workflow.yaml --log run.jsonl
 
 ## How it works
 
-- **URL-based dispatch** — `execute.url`'s extension picks the handler: `.md` / `.txt` / `.prompt` → LLM prompt, `.py` / `.js` / `.ts` / `.sh` → script, `.yaml` → subgraph, anything else → binary.
+- A node's kind selects its operation. Use `agent` for tools, `llm` for text, `run` for argv and `workflow` for a child graph.
 - **Jinja2 templates** — prompt files are full Jinja2; `{{generate}}` interpolates an upstream node's output; `{% if %}` / `{% for %}` / filters all work.
 - **Retry feedback loop** — when a gate scores below `threshold`, the next attempt's context gets `{{_retry_reason}}` auto-populated with the previous score, per-dimension thresholds, and feedback.
 - **Worktree isolation** — inside a git repo, each node runs in its own `git worktree` under `<workdir>/.sqrlly/`, reused across retries so prompt nodes can iterate on prior files.
 - **Checkpointed state** — runs persist to `<workdir>/.sqrlly-checkpoint.db` (LangGraph `AsyncSqliteSaver`); `--resume` re-runs seeded with that state, clearing failed nodes to retry. Completed nodes skip by default (fault-recovery re-run, not full replay) unless `--rerun-all` is set. For fan-out branches: failed children re-run, but completed siblings stay frozen (no re-billing).
 - **Recursive subgraphs** — a `.yaml` URL runs another sqrlly workflow; the same file works standalone or as a subgraph reference.
+- Child workflow paths resolve beside the declaring YAML. Prompt filenames resolve under its `prompts/` directory.
 
-## Backends and presets
+## Models and defaults
 
-LLM and script execution is configured by **presets** under `settings.presets` — named bundles referenced by a node's `params.preset`. Exactly one LLM preset is marked `default: true`:
+Codex runs `llm` in a read-only sandbox with its shell and configured MCP servers disabled.
+Claude disables tools for `llm`.
+The provider defaults to Codex. Set `provider: anthropic` to use Claude.
+Without a model selection each local CLI uses its own default.
+Use `settings.model` to pin a shared model or `settings.defaults.<kind>` to configure a kind.
+A node's explicit options take precedence.
 
 ```yaml
 settings:
-  presets:
-    default:
-      transport: cli
-      provider: openai     # Codex CLI
-      model: gpt-5.6-luna
-      default: true
+  defaults:
+    agent: {tools: read}
+nodes:
+  - {id: review, agent: review.md}
+  - {id: print_review, depends_on: [review], run: [echo, "{{review}}"]}
 ```
-
-When no global Codex `model_reasoning_effort` override is configured, the
-installed Codex model catalog currently gives `gpt-5.6-luna` its `medium`
-default effort. sqrlly does not set that effort in workflow YAML. Claude
-remains available as an explicit `provider: anthropic` preset.
-
-`cli` is the only transport. The provider picks the CLI:
-
-| Provider | Invocation |
-|---|---|
-| `openai` | `codex exec ... -` |
-| `anthropic` | `claude -p` |
-
-Each call is its own subprocess, so fan-out gets real `asyncio` parallelism.
-
-`transport` defaults to `cli` and `provider` defaults to `openai`, so a
-preset needs only `model` for the default Codex CLI. Use
-`provider: anthropic` for Claude. Multiple presets can coexist in one workflow; only
-one is `default: true`, and nodes select alternatives with `params.preset`.
-
-**Declare presets explicitly.** sqrlly doesn't probe your environment
-or synthesize defaults. Empty `settings.presets` is valid for
-script-only workflows; any LLM-dispatching node will fail at its call
-site with a clear "no prompt backend wired" error. If a backend's
-toolchain is missing at run time (`codex` or `claude`),
-the backend surfaces a clear error at the first prompt call — never
-as a pre-flight check (a pre-flight would forbid workflows that
-install the toolchain in an earlier script node).
-
-Full reference (including `CommandPreset` for custom script interpreters): [SCHEMA.md](https://github.com/christopherseaman/sqrlly/blob/main/SCHEMA.md).
 
 ## CLI
 
@@ -165,7 +124,6 @@ Full reference (including `CommandPreset` for custom script interpreters): [SCHE
 
 - `--workdir / -w <dir>` — working directory (default `.`).
 - `--dry-run` — trace topology without executing.
-- `--preset / -p <name>` — force a named preset as the default.
 - `--resume` — re-run seeded with the prior run's state, clearing failures to retry. Completed nodes skip by default; use `--rerun-all` to re-execute every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
 - `--log <path>` — write a JSONL event log.
@@ -190,7 +148,7 @@ Render any example's interactive view with `sqrlly view <workflow.yaml>`; `examp
 
 ## Documentation
 
-- **[SCHEMA.md](https://github.com/christopherseaman/sqrlly/blob/main/SCHEMA.md)** — every Settings / Node / Execute / preset / route / evaluation field, the URL dispatch table, and the route-predicate namespace.
+- [SCHEMA.md](SCHEMA.md) documents the four kinds, settings, route predicates and quality gates.
 - **[SKILLS.md](https://github.com/christopherseaman/sqrlly/blob/main/SKILLS.md)** — agent skill doc: instructions for an AI coding agent authoring and running sqrlly workflows.
 
 ## Contributing

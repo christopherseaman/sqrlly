@@ -16,10 +16,7 @@ def test_list_examples_flag_lists_all():
         assert name in res.output
 
 
-def test_absurd_paper_scaffolds_multifile_and_rewrites_subgraph(tmp_path):
-    """The multi-file showcase scaffolds every runnable file and rewrites
-    the ``examples/absurd-paper/`` prefix in ALL yaml (workflow + subgraphs),
-    not just workflow.yaml — and the result is a valid workflow."""
+def test_absurd_paper_scaffolds_child_workflow(tmp_path):
     from pathlib import Path
 
     from sqrlly.cli.main import load_config
@@ -39,9 +36,7 @@ def test_absurd_paper_scaffolds_multifile_and_rewrites_subgraph(tmp_path):
             "preamble.md",
         ):
             assert (root / rel).is_file(), rel
-        # The prefix is stripped from the subgraph too (not only workflow.yaml).
         sub = (root / "subgraphs/compose_and_validate.yaml").read_text()
-        assert "examples/absurd-paper/" not in sub
         assert "scripts/persist_paper.py" in sub
         # And the scaffolded copy is a valid, self-contained workflow.
         config = load_config(str(root / "workflow.yaml"))

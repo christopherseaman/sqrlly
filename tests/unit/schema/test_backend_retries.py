@@ -1,32 +1,29 @@
-"""Settings.backend_max_retries — opt-in transient-backend retry count,
-distinct from the gate/evaluation max_retries."""
 import pytest
 from pydantic import ValidationError
 
 from sqrlly.schema.models import Settings
 
 
-def test_backend_max_retries_defaults_to_zero():
-    """Default 0 = today's behavior (one attempt, terminal)."""
-    assert Settings().backend_max_retries == 0
+def test_backend_retry_budgets_are_per_kind():
+    defaults = Settings().defaults
+    assert defaults.agent.backend_max_retries == 2
+    assert defaults.llm.backend_max_retries == 2
+    assert defaults.run.backend_max_retries == 0
 
 
-def test_backend_max_retries_is_independent_of_max_retries():
-    """The two budgets are separate fields — setting one leaves the other."""
-    s = Settings(backend_max_retries=3)
-    assert s.backend_max_retries == 3
-    assert s.max_retries == 3  # gate default, untouched
-
-    s2 = Settings(max_retries=7)
-    assert s2.max_retries == 7
-    assert s2.backend_max_retries == 0  # backend default, untouched
+def test_backend_retries_are_independent_of_gate_retries():
+    settings = Settings(max_retries=3, defaults={"llm": {"backend_max_retries": 5}})
+    assert settings.defaults.llm.backend_max_retries == 5
+    assert settings.defaults.agent.backend_max_retries == 2
+    assert settings.max_retries == 3
 
 
-def test_backend_max_retries_accepts_positive_int():
-    assert Settings(backend_max_retries=5).backend_max_retries == 5
+@pytest.mark.parametrize("key", ["backend_max_retries", "backend_max_retry"])
+def test_top_level_backend_retry_budget_rejected(key):
+    with pytest.raises(ValidationError, match=key):
+        Settings.model_validate({key: 5})
 
 
-def test_unknown_field_still_rejected_under_extra_forbid():
-    """extra='forbid' invariant: a typo'd field is a hard error."""
-    with pytest.raises(ValidationError):
-        Settings(backend_max_retry=2)  # singular typo
+def test_negative_backend_retry_budget_rejected():
+    with pytest.raises(ValidationError, match="backend_max_retries"):
+        Settings(defaults={"agent": {"backend_max_retries": -1}})

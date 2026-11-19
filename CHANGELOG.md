@@ -7,8 +7,10 @@ All notable changes to sqrlly are documented here. Format follows
 
 ### Changed
 
-- `sqrlly validate` checks `execute.params` against the selected mode when
-  loading a workflow. Prompt nodes now reject the unused `params.agent` key.
+- Workflow nodes select `agent`, `llm`, `run` or `workflow` explicitly.
+  Prompt filenames resolve under the YAML file's prompts directory.
+  Commands take argv, and joins need only dependencies.
+  Model selection moves to node options, `settings.model` and per-kind defaults.
 
 ## [0.10.0] - 2026-11-14
 

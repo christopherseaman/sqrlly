@@ -15,6 +15,7 @@ shared by all CLI providers.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 from typing import Any
@@ -75,6 +76,7 @@ class CLIBackend:
         disallowed_tools: list[str] | None = None,
         cli_args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        disable_codex_mcp: bool = False,
     ):
         self._argv_prefix = argv_prefix
         self._prompt_arg = prompt_arg
@@ -83,6 +85,8 @@ class CLIBackend:
         self._disallowed_tools = disallowed_tools
         self._cli_args = cli_args
         self._env = env
+        self._disable_codex_mcp = disable_codex_mcp
+        self._mcp_args: dict[str, list[str]] = {}
 
     def _tool_argv(self) -> list[str]:
         """Provider-specific flags appended to every invocation."""
@@ -98,14 +102,35 @@ class CLIBackend:
         return argv
 
     async def send_prompt(
-        self, prompt: str, model: str, workdir: str,
+        self, prompt: str, model: str | None, workdir: str,
         timeout: float | None = None,
     ) -> ExecutionResult:
-        argv = [*self._argv_prefix, "--model", model, *self._tool_argv()]
-        if self._prompt_arg is not None:
-            argv.append(self._prompt_arg)
-        # Overlay the preset env on the inherited environment; empty → None
-        # (inherit unchanged), preserving prior behavior exactly.
+        argv = list(self._argv_prefix)
+        if model is not None:
+            argv.extend(["--model", model])
+        argv.extend(self._tool_argv())
+        async with asyncio.timeout(timeout):
+            if self._disable_codex_mcp:
+                if workdir not in self._mcp_args:
+                    self._mcp_args[workdir] = await self._disabled_mcp_args(workdir)
+                argv.extend(self._mcp_args[workdir])
+            if self._prompt_arg is not None:
+                argv.append(self._prompt_arg)
+            return ExecutionResult(output=await self._invoke(argv, prompt, workdir))
+
+    async def _disabled_mcp_args(self, workdir: str) -> list[str]:
+        servers = await self._invoke(
+            ["codex", "mcp", "list", "--json", "--disable", "apps", "--disable", "plugins"],
+            "", workdir, sensitive_output=True,
+        )
+        disabled = ", ".join(
+            f'{json.dumps(server["name"], ensure_ascii=False)}={{enabled=false}}'
+            for server in json.loads(servers)
+        )
+        return ["-c", "mcp_servers={" + disabled + "}"]
+
+    async def _invoke(self, argv: list[str], prompt: str, workdir: str, *,
+                      sensitive_output: bool = False) -> str:
         proc_env = {**os.environ, **self._env} if self._env else None
         # start_new_session=True puts the child in its OWN process group
         # (the child becomes the group leader), so a runaway `claude` that
@@ -133,18 +158,7 @@ class CLIBackend:
                 f"for transport: cli."
             ) from e
         try:
-            # timeout=None is stdlib-documented unbounded wait (>=3.11).
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode()), timeout,
-            )
-        except asyncio.TimeoutError:
-            # Caller asked for a bounded wait; kill the runaway child AND its
-            # descendants (the whole process group) so we don't leak a tree
-            # per timeout. The parent is still alive here (it is the group
-            # leader), so a single killpg reaches the entire group before any
-            # reparenting. _kill_process_group reaps the parent.
-            await _kill_process_group(proc)
-            raise
+            stdout_b, stderr_b = await proc.communicate(input=prompt.encode())
         except asyncio.CancelledError:
             # The task was cancelled (e.g. the orchestrator is shutting down
             # an in-flight node). Kill the process group so the provider CLI subtree
@@ -153,6 +167,8 @@ class CLIBackend:
             raise
 
         if proc.returncode != 0:
+            if sensitive_output:
+                raise RuntimeError(f"Codex MCP configuration lookup exited {proc.returncode}")
             stderr_text = stderr_b.decode().strip()
             stdout_text = stdout_b.decode().strip()
             # Provider CLIs may write their result and diagnostics (overload /
@@ -171,7 +187,7 @@ class CLIBackend:
             raise RuntimeError(
                 f"{self._argv_prefix[0]} exited {proc.returncode}: {detail}"
             )
-        return ExecutionResult(output=stdout_b.decode().strip())
+        return stdout_b.decode().strip()
 
     async def close(self) -> None:
         # Subprocess-per-call backend has no warm state. ``close`` is

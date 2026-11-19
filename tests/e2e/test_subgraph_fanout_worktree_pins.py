@@ -50,27 +50,20 @@ def _write_sub_yaml(tmp_path: Path, *, gen_worktree: str | None = None) -> str:
     gen_node: dict[str, Any] = {
         "id": "gen",
         "name": "Generate",
-        "execute": {
-            "url": "/bin/sh",
-            "params": {"args": ["-c", "echo generated-{{item_id}} > gen.txt"]},
-        },
+        "run": ["/bin/sh", "-c", "echo generated-{{item_id}} > gen.txt"],
     }
     if gen_worktree is not None:
         gen_node["worktree"] = gen_worktree
 
     sub = {
         "name": "write-sub",
-        "version": "1.0",
         "nodes": [
             gen_node,
             {
                 "id": "polish",
                 "name": "Polish",
                 "depends_on": ["gen"],
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c", "echo polished-{{item_id}} > polish.txt"]},
-                },
+                "run": ["/bin/sh", "-c", "echo polished-{{item_id}} > polish.txt"],
             },
         ],
     }
@@ -85,21 +78,14 @@ def _build_parent_config(tmp_path: Path, sub_yaml: str) -> Graph:
     manifest = json.dumps({"items": items})
     return Graph(
         name="subgraph-fanout-worktree-pin-test",
-        version="1.0",
         nodes=[
             {
                 "id": _PARENT_ID,
                 "name": "Writer Pool",
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c", f"printf '%s' '{manifest}'"]},
-                },
+                "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": sub_yaml,
-                            "params": {"inputs": {"item_id": "{{id}}"}},
-                        },
+                        "workflow": {"file": sub_yaml, "with": {"item_id": "{{id}}"}},
                     },
                 },
             },
@@ -262,7 +248,7 @@ class TestNodeWorktreesPopulated:
             id="fan_in",
             name="Fan In",
             depends_on=[_PARENT_ID],
-            execute={"url": "/bin/echo", "params": {"args": []}},
+            run=["/bin/echo"],
         )
         context = build_context(fan_in_node, final_state)
 
@@ -550,21 +536,14 @@ class TestOffGateWithForeman:
         manifest = json.dumps({"items": items})
         config = Graph(
             name="subgraph-fanout-off-gate-test",
-            version="1.0",
             nodes=[
                 {
                     "id": _PARENT_ID,
                     "name": "Writer Pool",
-                    "execute": {
-                        "url": "/bin/sh",
-                        "params": {"args": ["-c", f"printf '%s' '{manifest}'"]},
-                    },
+                    "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"],
                     "fan_out": {
                         "template": {
-                            "execute": {
-                                "url": sub_yaml,
-                                "params": {"inputs": {"item_id": "{{id}}"}},
-                            },
+                            "workflow": {"file": sub_yaml, "with": {"item_id": "{{id}}"}},
                         },
                     },
                 },
@@ -624,20 +603,14 @@ def _write_leaf_sub_yaml(tmp_path: Path) -> str:
     """Leaf subgraph: single node writes leaf.txt — used as inner template."""
     leaf = {
         "name": "leaf-sub",
-        "version": "1.0",
         "nodes": [
             {
                 "id": "leaf_writer",
                 "name": "Leaf Writer",
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {
-                        "args": [
-                            "-c",
-                            "echo leaf-{{outer_id}}-{{inner_id}} > leaf.txt",
-                        ]
-                    },
-                },
+                "run": [
+                    "/bin/sh", "-c",
+                    "echo leaf-{{outer_id}}-{{inner_id}} > leaf.txt",
+                ],
             },
         ],
     }
@@ -653,25 +626,16 @@ def _write_middle_sub_yaml(tmp_path: Path, leaf_yaml: str) -> str:
     inner_manifest = json.dumps({"items": inner_items})
     middle = {
         "name": "middle-sub",
-        "version": "1.0",
         "nodes": [
             {
                 "id": _INNER_ID,
                 "name": "Inner Pool",
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c", f"printf '%s' '{inner_manifest}'"]},
-                },
+                "run": ["/bin/sh", "-c", f"printf '%s' '{inner_manifest}'"],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": leaf_yaml,
-                            "params": {
-                                "inputs": {
-                                    "outer_id": "{{outer_id}}",
-                                    "inner_id": "{{id}}",
-                                }
-                            },
+                        "workflow": {
+                            "file": leaf_yaml,
+                            "with": {"outer_id": "{{outer_id}}", "inner_id": "{{id}}"},
                         },
                     },
                 },
@@ -689,21 +653,14 @@ def _build_nested_fanout_config(tmp_path: Path, middle_yaml: str) -> Graph:
     outer_manifest = json.dumps({"items": outer_items})
     return Graph(
         name="nested-fanout-shared-outer-tree-test",
-        version="1.0",
         nodes=[
             {
                 "id": _OUTER_ID,
                 "name": "Outer Pool",
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c", f"printf '%s' '{outer_manifest}'"]},
-                },
+                "run": ["/bin/sh", "-c", f"printf '%s' '{outer_manifest}'"],
                 "fan_out": {
                     "template": {
-                        "execute": {
-                            "url": middle_yaml,
-                            "params": {"inputs": {"outer_id": "{{id}}"}},
-                        },
+                        "workflow": {"file": middle_yaml, "with": {"outer_id": "{{id}}"}},
                     },
                 },
             },

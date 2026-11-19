@@ -60,7 +60,7 @@ def _make_fan_out_node(
     ``_fan_out_item`` state and break graph-level retry self-loops.
     Inline retry preserves per-item state trivially.
 
-    When ``template.execute.url`` ends in ``.yaml`` / ``.yml`` the
+    When the template declares a workflow, the
     template is a subgraph reference. The Stage-5b carve-out: each
     Send branch invokes the compiled subgraph with the per-item context
     rendered into ``inputs:``, and the subgraph's terminal output flows
@@ -74,18 +74,13 @@ def _make_fan_out_node(
     max_retries = parent_node.effective_max_retries(settings)
     retry_backoff = settings.retry_backoff
 
-    # Per-Send-branch subgraph invoker — set when the template references
-    # a `.yaml`/`.yml` URL, else the fan-out body uses the executor path.
-    from sqrlly.compile.subgraph import (
-        execute_subgraph_path,
-        make_fan_out_subgraph_invoker,
-    )
+    from sqrlly.compile.subgraph import make_fan_out_subgraph_invoker
+
     sub_invoker = None
-    template_subgraph_path = execute_subgraph_path(template.execute)
-    if template_subgraph_path is not None:
+    if template.workflow is not None:
         sub_invoker = make_fan_out_subgraph_invoker(
-            template_subgraph_path,
-            template.execute.params,
+            template.workflow.file,
+            template.workflow.inputs,
             compile_fn=compile_fn,
             base_dir=base_dir,
             depth=depth,
@@ -135,7 +130,7 @@ def _make_fan_out_node(
             id=child_id,
             name=f"{parent_node.name} - {item.get('name', item_id)}",
             evaluation=template.evaluation,
-            execute=template.execute,
+            **({template.kind: getattr(template, template.kind)} if template.kind else {}),
             # Per-fan-out worktree override (FanOutTemplate.worktree). None
             # inherits settings.worktree — identical to a top-level node with
             # no worktree set. Node-mode-wins-over-settings in
@@ -227,7 +222,7 @@ def _make_fan_out_node(
                 return update
 
             backend = (
-                executor.get_backend()
+                executor.get_backend(settings)
                 if hasattr(executor, "get_backend") else None
             )
             # Call run_evaluation_and_outcome with a state reflecting the
@@ -285,6 +280,7 @@ def _make_final_fan_out_node(
     executor: NodeExecutor | None = None,
     *,
     is_first: bool = False,
+    build_subgraph=None,
     effective_settings: Settings | None = None,
 ):
     """Create a node function for a final node in a dynamic child group.
@@ -312,11 +308,11 @@ def _make_final_fan_out_node(
         description=final_node.description,
         evaluation=final_node.evaluation,
         depends_on=[parent_node.id],
-        execute=final_node.execute,
+        **({final_node.kind: getattr(final_node, final_node.kind)} if final_node.kind else {}),
         output_contract=final_node.output_contract,
     )
 
-    inner = _make_execution_node(
+    inner = build_subgraph(synthetic) if synthetic.workflow else _make_execution_node(
         synthetic, config, executor,
         effective_settings=effective_settings,
     )

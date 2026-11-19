@@ -6,11 +6,11 @@ from sqrlly.schema.models import Graph
 
 
 def _g(nodes):
-    return Graph(name="T", version="1.0", nodes=nodes)
+    return Graph(name="T", nodes=nodes)
 
 
 def _exec(id_, **kw):
-    return {"id": id_, "name": id_, "execute": {"url": "t.md"}, **kw}
+    return {"id": id_, "name": id_, "agent": {"text": "test"}, **kw}
 
 
 def test_linear_failure_dirties_downstream():
@@ -45,7 +45,7 @@ def test_route_target_of_failure_is_dirty():
     # a routes to b via goto; a failed => its route target b is dirty even with
     # no depends_on edge (route targets have no static depends_on).
     g = _g([
-        {"id": "a", "name": "a", "execute": {"url": "t.md"},
+        {"id": "a", "name": "a", "agent": {"text": "test"},
          "route": {"goto": "b"}},
         _exec("b"),
     ])
@@ -69,7 +69,7 @@ def test_empty_inputs():
 def test_settings_level_worktree_group_force_dirty():
     # Graph-level settings.worktree_group shares one tree even without
     # per-node groups; a dirty => b force-dirty (the false-skip guard).
-    g = Graph(name="T", version="1.0",
+    g = Graph(name="T",
               nodes=[_exec("a"), _exec("b")],
               settings={"worktree_group": "shared"})
     assert compute_skip_set(g, {"a", "b"}, {"a"}, set()) == set()
@@ -88,8 +88,8 @@ def test_group_sibling_dependent_is_transitively_dirty():
 def test_cyclic_route_terminates():
     # a <-> b goto loop; b failed. Closure must terminate via the visited-guard.
     g = _g([
-        {"id": "a", "name": "a", "execute": {"url": "t.md"}, "route": {"goto": "b"}},
-        {"id": "b", "name": "b", "execute": {"url": "t.md"}, "route": {"goto": "a"}},
+        {"id": "a", "name": "a", "agent": {"text": "test"}, "route": {"goto": "b"}},
+        {"id": "b", "name": "b", "agent": {"text": "test"}, "route": {"goto": "a"}},
     ])
     assert compute_skip_set(g, {"a", "b"}, {"b"}, set()) == set()
 
@@ -99,9 +99,9 @@ def _fan_graph():
         _exec("up"),
         {"id": "fan", "name": "fan", "depends_on": ["up"],
          "fan_out": {"manifest_path": "m.json",
-                     "template": {"execute": {"url": "t.md"}},
+                     "template": {"agent": {"text": "test"}},
                      "final_nodes": [{"id": "agg", "name": "agg",
-                                      "execute": {"url": "a.md"}}]}},
+                                      "agent": {"text": "test"}}]}},
     ])
 
 

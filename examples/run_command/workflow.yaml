@@ -1,0 +1,5 @@
+name: Run a Python script with uv
+nodes:
+  - id: report
+    name: Generate report under uv
+    run: [uv, run, --no-project, '{{workflow_dir}}/scripts/report.py']

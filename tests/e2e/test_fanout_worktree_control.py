@@ -40,10 +40,7 @@ def _script_node(item_template: str) -> dict:
     """
     return {
         "id": "appender", "name": "appender",
-        "execute": {
-            "url": "/bin/sh",
-            "params": {"args": ["-c", f"echo {item_template} >> shared.txt"]},
-        },
+        "run": ["/bin/sh", "-c", f"echo {item_template} >> shared.txt"],
     }
 
 
@@ -56,50 +53,38 @@ def _build_config(
     node appends to shared.txt; else the template is the /bin/sh appender
     directly. `template_worktree` is the per-fan-out override (None inherits).
     """
-    template_execute: dict
+    template: dict
     if subgraph:
         sub = {
-            "name": "appender-sub", "version": "1.0",
+            "name": "appender-sub",
             "nodes": [_script_node("{{item_id}}")],
         }
         (tmp_path / "appender_sub.yaml").write_text(yaml.safe_dump(sub))
-        template_execute = {
-            "url": "appender_sub.yaml",
-            "params": {"inputs": {"item_id": "{{id}}"}},
+        template = {
+            "workflow": {"file": "appender_sub.yaml", "with": {"item_id": "{{id}}"}},
         }
     else:
-        template_execute = {
-            "url": "/bin/sh",
-            "params": {"args": ["-c", "echo {{id}} >> shared.txt"]},
+        template = {
+            "run": ["/bin/sh", "-c", "echo {{id}} >> shared.txt"],
         }
 
-    template: dict = {"execute": template_execute}
     if template_worktree is not None:
         template["worktree"] = template_worktree
 
     return Graph(
-        name="fanout-worktree-control", version="1.0",
+        name="fanout-worktree-control",
         nodes=[
             {
                 "id": _PARENT_ID, "name": "Build",
-                "execute": {
-                    "url": "/bin/sh",
-                    "params": {"args": ["-c",
-                                         f"printf '%s' '{json.dumps({'items': _ITEMS})}'"]},
-                },
+                "run": ["/bin/sh", "-c",
+                                         f"printf '%s' '{json.dumps({'items': _ITEMS})}'"],
                 "fan_out": {"template": template},
             },
             {
                 "id": "join", "name": "Join",
                 "depends_on": [_PARENT_ID],
-                "execute": {
-                    "url": "/bin/sh",
-                    # Print the file if it exists, else nothing. Runs in base
-                    # (join inherits isolated, but we only read what branches
-                    # left in base — see assertions).
-                    "params": {"args": ["-c",
-                                         "cat shared.txt 2>/dev/null || true"]},
-                },
+                "run": ["/bin/sh", "-c",
+                                         "cat shared.txt 2>/dev/null || true"],
             },
         ],
         settings=Settings(worktree="isolated"),

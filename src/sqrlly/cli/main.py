@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,7 @@ from sqrlly.runtime.promote import (
 )
 from sqrlly.runtime.runner import run_workflow
 from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import Graph
+from sqrlly.schema.models import Graph, Settings, load_workflow
 
 CHECKPOINT_DB = ".sqrlly-checkpoint.db"
 
@@ -39,7 +38,7 @@ def _is_git_repo(workdir: str) -> bool:
         return False
 
 
-def _effective_safe_mode(flag: bool | None, settings: "Settings") -> bool:
+def _effective_safe_mode(flag: bool | None, settings: Settings) -> bool:
     """Resolve the run's safe-mode: the ``--safe-mode``/``--no-safe-mode``
     flag (tri-state) overrides ``settings.safe_mode`` when given, else the
     setting applies."""
@@ -47,15 +46,10 @@ def _effective_safe_mode(flag: bool | None, settings: "Settings") -> bool:
 
 
 def load_config(config_file: str) -> Graph:
-    """Load a workflow YAML via the single loader (`compile.subgraph.
-    load_graph`), translating load/parse errors to Click errors here so
-    call sites don't need their own wrappers."""
-    from sqrlly.compile.subgraph import load_graph
-
     if not Path(config_file).exists():
         raise click.BadParameter(f"File not found: {config_file}")
     try:
-        return load_graph(config_file)
+        return load_workflow(config_file)
     except click.ClickException:
         raise
     except Exception as e:
@@ -64,7 +58,7 @@ def load_config(config_file: str) -> Graph:
 
 def _thread_id_for(config: Graph, workdir: str) -> str:
     """Deterministic thread_id for a (workflow, workdir) pair."""
-    key = f"{config.name}:{Path(workdir).resolve()}"
+    key = f"1.0:{config.settings.workflow_dir}:{config.name}:{Path(workdir).resolve()}"
     return hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
@@ -196,7 +190,7 @@ def validate(config_file: str):
         raise click.ClickException(str(e))
     _emit_warnings(config)
     click.echo(
-        f"Valid: {config.name} v{config.version} ({len(config.nodes)} nodes)"
+        f"Valid: {config.name} ({len(config.nodes)} nodes)"
     )
 
 
@@ -279,7 +273,6 @@ async def _run_async(
     config: Graph,
     workdir: str,
     dry_run: bool,
-    preset_override: str | None,
     resume: bool,
     resume_from: tuple[str, ...],
     rerun_all: bool,
@@ -328,13 +321,12 @@ async def _run_async(
         logger.emit({
             "event": "workflow_start",
             "workflow": config.name,
-            "version": config.version,
         })
 
     result: dict = {}
     try:
         result = await _execute_workflow(
-            config, workdir, dry_run, preset_override, resume, resume_from, rerun_all,
+            config, workdir, dry_run, resume, resume_from, rerun_all,
             thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode,
         )
         return result
@@ -354,51 +346,6 @@ async def _run_async(
                 ),
             })
             logger.close()
-
-
-def _collect_subgraph_presets(
-    config: Graph,
-    base_dir: str,
-    _depth: int = 0,
-    _seen: set[str] | None = None,
-) -> dict:
-    """Recursively gather presets declared by every subgraph the
-    workflow references.
-
-    A subgraph node resolves ``params.preset`` against its own
-    ``settings.presets`` (merged at runtime), so those preset names
-    must have backends in the CLI-built registry. This walks the
-    subgraph tree and returns ``{name: Preset}`` for all of them.
-
-    Subgraph YAML that fails to load is skipped silently here — the
-    real load error surfaces during ``build_workflow_graph``.
-    """
-    from sqrlly.compile.subgraph import (
-        MAX_SUBGRAPH_DEPTH,
-        load_graph,
-        node_subgraph_path,
-    )
-
-    if _seen is None:
-        _seen = set()
-    collected: dict = {}
-    if _depth >= MAX_SUBGRAPH_DEPTH:
-        return collected
-    for node in config.nodes:
-        sub_path = node_subgraph_path(node)
-        if sub_path is None or sub_path in _seen:
-            continue
-        _seen.add(sub_path)
-        try:
-            sub = load_graph(sub_path, base_dir)
-        except Exception:
-            continue
-        for name, preset in sub.settings.presets.items():
-            collected[name] = preset
-        collected.update(
-            _collect_subgraph_presets(sub, base_dir, _depth + 1, _seen)
-        )
-    return collected
 
 
 async def _seed_state(
@@ -513,7 +460,7 @@ async def _promote_and_gc(
         return
     specs: list[tuple[str, str, list[str] | None]] = []
     for node in config.nodes:
-        if not node.promote:
+        if not node.effective_promote(config.settings):
             continue
         tree = executor_obj.get_worktree(node.id)
         if tree is None:
@@ -563,7 +510,6 @@ async def _execute_workflow(
     config: Graph,
     workdir: str,
     dry_run: bool,
-    preset_override: str | None,
     resume: bool,
     resume_from: tuple[str, ...],
     rerun_all: bool,
@@ -573,17 +519,6 @@ async def _execute_workflow(
     entry: str | None = None,
     safe_mode: bool | None = None,
 ) -> dict:
-    """Compile the graph, wire executors / checkpointer / state, then run.
-
-    Backend wiring: ``build_preset_registry`` returns a fully-resolved
-    ``dict[str, Preset]`` — the user's ``settings.presets`` with
-    ``preset_override`` applied. Empty ``settings.presets`` raises;
-    sqrlly does not synthesize defaults. Each preset gets a lazy backend
-    builder; the backend is constructed on first dispatch to that preset,
-    so a missing CLI or optional dependency surfaces as a backend error
-    at the first call site (and unused presets never build at all), not
-    as a pre-flight.
-    """
     if dry_run:
         compiled = build_workflow_graph(config, None, logger=logger)
         state = make_initial_state(
@@ -593,63 +528,9 @@ async def _execute_workflow(
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    from sqrlly.runtime.executor.backends.factory import (
-        create_backend_from_preset,
-    )
-    from sqrlly.runtime.executor.preset import build_preset_registry
-    from sqrlly.schema.models import LlmPreset
-
-    registry = build_preset_registry(
-        config.settings, cli_override=preset_override,
-    )
-    # Reflect the (possibly synthesized or flipped) root registry in
-    # the in-flight settings — root-scope runtime resolution reads
-    # ``config.settings.presets``. This stays the ROOT registry only
-    # (one ``default: true``); subgraph presets live in each subgraph's
-    # own merged settings.
-    config.settings.presets = registry
-
-    # The backend registry, however, needs every preset NAME any node
-    # — including subgraph nodes — might resolve. Subgraph nodes
-    # resolve against their own settings.presets, so fold the whole
-    # subgraph tree's presets into the backend set. A name shared
-    # across scopes must describe the same backend (the registry is
-    # flat, name-keyed); ``default``-flag differences are scope-local
-    # and don't count as a conflict.
-    all_presets = dict(registry)
-    for name, preset in _collect_subgraph_presets(config, workdir).items():
-        existing = all_presets.get(name)
-        if existing is not None and (
-            existing.model_dump(exclude={"default"})
-            != preset.model_dump(exclude={"default"})
-        ):
-            raise click.ClickException(
-                f"Preset {name!r} is declared with conflicting definitions "
-                f"across the workflow and its subgraphs. A preset name "
-                f"shared between scopes must describe the same backend."
-            )
-        all_presets.setdefault(name, preset)
-
-    # Only LLM presets become PromptBackends — command presets describe
-    # script interpreters, not LLM transports, and are consulted at
-    # script-dispatch time, not wired as backends. Register builders, not
-    # built backends: a declared-but-unused preset never constructs its
-    # backend.
-    # `--safe-mode`/`--no-safe-mode` overrides `settings.safe_mode`; the
-    # resolved value is threaded into every CLI builder. The factory applies
-    # the Claude-only flag only to Anthropic CLI presets, including presets
-    # inherited by subgraphs.
-    run_safe_mode = _effective_safe_mode(safe_mode, config.settings)
-    prompt_backend_builders = {
-        name: functools.partial(
-            create_backend_from_preset, preset, safe_mode=run_safe_mode,
-        )
-        for name, preset in all_presets.items()
-        if isinstance(preset, LlmPreset)
-    }
     dispatch = DispatchExecutor(
-        workdir=workdir, prompt_backend_builders=prompt_backend_builders,
-        settings=config.settings,
+        workdir=workdir, settings=config.settings,
+        safe_mode=_effective_safe_mode(safe_mode, config.settings),
     )
 
     async with AsyncSqliteSaver.from_conn_string(_db_path(workdir)) as cp:
@@ -703,16 +584,6 @@ async def _execute_workflow(
     "--dry-run", is_flag=True, help="Validate and trace without executing"
 )
 @click.option(
-    "--preset", "-p",
-    help=(
-        "Force a specific named preset as the default for this run. "
-        "Must exist in settings.presets. Without this flag, the YAML's "
-        "default: true preset applies; if settings.presets is empty, "
-        "only script/binary/subgraph nodes can run (LLM nodes have no "
-        "backend)."
-    ),
-)
-@click.option(
     "--resume", is_flag=True, help="Resume from the last checkpoint"
 )
 @click.option(
@@ -750,7 +621,6 @@ def run(
     config_file: str,
     workdir: str,
     dry_run: bool,
-    preset: str | None,
     resume: bool,
     resume_from: tuple[str, ...],
     rerun_all: bool,
@@ -803,7 +673,7 @@ def run(
     from sqrlly.runtime.result import EvaluationError, ManifestError, RouteError
     try:
         result = asyncio.run(
-            _run_async(config, workdir, dry_run, preset, resume, resume_from, rerun_all, log_file, quiet, entry, safe_mode)
+            _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file, quiet, entry, safe_mode)
         )
     except (EvaluationError, ManifestError, RouteError) as e:
         # Infrastructure failures (broken validator / unreadable manifest

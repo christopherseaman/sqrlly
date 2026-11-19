@@ -29,17 +29,14 @@ class TestVersion:
 
 
 class TestInit:
-    def test_creates_workflow_and_prompt(self, runner, tmp_path):
+    def test_creates_runnable_workflow(self, runner, tmp_path):
         target = tmp_path / "my-workflow"
         result = runner.invoke(cli, ["init", str(target)])
         assert result.exit_code == 0
         assert (target / "workflow.yaml").exists()
-        assert (target / "prompts" / "hello.md").exists()
-        wf = (target / "workflow.yaml").read_text()
-        assert "provider: openai" in wf
-        assert "model: gpt-5.6-luna" in wf
-        assert "transport: cli" in wf
-        assert 'name: "My sqrlly workflow"' in wf
+        result = runner.invoke(cli, ["run", str(target / "workflow.yaml"), "--workdir", str(target)])
+        assert result.exit_code == 0, result.output
+        assert "Completed: 1 nodes" in result.output
 
     def test_scaffolded_workflow_validates(self, runner, tmp_path):
         """The scaffold's output must round-trip through `sqrlly validate`.
@@ -79,7 +76,6 @@ class TestInit:
             assert result.exit_code == 0
             from pathlib import Path
             assert Path("workflow.yaml").exists()
-            assert Path("prompts/hello.md").exists()
 
     def test_next_steps_printed(self, runner, tmp_path):
         target = tmp_path / "fresh"

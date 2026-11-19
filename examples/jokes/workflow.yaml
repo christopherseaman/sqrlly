@@ -1,31 +1,17 @@
-name: "Joke Generator"
-version: "0.1.0"
-
-# One `transport: cli` preset (Codex):
-#
-#   sqrlly run examples/jokes/workflow.yaml
-
+name: Joke Generator
 nodes:
   - id: generate
-    name: "Generate Jokes"
+    name: Generate Jokes
     evaluation:
-      validator: "examples/jokes/gates/validate_jokes.py"
+      validator: gates/validate_jokes.py
       threshold: 1.0
       blocking: true
       max_retries: 2
+    llm: generate.md
 
-    execute:
-      url: "examples/jokes/generate.md"
   - id: select
-    name: "Select Best Joke"
-    depends_on: ["generate"]
-    execute:
-      url: "examples/jokes/select.md"
-
+    name: Select Best Joke
+    depends_on: [generate]
+    llm: select.md
 settings:
-  presets:
-    cli:
-      transport: cli
-      provider: openai
-      model: "gpt-5.6-luna"
-      default: true
+  prompts: .

@@ -1,253 +1,80 @@
-"""Unit tests for DispatchExecutor's Stage-5b execute.url path.
-
-Function-level + small e2e tests cover the four dispatch branches:
-    - prompt URL (.md/.txt/.prompt) → prompt pipeline
-    - script URL (.py/.js/.sh) → interpreter subprocess
-    - binary URL (no extension / unknown) → direct subprocess
-    - join sentinel → no-op output
-
-Plus negative cases: subgraph URL at runtime (compile-time error
-escape), per-mode params typo (catches `args:` on a prompt URL), bad
-commands surfacing OSError. Route is dispatched at compile time only
-(via Command(goto=)) and never reaches the runtime dispatcher.
-
-The legacy Stage-4 path (node.execution discriminated union) is
-covered by existing tests and remains green during dual-mode.
-"""
-
-from __future__ import annotations
-
+import json
+import os
 import sys
-from pathlib import Path
 
 import pytest
 
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
-from sqrlly.runtime.state import make_initial_state
-from sqrlly.schema.models import Execute, Node, Settings
+from sqrlly.schema.models import Node, Settings
 
 
-@pytest.fixture
-def echo_path() -> str:
-    """Resolve `/usr/bin/echo` or wherever echo lives in $PATH."""
-    import shutil
-    found = shutil.which("echo")
-    assert found, "echo must be on $PATH for this test"
-    return found
+@pytest.mark.asyncio
+async def test_run_argv_and_env(tmp_path):
+    args = ["{{ value }}", "$(false)", "*.py", ""]
+    code = "import json,os,sys;print(json.dumps([sys.argv[1:],os.environ['VALUE'],os.getcwd()]))"
+    node = Node(id="run", run={"cmd": [sys.executable, "-c", code, *args],
+                                "env": {"VALUE": "{{ value }}"}})
+    result = await DispatchExecutor(str(tmp_path)).execute(node, {"value": "two words"})
+    assert result.success
+    assert json.loads(result.output) == [["two words", "$(false)", "*.py", ""], "two words", str(tmp_path)]
 
 
-class TestExecuteJoinDispatch:
-    @pytest.mark.asyncio
-    async def test_join_returns_empty_output(self, tmp_path):
-        node = Node(id="j", name="J", execute=Execute(type="join"))
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is True
-        assert result.output == ""
+@pytest.mark.asyncio
+async def test_run_failure_and_join(tmp_path):
+    dispatch = DispatchExecutor(str(tmp_path))
+    join = await dispatch.execute(Node(id="join"), {})
+    assert join.success and join.output == ""
+    missing = await dispatch.execute(Node(id="missing", run=["missing-sqrlly-cmd"]), {})
+    assert not missing.success and "missing-sqrlly-cmd" in missing.error
+    fail = await dispatch.execute(Node(id="fail", run=[sys.executable, "-c",
+        "import sys; print('out'); sys.exit('bad')"]), {})
+    assert not fail.success and fail.output == "out\n" and "bad" in fail.error
 
 
-class TestBinaryDispatch:
-    @pytest.mark.asyncio
-    async def test_echo_binary_runs_with_args(self, tmp_path, echo_path):
-        node = Node(
-            id="b", name="B",
-            execute=Execute(url=echo_path, params={"args": ["-n", "hello"]}),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is True
-        assert result.output == "hello"
-
-    @pytest.mark.asyncio
-    async def test_args_are_jinja_rendered(self, tmp_path, echo_path):
-        node = Node(
-            id="b", name="B",
-            execute=Execute(url=echo_path, params={"args": ["-n", "{{upstream}}"]}),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(
-            node, {"upstream": "rendered-value"}, workdir=str(tmp_path),
-        )
-        assert result.success is True
-        assert result.output == "rendered-value"
-
-    @pytest.mark.asyncio
-    async def test_nonexistent_binary_returns_error(self, tmp_path):
-        node = Node(
-            id="b", name="B",
-            execute=Execute(url="/nonexistent/binary/path"),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert "No such file" in result.error or "not found" in result.error.lower()
+@pytest.mark.asyncio
+async def test_prompt_directory_defaults_and_argv(tmp_path, monkeypatch):
+    from sqrlly.schema.models import load_workflow
+    workflow = tmp_path / "flow.yaml"
+    workflow.write_text("settings:\n  model: top\n  defaults: {agent: {model: writer}}"
+                        "\nnodes:\n  - {id: write, agent: body.txt}\n")
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts/body.txt").write_text("Hello {{ person }}")
+    graph = load_workflow(workflow)
+    program = tmp_path / "codex"
+    program.write_text("#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps([sys.argv[1:],sys.stdin.read()]))")
+    program.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    child = tmp_path / "child"
+    child.mkdir()
+    result = await DispatchExecutor(str(child), graph.settings).execute(graph.nodes[0], {"person": "Ada"})
+    assert result.success, result.error
+    args, prompt = json.loads(result.output)
+    assert args == ["exec", "--skip-git-repo-check", "--model", "writer", "--sandbox", "workspace-write", "-"]
+    assert prompt == "Hello Ada"
+    assert (result.model, result.provider) == ("writer", "openai")
 
 
-class TestScriptDispatch:
-    @pytest.mark.asyncio
-    async def test_python_script_runs(self, tmp_path, monkeypatch):
-        """Python interpreter resolves to the test's own sys.executable
-        (guaranteed available); script output is asserted unconditionally."""
-        script = tmp_path / "say.py"
-        script.write_text("print('hello-from-python')\n")
-        node = Node(
-            id="s", name="S",
-            execute=Execute(url=f"file://{script}"),
-        )
-        # Pin the interpreter to the running pytest's sys.executable so
-        # the test doesn't depend on a system-installed python3.
-        from sqrlly.runtime.executor import dispatch
-        monkeypatch.setitem(
-            dispatch._SCRIPT_INTERPRETERS, ".py", [sys.executable]
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is True, result.error
-        assert "hello-from-python" in result.output
-
-    @pytest.mark.asyncio
-    async def test_shell_script_runs(self, tmp_path):
-        script = tmp_path / "say.sh"
-        script.write_text("#!/bin/bash\necho -n shell-out\n")
-        node = Node(
-            id="s", name="S",
-            execute=Execute(url=f"file://{script}"),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is True
-        assert result.output == "shell-out"
-
-    @pytest.mark.asyncio
-    async def test_remote_script_not_yet_wired(self, tmp_path):
-        node = Node(
-            id="s", name="S",
-            execute=Execute(url="https://example.com/x.py"),
-        )
-        # Settings allows remote so fetch_url passes — but dispatch returns
-        # 'not yet wired' since temp-file handoff is a later commit.
-        settings = Settings(allow_remote_urls=True)
-        executor = DispatchExecutor(workdir=str(tmp_path), settings=settings)
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert "Remote script execution not yet wired" in result.error
+@pytest.mark.asyncio
+async def test_explicit_workflow_dir_context_wins(tmp_path):
+    result = await DispatchExecutor(str(tmp_path)).execute(
+        Node(id="using", run=["echo", "{{workflow_dir}}"]), {"workflow_dir": "upstream"}
+    )
+    assert result.output == "upstream\n"
 
 
-class TestPromptDispatch:
-    @pytest.mark.asyncio
-    async def test_prompt_without_backend_raises(self, tmp_path):
-        """Post-stub-removal: a DispatchExecutor with no prompt_backend
-        cannot dispatch prompt URLs. The dispatcher raises a clear
-        RuntimeError rather than emitting fake output."""
-        prompt = tmp_path / "p.md"
-        prompt.write_text("Hello {{name}}")
-        node = Node(
-            id="p", name="P",
-            execute=Execute(url=f"file://{prompt}"),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))  # no backend
-        with pytest.raises(RuntimeError) as ei:
-            await executor.execute(node, {"name": "world"}, workdir=str(tmp_path))
-        assert "no prompt backend" in str(ei.value).lower()
-        assert "p" in str(ei.value)  # node id surfaced for debuggability
-
-
-class TestParamsValidation:
-    @pytest.mark.asyncio
-    async def test_args_on_prompt_url_rejected(self, tmp_path):
-        """Per-mode params validation catches mode-mismatched keys."""
-        prompt = tmp_path / "p.md"
-        prompt.write_text("hi")
-        node = Node(
-            id="p", name="P",
-            execute=Execute(
-                url=f"file://{prompt}",
-                params={"args": ["wrong"]},
-            ),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert "params invalid" in result.error
-
-    @pytest.mark.asyncio
-    async def test_model_on_script_url_rejected(self, tmp_path):
-        script = tmp_path / "s.sh"
-        script.write_text("echo hi")
-        node = Node(
-            id="s", name="S",
-            execute=Execute(
-                url=f"file://{script}",
-                params={"model": "opus"},
-            ),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert "params invalid" in result.error
-
-
-class TestSubgraphURLAtRuntime:
-    @pytest.mark.asyncio
-    async def test_yaml_url_is_compile_time_error_escape(self, tmp_path):
-        """Subgraphs are wired at compile time; reaching dispatch is a bug."""
-        node = Node(
-            id="x", name="X",
-            execute=Execute(url="subgraphs/sub.yaml"),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is False
-        assert "compile time" in result.error
-
-
-class TestExecuteModeOverride:
-    """`execute.mode:` forces a dispatch handler regardless of URL extension."""
-
-    @pytest.mark.asyncio
-    async def test_prompt_mode_routes_unknown_extension_through_prompt(self, tmp_path):
-        """A URL with `.foo` suffix runs through the prompt pipeline when mode=prompt.
-
-        Verification signal: with no backend wired, the prompt branch
-        raises the no-backend RuntimeError. Other branches return
-        ExecutionResult(success=False, ...) instead — so the raise IS
-        the proof that mode=prompt routed this `.foo` URL through the
-        prompt dispatcher rather than the binary/script fallback.
-        """
-        body = tmp_path / "instructions.foo"
-        body.write_text("hello {{name}}")
-        node = Node(
-            id="p", name="P",
-            execute=Execute(url=f"file://{body}", mode="prompt"),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        with pytest.raises(RuntimeError) as ei:
-            await executor.execute(node, {"name": "world"}, workdir=str(tmp_path))
-        assert "no prompt backend" in str(ei.value).lower()
-
-    @pytest.mark.asyncio
-    async def test_exec_mode_overrides_md_extension(self, tmp_path):
-        """`mode: exec` runs an .md path as a binary instead of as a prompt.
-
-        Authors a tiny shell script at `looks-like-prompt.md` to prove the
-        extension is ignored; without `mode: exec`, the `.md` suffix would
-        send the file through PromptBackend.
-        """
-        fake = tmp_path / "looks-like-prompt.md"
-        fake.write_text("#!/bin/sh\necho from-exec-mode-$1\n")
-        fake.chmod(0o755)
-        node = Node(
-            id="b", name="B",
-            execute=Execute(
-                url=f"file://{fake}",
-                mode="exec",
-                params={"args": ["forced"]},
-            ),
-        )
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        result = await executor.execute(node, {}, workdir=str(tmp_path))
-        assert result.success is True
-        assert "from-exec-mode-forced" in result.output
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retries,expected", [(0, False), (1, True)])
+async def test_run_retry_in_same_directory(tmp_path, retries, expected):
+    script = tmp_path / "run.py"
+    script.write_text("from pathlib import Path\nimport sys\n"
+                      "counter = Path('attempts')\n"
+                      "attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+                      "counter.write_text(str(attempt))\n"
+                      "print(attempt)\nsys.exit(attempt == 1)")
+    dispatch = DispatchExecutor(str(tmp_path), Settings(defaults={"run": {"backend_max_retries": retries}}))
+    result = await dispatch.execute(Node(id="run", run=[sys.executable, str(script)]), {})
+    assert result.success is expected
+    assert int(result.output) == int((tmp_path / "attempts").read_text()) == 1 + retries
 
 
 class TestDispatchConcurrencyCap:
@@ -271,7 +98,7 @@ class TestDispatchConcurrencyCap:
         def _node(i):
             return Node(
                 id=f"p{i}", name=f"p{i}",
-                execute=Execute(url=sleep_bin, params={"args": [str(sleep_s)]}),
+                run=[sleep_bin, str(sleep_s)],
             )
 
         start = time.perf_counter()
@@ -301,7 +128,7 @@ class TestDispatchConcurrencyCap:
         def _node(i):
             return Node(
                 id=f"p{i}", name=f"p{i}",
-                execute=Execute(url=sleep_bin, params={"args": [str(sleep_s)]}),
+                run=[sleep_bin, str(sleep_s)],
             )
 
         start = time.perf_counter()

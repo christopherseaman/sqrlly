@@ -12,7 +12,7 @@ from sqrlly.compile.dynamic import _make_fan_out_node
 from sqrlly.runtime.result import ExecutionResult
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import (
-    Execute, FanOut, FanOutTemplate, Graph, Node, Settings,
+    FanOut, FanOutTemplate, Graph, Node, Settings,
 )
 
 from mock_executor import MockExecutor
@@ -23,7 +23,7 @@ def _parent(template_worktree):
         id="build", name="build",
         fan_out=FanOut(
             template=FanOutTemplate(
-                execute=Execute(url="/bin/sh", params={"args": ["-c", "true"]}),
+                run=["/bin/sh", "-c", "true"],
                 worktree=template_worktree,
             ),
         ),
@@ -45,7 +45,7 @@ class _CapturingExecutor(MockExecutor):
 @pytest.mark.parametrize("template_worktree", ["off", "isolated", None])
 async def test_synthetic_child_inherits_template_worktree(template_worktree):
     parent = _parent(template_worktree)
-    config = Graph(name="t", version="1.0", nodes=[parent],
+    config = Graph(name="t", nodes=[parent],
                    settings=Settings(worktree="isolated"))
     executor = _CapturingExecutor()
     node_fn = _make_fan_out_node(
