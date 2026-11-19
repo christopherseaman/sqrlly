@@ -14,11 +14,11 @@ not a graph builder.
 
 from __future__ import annotations
 
+import ast
 from typing import Any
 
-from simpleeval import EvalWithCompoundTypes
+from simpleeval import DISALLOW_METHODS, DISALLOW_PREFIXES, EvalWithCompoundTypes
 
-from sqrlly.runtime._json import bind_json
 from sqrlly.runtime.state import WorkflowState
 
 _BASE_SAFE_FUNCS = {
@@ -44,11 +44,11 @@ def build_route_namespace(
     defaults for nodes that haven't been evaluated keeps predicates
     from blowing up on missing-key errors.
     """
-    ns: dict[str, Any] = bind_json(state.get("node_inputs", {}))
+    ns = dict(state.get("node_inputs", {}))
     structured = state.get("node_structured_outputs", {}) or {}
     outputs = state.get("node_outputs", {}) or {}
     for dep in deps:
-        ns[dep] = bind_json(structured[dep]) if dep in structured else outputs.get(dep)
+        ns[dep] = structured.get(dep, outputs.get(dep))
     ns["history"] = state.get("evaluations", {}) or {}
     ns["state"] = dict(state)
 
@@ -96,6 +96,18 @@ def build_safe_funcs(state: WorkflowState) -> dict[str, Any]:
     }
 
 
+class _RouteEvaluator(EvalWithCompoundTypes):
+    def _eval_attribute(self, node):
+        if (node.attr not in vars(dict) or node.attr.startswith(tuple(DISALLOW_PREFIXES))
+                or node.attr in DISALLOW_METHODS):
+            return super()._eval_attribute(node)
+        owner = self._eval(node.value)
+        if isinstance(owner, dict) and node.attr in owner:
+            return owner[node.attr]
+        # Preserve ordinary attributes without evaluating their owner twice.
+        return super()._eval_attribute(ast.Attribute(value=ast.Constant(owner), attr=node.attr))
+
+
 def evaluate_case(
     when: str, namespace: dict[str, Any], functions: dict[str, Any] | None = None,
 ) -> bool:
@@ -110,5 +122,5 @@ def evaluate_case(
     pass ``build_safe_funcs(state)`` for the state-aware closures.
     """
     funcs = functions if functions is not None else _BASE_SAFE_FUNCS
-    evaluator = EvalWithCompoundTypes(names=namespace, functions=funcs)
+    evaluator = _RouteEvaluator(names=namespace, functions=funcs)
     return bool(evaluator.eval(when))
