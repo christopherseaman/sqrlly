@@ -1,30 +1,4 @@
-"""End-to-end test for the wave-driven dynamic-task pattern.
-
-Pattern under test:
-
-    planner -> dispatcher (fan_out) -> workers (Send x N)
-                    ^                       |
-                    |                       v
-                    +-- gate (route) -- reconcile
-
-Each "wave" is one trip around dispatcher -> workers -> reconcile ->
-gate. A wave that uncovers new pending tasks routes back to dispatcher;
-a wave that uncovers nothing routes to __end__.
-
-The example at ``examples/wave_planner/`` is the documentation surface;
-this test exercises the same pattern programmatically with deterministic
-Python scripts written into a tmp_path. Two assertions matter:
-
-  1. ``dispatcher`` appears in ``completed_nodes`` exactly twice (one
-     fire per wave; the goto-driven re-fire MUST execute the body).
-  2. The dynamically-discovered child (``q_competitor_share``, added
-     by reconcile during wave 1) lands in ``completed_nodes`` as a
-     fan-out branch of dispatcher's second wave.
-
-Both assertions would fail if the resume-mode "skip already-completed
-nodes" guards were re-added to ``compile/nodes.py`` and
-``compile/dynamic.py`` — the regression those guards' removal prevents.
-"""
+"""A route back to the manifest producer discovers new work on the second wave."""
 from __future__ import annotations
 
 import json
@@ -122,21 +96,18 @@ def _build_wave_config(scripts: dict[str, Path]) -> Graph:
                 "name": "planner",
                 "run": [_PYTHON, str(scripts["planner.py"])],
             },
-            {
-                "id": "dispatcher",
-                "name": "dispatcher",
-                "depends_on": ["planner"],
-                "run": [_PYTHON, str(scripts["dispatcher.py"])],
-                "fan_out": {
-                    "template": {
-                        "run": [_PYTHON, str(scripts["worker.py"]), "{{id}}"],
-                    },
-                },
-            },
+            {"id": "dispatcher",
+             "run": [_PYTHON, str(scripts["dispatcher.py"])],
+             "depends_on": ["planner"]},
+            {"id": "workers",
+             "for_each": "dispatcher",
+             "depends_on": ["dispatcher"],
+             "worktree": "off",
+             "run": [_PYTHON, str(scripts["worker.py"]), "{{item.id}}"]},
             {
                 "id": "reconcile",
                 "name": "reconcile",
-                "depends_on": ["dispatcher"],
+                "depends_on": ["workers"],
                 "run": [_PYTHON, str(scripts["reconcile.py"])],
             },
             {
@@ -167,28 +138,18 @@ class TestWavePattern:
 
         # Wave 1: planner + dispatcher + 2 workers + reconcile.
         assert "planner" in completed
-        assert "dispatcher::q_alpha" in completed
-        assert "dispatcher::q_beta" in completed
+        assert "workers::q_alpha" in completed
+        assert "workers::q_beta" in completed
 
         # Wave 2: dispatcher re-fires (its body re-executes, manifest
         # re-emitted from updated state.json), the dynamically-added
         # q_gamma worker runs, reconcile clears.
-        assert "dispatcher::q_gamma" in completed, (
+        assert "workers::q_gamma" in completed, (
             "Dynamically-discovered child (added by reconcile during wave 1) "
             "must run as a fan-out branch of wave 2's dispatcher. If this "
             "assertion fails, the goto-driven re-fire of dispatcher is being "
             "suppressed — likely a resume-mode guard regression."
         )
-
-        # Direct "fired N times" is no longer expressible in state — the
-        # set-union reducer dedupes the writes. The q_gamma assertion
-        # above is the load-bearing regression check: q_gamma is only
-        # in wave 2's manifest, so its presence in completed_nodes IS
-        # proof that dispatcher re-fired. If a "skip already-completed"
-        # guard re-emerges, q_gamma never dispatches and the assertion
-        # above fails. To pin exact fire counts, run with `--log` and
-        # count `node_completed` events (events fire per super-step,
-        # not deduped).
 
         # Final state on disk: all three questions answered.
         final = json.loads((tmp_path / "state.json").read_text())
@@ -213,7 +174,7 @@ class TestWavePattern:
         config = Graph(**yaml.safe_load(yaml_path.read_text()))
         assert config.name == "Wave-driven research planner"
         assert {n.id for n in config.nodes} == {
-            "planner", "dispatcher", "reconcile", "gate",
+            "planner", "dispatcher", "workers", "reconcile", "gate",
         }
         # Compile succeeds (DispatchExecutor stand-in — we don't run).
         build_workflow_graph(config, DispatchExecutor(workdir=str(repo_root)))

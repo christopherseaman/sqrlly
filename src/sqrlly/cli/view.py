@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ _END_TARGET = "__end__"
 
 def _node_shape(node: Node) -> tuple[str, str]:
     """Return Mermaid delimiters for the authored node."""
-    if node.fan_out is not None:
+    if node.for_each is not None:
         return "{{", "}}"
     if node.route and node.kind is None:
         return "{", "}"
@@ -130,13 +131,6 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
     routes = _route_targets(graph)
     entry_ids, terminal_ids = _classify_endpoints(graph)
 
-    # Fan-out multiplicity: children only exist at run time, so each
-    # fan-out parent gets a dashed STAND-IN node for its N children
-    # (entered 1→N) plus its declared final_nodes as real chained steps.
-    # Dependents of the parent consume the branch aggregate, so their
-    # edges re-source from the chain exit: the stand-in (N→1) when there
-    # are no finals, else the LAST final — matching the compiled graph,
-    # where the last final's pass targets are the parent's dependents.
     all_ids = {n.id for n in graph.nodes}
 
     def _fresh(render_id: str) -> str:
@@ -146,36 +140,17 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
         return render_id
 
     fan_standin: dict[str, str] = {}
-    fan_exit: dict[str, str] = {}
     fan_decls: list[str] = []
     fan_edges: list[str] = []
     for node in sorted(graph.nodes, key=lambda n: n.id):
-        if node.fan_out is None:
+        if node.for_each is None:
             continue
         standin = _fresh(f"{node.id}__items")
         fan_standin[node.id] = standin
-        template = node.fan_out.template
-        tname = template.kind if template and template.kind else "template"
-        if template and template.kind in ("llm", "agent"):
-            prompt = getattr(template, template.kind).prompt
-            if prompt:
-                tname = Path(prompt).name
-        elif template and template.workflow:
-            tname = Path(template.workflow.file).name
-        safe_t = tname.replace('"', "'")
-        fan_decls.append(
-            f'        {standin}[/"×N per item: {safe_t}"/]:::fanout'
-        )
+        source = node.for_each if isinstance(node.for_each, str) else node.for_each.file
+        label = escape(source)
+        fan_decls.append(f'        {standin}[/"×N from {label}"/]:::fanout')
         fan_edges.append(f'        {node.id} -->|"1→N"| {standin}')
-        prev, prev_label = standin, '|"N→1"|'
-        for final in node.fan_out.final_nodes:
-            rid = _fresh(f"{node.id}__{final.id}")
-            marker = ":::gated" if final.eval else ""
-            safe_f = (final.name or final.id).replace('"', "&quot;")
-            fan_decls.append(f'        {rid}["{safe_f}"]{marker}')
-            fan_edges.append(f"        {prev} -->{prev_label} {rid}")
-            prev, prev_label = rid, ""
-        fan_exit[node.id] = prev
 
     lines: list[str] = []
     lines.append(f"flowchart {direction}")
@@ -199,15 +174,12 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
     lines.extend(fan_decls)
 
     # Internal edges: depends_on + routes between in-graph nodes.
-    # A dep on a fan-out parent re-sources from the parent's chain exit
-    # (N→1 labeled when the exit is the children stand-in itself).
     for node in nodes_sorted:
         for dep in node.depends_on:
-            src = fan_exit.get(dep, dep)
-            if src == fan_standin.get(dep):
-                lines.append(f'        {src} -->|"N→1"| {node.id}')
+            if dep in fan_standin:
+                lines.append(f'        {fan_standin[dep]} -->|"N→1"| {node.id}')
             else:
-                lines.append(f"        {src} --> {node.id}")
+                lines.append(f"        {dep} --> {node.id}")
     lines.extend(fan_edges)
     for src in sorted(routes.keys()):
         for tgt, label in routes[src]:
@@ -226,7 +198,7 @@ def render_mermaid(graph: Graph, direction: str = "TB") -> str:
     for entry in sorted(entry_ids):
         lines.append(f"    START --> {entry}")
     for term in sorted(terminal_ids):
-        lines.append(f"    {fan_exit.get(term, term)} --> END")
+        lines.append(f"    {fan_standin.get(term, term)} --> END")
 
     # A fail destination ends this path.
     for src in sorted(routes.keys()):
@@ -271,15 +243,8 @@ def extract_node_config(node: Node) -> dict[str, Any]:
         cfg[node.kind] = getattr(node, node.kind).model_dump(by_alias=True, exclude_unset=True)
     if node.eval:
         cfg["eval"] = node.eval.model_dump(by_alias=True, exclude_unset=True)
-    if node.fan_out:
-        fo: dict[str, Any] = {}
-        if node.fan_out.manifest_path:
-            fo["manifest_path"] = node.fan_out.manifest_path
-        if node.fan_out.template:
-            fo["template"] = node.fan_out.template.model_dump(by_alias=True, exclude_unset=True)
-        if node.fan_out.final_nodes:
-            fo["final_nodes"] = [n.id for n in node.fan_out.final_nodes]
-        cfg["fan_out"] = fo
+    if node.for_each is not None:
+        cfg["for_each"] = node.for_each if isinstance(node.for_each, str) else {"file": node.for_each.file}
     if node.route:
         cfg["route"] = [case.model_dump(by_alias=True, exclude_unset=True) for case in node.route]
     if node.outputs:

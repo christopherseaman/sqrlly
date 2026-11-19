@@ -31,10 +31,10 @@ EXAMPLES: dict[str, dict] = {
         },
     },
     "route_classify": {
-        "description": "Inline routing on structured output (pure script — no backend).",
+        "description": "Classify a ticket with an LLM and route by category.",
         "files": {
             "workflow.yaml": "examples/route_classify/workflow.yaml",
-            "scripts/triage.py": "examples/route_classify/scripts/triage.py",
+            "category.json": "examples/route_classify/category.json",
         },
     },
     "explicit_join": {

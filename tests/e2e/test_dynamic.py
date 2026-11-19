@@ -1,663 +1,76 @@
-"""Dynamic child fan-out tests.
-
-Tests LangGraph Send-based fan-out for nodes with fan_out enabled.
-All tests use real subprocess execution via DispatchExecutor.
-"""
+"""Repeated command execution, aggregation and eval through the compiled graph."""
 
 import json
-import shutil
-
 import sys
 
 import pytest
 
+from helpers import make_config
 from sqrlly.compile.graph import build_workflow_graph
-from sqrlly.runtime.state import make_initial_state
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
-
-from helpers import cmd_phase, make_config
-
-_ECHO = shutil.which("echo") or "/bin/echo"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def dynamic_parent(id, manifest_items, *, template=None,
-                   depends_on=None, evaluation=None, final_nodes=None,
-                   **kwargs):
-    """Shorthand for a command node that echoes a manifest JSON.
-
-    Default ``template`` runs ``_ECHO`` with a Jinja-rendered
-    arg per child — exercises fan-out structure without requiring a
-    PromptBackend. Tests that need a different template execution
-    shape (e.g. real prompt template, gate template) override.
-    """
-    manifest = json.dumps({"items": manifest_items})
-    if template is None:
-        template = {
-            "run": [_ECHO, "-n", "child-{{id}}"],
-        }
-    node = {
-        "id": id,
-        "name": id,
-        "run": [_ECHO, "-n", manifest],
-        "fan_out": {
-            "template": template,
-        },
-        "depends_on": depends_on or [],
-        **kwargs,
-    }
-    if evaluation:
-        node["eval"] = evaluation
-    if final_nodes:
-        node["fan_out"]["final_nodes"] = final_nodes
-    return node
-
-
-# ---------------------------------------------------------------------------
-# Core fan-out
-# ---------------------------------------------------------------------------
-
-
-class TestDynamicFanOut:
-    @pytest.mark.asyncio
-    async def test_basic_fan_out(self, tmp_path):
-        """Parent echoes manifest -> 3 children execute."""
-        (tmp_path / "template.md").write_text("Process {{id}}")
-
-        items = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
-        config = make_config([dynamic_parent("parent", items)])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "parent" in result["completed_nodes"]
-        assert "parent::a" in result["completed_nodes"]
-        assert "parent::b" in result["completed_nodes"]
-        assert "parent::c" in result["completed_nodes"]
-
-    @pytest.mark.asyncio
-    async def test_branch_outputs_recorded(self, tmp_path):
-        """Branch outputs stored in both node_outputs and child_outputs."""
-        (tmp_path / "template.md").write_text("Process {{id}}")
-
-        items = [{"id": "x"}, {"id": "y"}]
-        config = make_config([dynamic_parent("p", items)])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "p::x" in result["node_outputs"]
-        assert "p::y" in result["node_outputs"]
-        assert "p::x" in result["child_outputs"]
-        assert "p::y" in result["child_outputs"]
-
-    @pytest.mark.asyncio
-    async def test_single_item_manifest(self, tmp_path):
-        """Fan-out with a single item still works."""
-        (tmp_path / "template.md").write_text("Solo {{id}}")
-
-        config = make_config([dynamic_parent("p", [{"id": "only"}])])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "p::only" in result["completed_nodes"]
-
-# ---------------------------------------------------------------------------
-# Final nodes
-# ---------------------------------------------------------------------------
-
-
-class TestFinalNodes:
-    @pytest.mark.asyncio
-    async def test_final_node_runs_after_branches(self, tmp_path):
-        """Final node executes after all children complete."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-
-        items = [{"id": "a"}, {"id": "b"}]
-        finals = [{"id": "summary", "name": "Summary",
-                   "run": [_ECHO, "-n", "summarized"]}]
-
-        config = make_config([dynamic_parent("p", items, final_nodes=finals)])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "p::a" in result["completed_nodes"]
-        assert "p::b" in result["completed_nodes"]
-        assert "_final_p_summary" in result["completed_nodes"]
-
-    @pytest.mark.asyncio
-    async def test_final_node_sees_all_branch_outputs(self, tmp_path):
-        """Regression: final node must see ALL children's outputs in
-        `{parent_branches}`, not fire prematurely on first Send branch.
-
-        Bug: with 3 manifest items and a final whose prompt references
-        `{{parent_branches}}`, the final was being dispatched as soon as
-        the first Send branch completed (because the static edge
-        `_sub_parent → _final_first` fires per-branch). The fix adds a
-        barrier in `_make_final_fan_out_node(..., is_first=True)` that
-        returns no-op until all manifest items appear in completed_nodes.
-        """
-        from mock_executor import MockExecutor
-        from sqrlly.runtime.result import ExecutionResult
-
-        manifest = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
-        mock = MockExecutor(results={
-            "parent": ExecutionResult(
-                success=True, output=json.dumps({"items": manifest}),
-            ),
-            "parent::a": ExecutionResult(success=True, output="out-a"),
-            "parent::b": ExecutionResult(success=True, output="out-b"),
-            "parent::c": ExecutionResult(success=True, output="out-c"),
-            "_final_parent_summary": ExecutionResult(success=True, output="summary"),
-        })
-
-        (tmp_path / "template.md").write_text("sub {{id}}")
-        (tmp_path / "summary.md").write_text("aggregate {{parent_branches}}")
-
-        finals = [{"id": "summary", "name": "Summary", "agent": "summary.md"}]
-        config = make_config([dynamic_parent("parent", manifest, final_nodes=finals)])
-
-        graph = build_workflow_graph(config, mock)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        # All children + final completed.
-        for child_id in ("parent::a", "parent::b", "parent::c"):
-            assert child_id in result["completed_nodes"], (
-                f"missing child {child_id}; got {result['completed_nodes']}"
-            )
-        assert "_final_parent_summary" in result["completed_nodes"]
-
-        # Final node's context must include ALL three children's outputs.
-        ctx = mock.received_contexts["_final_parent_summary"]
-        assert "parent_branches" in ctx
-        aggregate = json.loads(ctx["parent_branches"])
-        assert aggregate == {
-            "parent::a": "out-a",
-            "parent::b": "out-b",
-            "parent::c": "out-c",
-        }, f"final ran with incomplete aggregate: {aggregate}"
-
-    @pytest.mark.asyncio
-    async def test_first_final_barrier_when_no_manifest(self, tmp_path):
-        """Direct unit-style call: barrier returns no-op when parent
-        hasn't produced manifest yet (state.node_outputs[parent] empty)
-        AND parent isn't in completed_nodes.
-
-        Bug observed in absurd-paper: `_final_*` fires before parent's
-        prompt produces a manifest. Without the parent-settled check,
-        barrier reads empty items, falls through to inner, and the final
-        runs against an empty `{{parent_branches}}` template var.
-        """
-        from sqrlly.compile.dynamic import _make_final_fan_out_node
-        from sqrlly.runtime.state import make_initial_state
-        from sqrlly.schema.models import FanOut, FanOutFinalNode, Node
-
-        parent = Node(
-            id="p", name="P",
-            run=[_ECHO, "x"],
-            fan_out=FanOut(manifest_path=None,
-                           template={"agent": "t.md"}),
-        )
-        final = FanOutFinalNode(id="summary", name="Summary", agent="s.md")
-
-        from helpers import make_config
-        config = make_config([{"id": "p", "name": "P",
-                               "run": [_ECHO, "x"]}])
-
-        node_fn = _make_final_fan_out_node(parent, final, config, executor=None, is_first=True)
-        # Parent not completed AND no manifest output → barrier should defer.
-        state = make_initial_state(workdir=str(tmp_path))
-        result = await node_fn(state)
-        assert result == {}, (
-            f"barrier should defer when parent hasn't settled; got {result}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_chained_final_nodes(self, tmp_path):
-        """Multiple final nodes execute sequentially."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-
-        items = [{"id": "a"}]
-        finals = [
-            {"id": "step1", "name": "Step 1",
-             "run": [_ECHO, "-n", "s1"]},
-            {"id": "step2", "name": "Step 2",
-             "run": [_ECHO, "-n", "s2"]},
-        ]
-
-        config = make_config([dynamic_parent("p", items, final_nodes=finals)])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "_final_p_step1" in result["completed_nodes"]
-        assert "_final_p_step2" in result["completed_nodes"]
-
-
-# ---------------------------------------------------------------------------
-# Downstream wiring
-# ---------------------------------------------------------------------------
-
-
-class TestDownstreamWiring:
-    @pytest.mark.asyncio
-    async def test_downstream_waits_for_dynamic_parent(self, tmp_path):
-        """Node depending on dynamic parent runs after finals complete."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-
-        items = [{"id": "a"}, {"id": "b"}]
-        finals = [{"id": "wrap", "name": "Wrap",
-                   "run": [_ECHO, "-n", "wrapped"]}]
-
-        config = make_config([
-            dynamic_parent("dyn", items, final_nodes=finals),
-            cmd_phase("next", depends_on=["dyn"]),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "dyn::a" in result["completed_nodes"]
-        assert "dyn::b" in result["completed_nodes"]
-        assert "_final_dyn_wrap" in result["completed_nodes"]
-        assert "next" in result["completed_nodes"]
-
-    @pytest.mark.asyncio
-    async def test_downstream_without_finals(self, tmp_path):
-        """Downstream wires from template node when no final nodes."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-
-        items = [{"id": "a"}]
-        config = make_config([
-            dynamic_parent("dyn", items),
-            cmd_phase("next", depends_on=["dyn"]),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "dyn::a" in result["completed_nodes"]
-        assert "next" in result["completed_nodes"]
-
-
-# ---------------------------------------------------------------------------
-# Gates
-# ---------------------------------------------------------------------------
-
-
-class TestDynamicGates:
-    @pytest.mark.asyncio
-    async def test_parent_gate_pass_fans_out(self, tmp_path):
-        """Parent gate passes -> children execute."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-        script = tmp_path / "pass.py"
-        script.write_text("print('{\"score\":1.0}')")
-
-        items = [{"id": "a"}, {"id": "b"}]
-        config = make_config([
-            dynamic_parent("p", items,
-                           evaluation={"run": [sys.executable, str(script)]}),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert result["evaluations"]["p"][-1]["result"]["score"] == 1.0
-        assert "p::a" in result["completed_nodes"]
-        assert "p::b" in result["completed_nodes"]
-
-    @pytest.mark.asyncio
-    async def test_parent_gate_pass_children_see_committed_state(self, tmp_path):
-        """A gated fan-out parent that PASSES dispatches its Sends from the
-        _fan_<id> node one super-step AFTER the gate committed, so each child's
-        Send payload carries the parent's post-gate evaluations. Each child's
-        template echoes {{evals.p.score}} — a value present ONLY once the gate's
-        record is committed — so the rendered child output pins committed-state
-        visibility end-to-end: a stale (pre-gate) payload would render an empty
-        score. This is the timing the unit Send-payload pin can't prove (that
-        one seeds state directly)."""
-        script = tmp_path / "pass.py"
-        script.write_text("print('{\"score\":1.0}')")
-        items = [{"id": "a"}, {"id": "b"}]
-        config = make_config([
-            dynamic_parent(
-                "p", items,
-                template={
-                    "run": [_ECHO, "-n", "score={{evals.p.score}}"],
-                },
-                evaluation={"run": [sys.executable, str(script)]},
-            ),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        # Parent gate committed before dispatch: record present, parent done.
-        assert result["evaluations"]["p"][-1]["result"]["score"] == 1.0
-        assert "p" in result["completed_nodes"]
-        assert "p::a" in result["completed_nodes"]
-        assert "p::b" in result["completed_nodes"]
-        # Each child rendered the parent's committed eval score in its payload
-        # — proving the Send saw post-gate evaluations, not a stale snapshot.
-        assert result["node_outputs"]["p::a"] == "score=1.0"
-        assert result["node_outputs"]["p::b"] == "score=1.0"
-
-    @pytest.mark.asyncio
-    async def test_parent_gate_fail_blocks_fanout(self, tmp_path):
-        """An exhausted parent retry prevents dispatching any children."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-        script = tmp_path / "fail.py"
-        script.write_text("raise SystemExit(1)")
-
-        items = [{"id": "a"}]
-        config = make_config([
-            dynamic_parent("p", items,
-                           evaluation={"run": [sys.executable, str(script)]}),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "p" in result["failed_nodes"]
-        assert "p::a" not in result["completed_nodes"]
-
-    @pytest.mark.asyncio
-    async def test_template_gate_scores_recorded(self, tmp_path):
-        """Template quality gate scores recorded per child."""
-        script = tmp_path / "score.py"
-        script.write_text("print('{\"score\":0.9}')")
-
-        items = [{"id": "x"}, {"id": "y"}]
-        config = make_config([{
-            "id": "p",
-            "name": "p",
-            "run": [_ECHO, "-n", json.dumps({"items": items})],
-            "fan_out": {
-                "template": {
-                    "run": [_ECHO, "-n", "child-{{id}}"],
-                    "eval": {"run": [sys.executable, str(script)]},
-                },
-            },
-        }])
-
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert result["evaluations"]["p::x"][-1]["result"]["score"] == 0.9
-        assert result["evaluations"]["p::y"][-1]["result"]["score"] == 0.9
-        assert len(result["evaluations"]["p::x"]) >= 1
-        assert len(result["evaluations"]["p::y"]) >= 1
-
-    @pytest.mark.asyncio
-    async def test_branch_gate_triggers_retry(self, tmp_path):
-        """Each child retries its own failed eval and succeeds on its second attempt."""
-        # Per-item counter files so each item retries independently.
-        (tmp_path / "cnt-x.txt").write_text("0")
-        (tmp_path / "cnt-y.txt").write_text("0")
-        validator = tmp_path / "validator.py"
-        validator.write_text(
-            'import os, sys, re\n'
-            'output = sys.argv[1]\n'
-            '# Derive the item id from the node output (echo emits "p::ID").\n'
-            'm = re.search(r"p::([a-z])", output)\n'
-            'item = m.group(1) if m else "x"\n'
-            f'path = os.path.join({str(tmp_path)!r}, f"cnt-{{item}}.txt")\n'
-            'n = int(open(path).read())\n'
-            'open(path, "w").write(str(n+1))\n'
-            'print(\'{\"score\":0.9}\'); sys.exit(n < 1)\n'
-        )
-
-        items = [{"id": "x"}, {"id": "y"}]
-        config = make_config([{
-            "id": "p",
-            "name": "p",
-            "run": [_ECHO, "-n", json.dumps({"items": items})],
-            "fan_out": {
-                "template": {
-                    "run": [_ECHO, "-n", "p::{{id}}"],
-                    "eval": {"run": [sys.executable, str(validator), "{{output}}"]},
-                },
-            },
-        }])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        # Each child should have TWO evaluation records (fail then pass).
-        assert "p::x" in result["completed_nodes"]
-        assert "p::y" in result["completed_nodes"]
-        invs_x = [r["attempt"] for r in result["evaluations"]["p::x"]]
-        invs_y = [r["attempt"] for r in result["evaluations"]["p::y"]]
-        assert invs_x == [1, 2], f"expected attempts [1, 2], got {invs_x}"
-        assert invs_y == [1, 2], f"expected attempts [1, 2], got {invs_y}"
-        # Final record is the pass.
-        assert result["evaluations"]["p::x"][-1]["result"]["score"] == 0.9
-        assert result["evaluations"]["p::y"][-1]["result"]["score"] == 0.9
-
-
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
-
-
-class TestDynamicEdgeCases:
-    @pytest.mark.asyncio
-    async def test_empty_manifest_skips_to_end(self, tmp_path):
-        """Empty manifest -> no children, goes to END or finals."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-
-        config = make_config([dynamic_parent("p", [])])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "p" in result["completed_nodes"]
-        # No children should have run
-        sub_keys = [k for k in result.get("completed_nodes", [])
-                    if k.startswith("p::")]
-        assert sub_keys == []
-
-    @pytest.mark.asyncio
-    async def test_empty_manifest_fans_to_all_dependents(self, tmp_path):
-        """C1 regression: an empty manifest on a fan-out node with no
-        final_nodes must route to *every* dependent, not just the first.
-        The pre-fix router returned an abstract "no_items" key that a
-        route_map could only map to a single node."""
-        config = make_config([
-            dynamic_parent("p", []),
-            cmd_phase("d1", output="d1-ran", depends_on=["p"]),
-            cmd_phase("d2", output="d2-ran", depends_on=["p"]),
-        ])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "p" in result["completed_nodes"]
-        assert "d1" in result["completed_nodes"]
-        assert "d2" in result["completed_nodes"]
-        assert result["node_outputs"]["d1"] == "d1-ran"
-        assert result["node_outputs"]["d2"] == "d2-ran"
-
-    @pytest.mark.asyncio
-    async def test_dry_run_traces_branches(self, tmp_path):
-        """Dry run traces parent but doesn't fan out (no manifest to read)."""
-        (tmp_path / "template.md").write_text("Sub {{id}}")
-
-        items = [{"id": "a"}]
-        config = make_config([dynamic_parent("p", items)])
-        graph = build_workflow_graph(config)
-        result = await graph.ainvoke(
-            make_initial_state(workdir=str(tmp_path), dry_run=True)
-        )
-
-        assert "p" in result["completed_nodes"]
-
-    def test_legacy_enabled_false_rejected_at_validate(self, tmp_path):
-        """`fan_out: { enabled: false, template: ... }` was historically
-        a silent no-op — confusing author footgun. Post-Stage-5c audit
-        removed the field entirely; legacy YAML carrying `enabled` now
-        fails at `validate` time."""
-        from pydantic import ValidationError
-        manifest = json.dumps({"items": [{"id": "a"}]})
-        with pytest.raises(ValidationError, match="enabled"):
-            make_config([{
-                "id": "p",
-                "name": "P",
-                "run": [_ECHO, "-n", manifest],
-                "fan_out": {
-                    "enabled": False,
-                    "template": {"agent": "t.md"},
-                },
-            }])
-
-    @pytest.mark.asyncio
-    async def test_manifest_from_disk(self, tmp_path):
-        """Manifest read from disk when node output isn't JSON."""
-        (tmp_path / "manifest.json").write_text(
-            json.dumps({"items": [{"id": "disk-item"}]})
-        )
-
-        config = make_config([{
-            "id": "p",
-            "name": "P",
-            "run": [_ECHO, "-n", "not json"],
-            "fan_out": {
-                "manifest_path": "manifest.json",
-                "template": {"run": [_ECHO, "-n", "child-{{id}}"]},
-            },
-        }])
-        executor = DispatchExecutor(workdir=str(tmp_path))
-        graph = build_workflow_graph(config, executor)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "p::disk-item" in result["completed_nodes"]
-
-
-# ---------------------------------------------------------------------------
-# Manifest field propagation (uses MockExecutor to observe context)
-# ---------------------------------------------------------------------------
-
-
-class TestManifestFieldPropagation:
-    @pytest.mark.asyncio
-    async def test_custom_fields_reach_branch_context(self, tmp_path):
-        """Manifest item fields beyond 'id' are passed into child context."""
-        from mock_executor import MockExecutor
-        from sqrlly.runtime.result import ExecutionResult
-
-        manifest = [
-            {"id": "x", "custom_field": "v123", "priority": "high"},
-        ]
-        mock = MockExecutor(results={
-            "parent": ExecutionResult(
-                success=True,
-                output=json.dumps({"items": manifest}),
-            ),
-        })
-
-        (tmp_path / "template.md").write_text("Process {{custom_field}}")
-
-        config = make_config([dynamic_parent("parent", manifest)])
-        graph = build_workflow_graph(config, mock)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "parent::x" in result["completed_nodes"]
-        ctx = mock.received_contexts["parent::x"]
-        assert ctx["id"] == "x"
-        assert ctx["custom_field"] == "v123"
-        assert ctx["priority"] == "high"
-
-    @pytest.mark.asyncio
-    async def test_downstream_sees_branch_aggregate(self, tmp_path):
-        """Any downstream node depending on a dynamic parent sees aggregates.
-
-        Before Stage 2b, `{parent}_branches` was synthesized only inside
-        `_make_final_fan_out_node`'s local enriched dict — unreachable from
-        a non-final downstream node. Stage 2b moves the synthesis into
-        `build_context`, which reads state directly, so both final and
-        non-final downstream nodes see the same aggregate.
-        """
-        from mock_executor import MockExecutor
-        from sqrlly.runtime.result import ExecutionResult
-
-        manifest = [{"id": "a"}, {"id": "b"}]
-        mock = MockExecutor(results={
-            "parent": ExecutionResult(
-                success=True,
-                output=json.dumps({"items": manifest}),
-            ),
-            "parent::a": ExecutionResult(success=True, output="out-a"),
-            "parent::b": ExecutionResult(success=True, output="out-b"),
-        })
-
-        (tmp_path / "template.md").write_text("sub")
-
-        nodes = [
-            dynamic_parent("parent", manifest),
-            cmd_phase("downstream", depends_on=["parent"]),
-        ]
-        config = make_config(nodes)
-        # Replace the command executor for downstream with the mock so we
-        # can inspect its context. Use the mock for everything: it returns
-        # mock results for keys it knows, defaults otherwise.
-        graph = build_workflow_graph(config, mock)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "downstream" in result["completed_nodes"]
-        ctx = mock.received_contexts["downstream"]
-        assert "parent_branches" in ctx, (
-            f"downstream should see `parent_branches`; got keys {list(ctx)}"
-        )
-        aggregate = json.loads(ctx["parent_branches"])
-        assert aggregate == {"parent::a": "out-a", "parent::b": "out-b"}
-
-    @pytest.mark.asyncio
-    async def test_branch_context_inherits_parent_deps(self, tmp_path):
-        """Branch template sees its parent's upstream deps, not just parent output.
-
-        Topology: upstream -> parent (dynamic fan-out) -> child
-        The child template should be able to interpolate {{upstream}}
-        because upstream is in parent.depends_on. Before Stage 2a, child
-        context contained only {parent_id: output, ...item_fields} — any
-        template that referenced a grandparent dep would render empty.
-        """
-        from mock_executor import MockExecutor
-        from sqrlly.runtime.result import ExecutionResult
-
-        manifest = [{"id": "item1"}]
-        mock = MockExecutor(results={
-            "upstream": ExecutionResult(
-                success=True,
-                output="upstream-value-42",
-            ),
-            "parent": ExecutionResult(
-                success=True,
-                output=json.dumps({"items": manifest}),
-            ),
-        })
-
-        (tmp_path / "template.md").write_text("template")
-
-        nodes = [
-            cmd_phase("upstream"),
-            dynamic_parent("parent", manifest, depends_on=["upstream"]),
-        ]
-        config = make_config(nodes)
-        graph = build_workflow_graph(config, mock)
-        result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
-
-        assert "parent::item1" in result["completed_nodes"]
-        ctx = mock.received_contexts["parent::item1"]
-        assert ctx.get("upstream") == "upstream-value-42", (
-            f"child context should inherit parent's upstream dep; got {ctx!r}"
-        )
-        assert ctx.get("parent") == json.dumps({"items": manifest}), (
-            "parent output still present alongside upstream"
-        )
+from sqrlly.runtime.state import make_initial_state
+
+
+async def execute(nodes, workdir):
+    config = make_config(nodes)
+    graph = build_workflow_graph(config, DispatchExecutor(str(workdir)), _base_dir=workdir)
+    return await graph.ainvoke(make_initial_state(workdir=str(workdir)))
+
+
+@pytest.mark.parametrize("size", [0, 1, 32])
+async def test_join_receives_every_result_in_manifest_order(tmp_path, size):
+    items = [{"id": f"i{i}", "name": f"name{i}"} for i in range(size)]
+    state = await execute([
+        {"id": "plan", "run": ["echo", json.dumps({"items": items})]},
+        {"id": "prefix", "run": ["printf", "ok"]},
+        {"id": "build", "for_each": "plan", "depends_on": ["plan", "prefix"],
+         "run": [sys.executable, "-c",
+                 "import sys,time; time.sleep(.08 if sys.argv[1]=='i0' else 0); print(sys.argv[2],end='')",
+                 "{{item.id}}", "{{prefix}}-{{item.name}}"]},
+        {"id": "first_join", "depends_on": ["build"], "run": ["printf", "%s", "{{build}}"]},
+        {"id": "second_join", "depends_on": ["build"], "run": ["printf", "%s", "{{build}}"]},
+    ], tmp_path)
+    assert not state["failed_nodes"], state["errors"]
+    expected = [f"ok-{item['name']}" for item in items]
+    for join in ("first_join", "second_join"):
+        assert json.loads(state["node_outputs"][join]) == expected
+    assert all(f"build::{item['id']}" in state["completed_nodes"] for item in items)
+
+
+async def test_children_retry_command_eval_independently(tmp_path):
+    items = [{"id": "a"}, {"id": "b"}]
+    state = await execute([
+        {"id": "plan", "run": ["echo", json.dumps(items)]},
+        {"id": "build", "depends_on": ["plan"], "for_each": "plan",
+         "run": ["printf", "%s", "{{item.id}}"],
+         "eval": {"run": [sys.executable, "-c",
+                          "import sys; print(sys.argv[2]); sys.exit(int(sys.argv[1]) == 1)",
+                          "{{attempt}}", "{{output}}"]}},
+    ], tmp_path)
+    assert not state["failed_nodes"], state["errors"]
+    for item in items:
+        records = state["evaluations"][f"build::{item['id']}"]
+        assert [record["attempt"] for record in records] == [1, 2]
+        assert [record["result"]["exit_code"] for record in records] == [1, 0]
+        assert {record["result"]["text"].strip() for record in records} == {item["id"]}
+
+
+async def test_failed_manifest_producer_blocks_children(tmp_path):
+    state = await execute([
+        {"id": "plan", "run": ["echo", '[{"id":"x"}]'], "eval": {"run": ["false"]}},
+        {"id": "build", "for_each": "plan", "depends_on": ["plan"], "run": ["touch", "unexpected"]},
+    ], tmp_path)
+    assert "plan" in state["failed_nodes"]
+    assert not (tmp_path / "unexpected").exists()
+
+
+async def test_static_items_dry_run_traces_children_without_executing_them(tmp_path):
+    (tmp_path / "items.json").write_text('[{"id":"x"},{"id":"y"}]')
+    config = make_config([{
+        "id": "build", "for_each": {"file": "items.json"},
+        "run": ["touch", "should-not-exist"],
+    }])
+    graph = build_workflow_graph(config, DispatchExecutor(str(tmp_path)), _base_dir=tmp_path)
+    state = await graph.ainvoke(make_initial_state(workdir=str(tmp_path), dry_run=True))
+    assert state["completed_nodes"] == {"build", "build::x", "build::y"}
+    assert not (tmp_path / "should-not-exist").exists()

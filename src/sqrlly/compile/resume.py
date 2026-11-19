@@ -38,30 +38,9 @@ def compute_skip_set(
             if dep in dependents:
                 dependents[dep].append(n.id)
 
-    # Fan-out final/aggregation nodes get synthetic ids (_final_<parent>_<f>)
-    # that aren't in config.nodes but ARE written to completed_nodes. Wire them
-    # as dependents of their parent so a dirty fan-out parent dirties its finals
-    # (else the planner can't reach them and they'd be wrongly skipped).
-    for n in config.nodes:
-        if n.fan_out and n.fan_out.final_nodes:
-            for f in n.fan_out.final_nodes:
-                dependents.setdefault(n.id, []).append(f"_final_{n.id}_{f.id}")
-
     route_adj = {n.id: _route_targets(n) for n in config.nodes}
-    # A failed fan-out child has a synthetic id `<parent>::<item>` that is
-    # NOT in config.nodes, so the BFS below can't reach its parent. Seed the
-    # parent into the dirty set so it re-fans on resume; the dirty closure
-    # then dirties its `_final_<parent>_<f>` aggregation (wired as a synthetic
-    # dependent above). Completed siblings are not config.nodes ids and aren't
-    # reachable from the parent, so they stay in prior_completed - dirty
-    # (frozen — not re-billed). The per-child re-run gate in
-    # compile/dynamic.py freezes a child on `child_id in skip`.
-    fan_out_parents = {n.id for n in config.nodes if n.fan_out}
-    failed_child_parents = {
-        fid.split("::", 1)[0]
-        for fid in prior_failed
-        if "::" in fid and fid.split("::", 1)[0] in fan_out_parents
-    }
+    parents = {node.id for node in config.nodes if node.for_each}
+    failed_child_parents = {child.partition("::")[0] for child in prior_failed if "::" in child} & parents
 
     dirty: set[str] = set(prior_failed) | set(rerun_targets) | failed_child_parents
     frontier = list(dirty)

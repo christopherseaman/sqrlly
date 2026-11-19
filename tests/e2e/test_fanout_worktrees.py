@@ -26,16 +26,12 @@ def _build_fan_out_config(workdir: Path) -> Graph:
     return Graph(
         name="fanout-worktree-test",
         nodes=[
-            {
-                "id": "parent",
-                "name": "parent",
-                "run": [_ECHO, "-n", manifest],
-                "fan_out": {
-                    "template": {
-                        "run": ["pwd"],
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": [_ECHO, "-n", manifest]},
+            {"id": "parent",
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "run": ["pwd"]},
         ],
     )
 

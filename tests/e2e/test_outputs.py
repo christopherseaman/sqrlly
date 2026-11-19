@@ -109,17 +109,22 @@ def test_nested_schema_reference_cannot_escape(tmp_path, ref):
 
 
 async def test_fan_child_can_read_parent_schema_fields(tmp_path):
-    (tmp_path / "schema.json").write_text('{"type":"object"}')
+    schema = {"type": "object", "properties": {
+        "items": {"type": "array"}, "title": {"type": "string"}, "nested": {"type": "object"},
+    }}
+    (tmp_path / "schema.json").write_text(json.dumps(schema))
     data = {"title": "hi", "nested": {"items": "ready"}, "items": [{"id": "a"}]}
     path = workflow(tmp_path, [{
         "id": "plan", "run": ["echo", json.dumps(data)], "outputs": {"schema": "schema.json"},
-        "fan_out": {"template": {"run": ["echo", "{{plan.title}} {{plan.nested.items}}"]}},
+    }, {
+        "id": "write", "depends_on": ["plan"], "for_each": "plan.items",
+        "run": ["echo", "{{plan.title}} {{plan.nested.items}}"],
     }])
     cfg = load_workflow(path)
     result = await build_workflow_graph(cfg, DispatchExecutor(str(tmp_path), cfg.settings)).ainvoke(
         {"workdir": str(tmp_path)}
     )
-    assert result["child_outputs"]["plan::a"] == "hi ready\n"
+    assert result["node_outputs"]["write::a"] == "hi ready\n"
 
 
 def test_native_array_envelope_preserves_references_into_the_root(tmp_path):

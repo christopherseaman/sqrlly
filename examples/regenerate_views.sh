@@ -7,12 +7,12 @@
 # absurd-paper) and saved as `<example_dir>/view.html`.
 #
 # Debug views are generated only for fully-deterministic script-only
-# examples (route_classify, pipeline_style, wave_planner). For each:
+# examples (pipeline_style, wave_planner). For each:
 #   1. Run the workflow, capturing the JSONL log to
 #      `<example_dir>/reference-run.jsonl`.
 #   2. Render `<example_dir>/view-debug.html` from that log.
 #
-# LLM-driven examples (jokes, absurd-paper) get only authoring views;
+# LLM-driven examples (jokes, route_classify, absurd-paper) get only authoring views;
 # debug views require the appropriate API key + live API call and
 # would produce a different output every time.
 #
@@ -38,17 +38,6 @@ done
 # runs preserve event history across resumes). For the regenerate
 # script we want a clean log per example, so delete any prior file
 # before each run.
-
-echo "=== debug run: route_classify ==="
-rm -f examples/route_classify/reference-run.jsonl
-uv run sqrlly run \
-    examples/route_classify/workflow.yaml \
-    --log examples/route_classify/reference-run.jsonl
-uv run sqrlly view \
-    examples/route_classify/workflow.yaml \
-    --log examples/route_classify/reference-run.jsonl \
-    --direction LR \
-    --out examples/route_classify/view-debug.html
 
 echo "=== debug run: pipeline_style ==="
 rm -f examples/pipeline_style/reference-run.jsonl

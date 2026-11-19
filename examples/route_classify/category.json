@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "category": {"type": "string", "enum": ["spam", "urgent", "escalate", "standard"]}
+  },
+  "required": ["category"],
+  "additionalProperties": false
+}

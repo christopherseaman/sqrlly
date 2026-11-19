@@ -1,6 +1,6 @@
 ---
 name: sqrlly
-description: Author workflow YAML for the sqrlly 1.0 schema spike and check it with the Python loader.
+description: Author workflow YAML for the sqrlly 1.0 schema spike and check it with the sqrlly CLI.
 ---
 
 # Author a sqrlly 1.0 workflow
@@ -79,11 +79,10 @@ A case without `when` is unconditional. An `else` case must come last.
 Use `context: all` to pass the full evaluation history to the destination.
 The default `last` passes the latest measurement and attempt number.
 
-## Check the draft grammar
-
-The 0.10 CLI uses the published grammar. In a checkout containing the spike,
-load a draft workflow and inspect its node IDs with this command.
+## Validate the workflow
 
 ```bash
-uv run python -c 'from sqrlly.schema.v1 import load_workflow; import sys; print([n.id for n in load_workflow(sys.argv[1]).nodes])' path/to/workflow.yaml
+uv run sqrlly validate path/to/workflow.yaml
 ```
+
+This guide was used for the initial authoring trial. The maintained guide is [SKILLS.md](../../SKILLS.md).

@@ -370,32 +370,45 @@ async def _seed_state(
         from sqrlly.compile.resume import compute_skip_set
         prior_completed = set(old.get("completed_nodes", set()))
         prior_failed = set(old.get("failed_nodes", set()))
-        skip = (
-            set()
-            if rerun_all
-            else compute_skip_set(
-                config, prior_completed, prior_failed, set(resume_from),
-            )
-        )
-        # Prior fan-out branch ids per parent, for the manifest-drift guard.
-        # Union of completed | failed direct children (from the ORIGINAL prior
-        # state, before the reseed below wipes failed_nodes). Skipped under
-        # --rerun-all (a full replay intends to re-fan everything).
-        from sqrlly.compile._manifest import direct_child_ids
-        fan_prior: dict[str, set[str]] = {}
+        from sqrlly.compile._manifest import _read_manifest
+        from sqrlly.runtime.result import ManifestError
+
+        prior_manifests = old.get("fan_children", {})
+        fan_prior = {}
+        changed = set(resume_from)
         if not rerun_all:
-            prior_ids = prior_completed | prior_failed
-            for n in config.nodes:
-                if n.fan_out:
-                    kids = direct_child_ids(n.id, prior_ids)
-                    if kids:
-                        fan_prior[n.id] = kids
+            for node in config.nodes:
+                if not node.for_each or node.id not in prior_manifests:
+                    continue
+                if old.get("fan_ready", {}).get(node.id) is False:
+                    changed.add(node.id)
+                prior_order = prior_manifests[node.id]
+                fan_prior[node.id] = set(prior_order)
+                try:
+                    branches = _read_manifest(old, node, workflow_dir=config.workflow_dir)
+                    if [child for child, item in branches] != prior_order:
+                        changed.add(node.id)
+                except ManifestError:
+                    # Dispatch records the error on the parent so a repaired manifest can resume.
+                    changed.add(node.id)
+            # A child can occur in several waves; only success in the checkpoint's active wave counts.
+            attempts = old.get("attempts", {})
+            child_attempts = old.get("fan_child_attempts", {})
+            prior_completed = {
+                key for key in prior_completed
+                if "::" not in key or key.partition("::")[0] not in fan_prior
+                or (key in fan_prior[key.partition("::")[0]]
+                    and child_attempts.get(key) == attempts.get(key.partition("::")[0], 0))
+            }
+        skip = set() if rerun_all else compute_skip_set(config, prior_completed, prior_failed, changed)
         state = {
             **old,
             "completed_nodes": skip,
             "failed_nodes": set(), "retries": {}, "errors": [],
             "workdir": workdir, "dry_run": False, "_resume_skip": skip,
             "_fan_prior_children": fan_prior,
+            "_fan_resume_attempts": {node.id: old.get("attempts", {}).get(node.id, 0)
+                                     for node in config.nodes if node.for_each},
             "_snapshot_reexecute": prior_failed | (prior_completed - skip),
         }
         if rerun_all:

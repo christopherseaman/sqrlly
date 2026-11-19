@@ -138,12 +138,13 @@ class TestGraphCommand:
         assert result.exit_code == 0
         assert "-.->" in result.output
 
-    def test_graph_draws_fanout_hexagon(self, runner):
-        """A fan-out parent renders as a hexagon, same as in `view`."""
+    def test_graph_draws_for_each_source_and_join(self, runner):
+        """The wave planner joins workers before reconciling their results."""
         wf = EXAMPLES_DIR / "wave_planner" / "workflow.yaml"
         result = runner.invoke(cli, ["graph", str(wf)])
         assert result.exit_code == 0
-        assert "{{" in result.output
+        assert 'workers__items[/"×N from dispatcher"/]' in result.output
+        assert 'workers__items -->|"N→1"| reconcile' in result.output
 
 
 class TestRunCommand:

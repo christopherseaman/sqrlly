@@ -7,10 +7,9 @@ All notable changes to sqrlly are documented here. Format follows
 
 ### Changed
 
+- Put `for_each` on the node that repeats. Children keep stable identities across resume, and dependents receive their results in manifest order.
 - Isolated nodes start from a snapshot of the current files and promote at settlement. A changed base path fails promotion by default.
-
 - Declare result files and JSON Schema with `outputs`. Both provider CLIs return structured results.
-
 - Workflows measure output with `eval`. Ordered `route` cases handle retries, escalation and failure.
 - Workflow nodes select `agent`, `llm`, `run` or `workflow` explicitly.
   Prompt filenames resolve under the YAML file's prompts directory.

@@ -60,11 +60,7 @@ class EvaluationBackendError(RuntimeError):
 
 
 class ManifestError(RuntimeError):
-    """Raised when fan-out node manifest processing fails: either the
-    declared ``manifest_path`` could not be read (file missing or invalid
-    JSON), or multiple manifest items resolve to the same child id
-    (duplicate or collapsed ``<parent>::unknown``). Halts loudly rather
-    than silently fanning out over zero items or colliding child ids."""
+    """The repetition source could not be read or did not yield valid, unique child identities."""
 
 
 class RouteError(ValueError):

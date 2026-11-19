@@ -46,6 +46,7 @@ def _merge_sets(left: set[str], right: set[str]) -> set[str]:
 REDUCERS: dict[str, Callable[[Any, Any], Any]] = {
     "completed_nodes": _merge_sets,
     "fan_children": _merge_dicts,
+    "fan_child_attempts": _merge_dicts,
     "fan_ready": _merge_dicts,
     "retained_refs": _merge_sets,
     "failed_nodes": _merge_sets,
@@ -69,6 +70,7 @@ class WorkflowState(TypedDict):
     workflow_name: str
     fan_ready: Annotated[dict[str, bool], REDUCERS["fan_ready"]]
     fan_children: Annotated[dict[str, list[str]], REDUCERS["fan_children"]]
+    fan_child_attempts: Annotated[dict[str, int], REDUCERS["fan_child_attempts"]]
     retained_refs: Annotated[set[str], REDUCERS["retained_refs"]]
     completed_nodes: Annotated[set[str], REDUCERS["completed_nodes"]]
     failed_nodes: Annotated[set[str], REDUCERS["failed_nodes"]]
@@ -82,7 +84,10 @@ class WorkflowState(TypedDict):
     errors: Annotated[list[dict], REDUCERS["errors"]]
     workdir: str
     dry_run: bool
-    _fan_out_item: NotRequired[dict[str, Any]]
+    _fan_child_id: NotRequired[str]
+    _fan_attempt: NotRequired[int]
+    workflow_route_context: NotRequired[dict[str, Any]]
+    _fan_out_item: NotRequired[Any]
     # Subgraph context: rendered inputs visible as template vars to subgraph
     # nodes. Set by the subgraph wrapper before subgraph invocation; not
     # populated at the top level. Merged into build_context output.
@@ -108,6 +113,7 @@ class WorkflowState(TypedDict):
     # dispatcher to detect a re-fan that DROPS a prior branch. Frozen,
     # last-write-wins (NO REDUCER). Absent => no drift check.
     _fan_prior_children: NotRequired[dict[str, set[str]]]
+    _fan_resume_attempts: NotRequired[dict[str, int]]
 
 
 def make_initial_state(

@@ -69,8 +69,8 @@ def test_fanout_resume_promotes_in_manifest_order_once(repo, tmp_path):
     counts = tmp_path / "counts"
     script = 'echo "$1" >> "$2"; test "$1" != a || test -f "$3"; echo "$1" > "file-$1"; echo "$1" > common'
     nodes = [
-        {"id": "fan", "fan_out": {"manifest_path": "items.json", "template": {"run": [
-            "sh", "-ec", script, "worker", "{{id}}", str(counts), str(gate)]}}},
+        {"id": "fan", "for_each": {"file": "items.json"}, "run": [
+            "sh", "-ec", script, "worker", "{{item.id}}", str(counts), str(gate)]},
         {"id": "join", "depends_on": ["fan"], "run": ["sh", "-ec", "cat common file-z file-a > joined"]},
     ]
     def run(*args):
@@ -196,8 +196,7 @@ def test_child_settings_and_retained_refs_in_workflow_fanout(repo):
     }
     (repo / "child.yaml").write_text(yaml.safe_dump(child))
     (repo / "items.json").write_text('["x"]')
-    result = invoke(repo, [{"id": "branches", "fan_out": {
-        "manifest_path": "items.json", "template": {"workflow": "child.yaml"}}}])
+    result = invoke(repo, [{"id": "branches", "for_each": {"file": "items.json"}, "workflow": "child.yaml"}])
     assert result.returncode == 0, result.stdout + result.stderr
     ref = next(line.split()[-1] for line in result.stdout.splitlines() if line.startswith("Retained snapshot:"))
     assert git(repo, "show", f"{ref}:result") == "nested sharesetup"
@@ -213,8 +212,8 @@ def test_interruption_preserves_ambiguous_dispatch(repo, tmp_path):
         'while test ! -f "$3"; do sleep 0.05; done; fi; echo "$1" >> "$1"'
     )
     (repo / "items.json").write_text('["a", "b"]')
-    nodes = [{"id": "branches", "fan_out": {"manifest_path": "items.json", "template": {
-        "run": ["sh", "-ec", script, "worker", "{{id}}", str(started), str(release)]}}}]
+    nodes = [{"id": "branches", "for_each": {"file": "items.json"},
+        "run": ["sh", "-ec", script, "worker", "{{item}}", str(started), str(release)]}]
     config = repo / "workflow.yaml"
     config.write_text(yaml.safe_dump({"nodes": nodes, "name": "snapshots", "settings": {}}))
     cli = [str(Path(sys.executable).with_name("sqrlly")), "run", str(config), "-w", str(repo)]

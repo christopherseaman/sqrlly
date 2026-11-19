@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Template
+from jinja2 import Environment
 
 from sqrlly.runtime.result import ExecutionResult, OverloadError, PromptBackend
 from sqrlly.schema.models import Settings
@@ -39,8 +39,18 @@ def retry_delay(attempt: int, backoff: list[float]) -> float:
     return backoff[idx]
 
 
+class _WorkflowEnvironment(Environment):
+    def getattr(self, obj, attribute):
+        if isinstance(obj, dict) and attribute in obj:
+            return obj[attribute]
+        return super().getattr(obj, attribute)
+
+
+_TEMPLATES = _WorkflowEnvironment(keep_trailing_newline=True)
+
+
 def render_template(template: str, context: dict[str, Any]) -> str:
-    return Template(template, keep_trailing_newline=True).render(**context)
+    return _TEMPLATES.from_string(template).render(**context)
 
 
 def prepend_eval_preamble(rendered: str, context: dict[str, Any]) -> str:

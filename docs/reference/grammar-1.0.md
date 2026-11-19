@@ -1,6 +1,6 @@
 # sqrlly 1.0 grammar
 
-The design for the 1.0 line: node grammar, defaults, eval and route, outputs, worktrees and promote. This file is the spec that issues #36 to #42 implement. `SCHEMA.md` and `SKILLS.md` describe 0.10 until #38 rewrites them, and this file is deleted when they match it.
+This design records the decisions implemented by issues #36 through #42, and the extension work deferred beyond 1.0. For the current grammar and runnable examples, see [SCHEMA.md](../../SCHEMA.md) and [SKILLS.md](../../SKILLS.md).
 
 The first draft came from an 11-agent pass (a map of the 0.10 authoring surface, four prior-art surveys, three proposals, a judge, a critic that checked it against the code). The owner's later decisions are in the table below.
 
@@ -154,7 +154,7 @@ Route:
 - Predicates read `eval` (latest output), `attempt` (this node's run count), `history` (all records) and upstream node outputs.
 - `route` without `eval` stays legal for branching on outputs.
 
-Not prototyped: `then: retry` after a `for_each` child, and `attempt` across a `--resume`.
+Command eval retries apply within each repeated child. Resume restores attempt numbers from the checkpoint.
 
 ## 6. Worktree and promote model
 
@@ -264,7 +264,7 @@ Skipped: budgets, unknown keys that warn, PR-as-merge, variable-mutation actions
 
 All 11 critic findings were applied, and the code-related ones were re-read in the source first. None was rejected. Three carry a variation: `waiting` is a failure kind (finding 1), a `run` scalar containing `{{` is a load error (finding 7), and the old issues 7 and 8 merged to fit the spike (finding 9).
 
-Unverified:
+The following were open verification questions at the time of the design review. Issues #38 through #42 record the implementation results.
 
 - The 5 CLI flags appear in the help text of Claude Code 2.1.325 and codex-cli 0.169.0. None was run. The `read` to `plan` mapping is a guess.
 - Codex shows no zero-tool mode. `llm` on Codex is probably a multi-turn read-only agent.

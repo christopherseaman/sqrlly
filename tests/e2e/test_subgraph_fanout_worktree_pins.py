@@ -64,16 +64,12 @@ def _build_parent_config(tmp_path: Path, sub_yaml: str) -> Graph:
     return Graph(
         name="subgraph-fanout-worktree-pin-test",
         nodes=[
-            {
-                "id": _PARENT_ID,
-                "name": "Writer Pool",
-                "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"],
-                "fan_out": {
-                    "template": {
-                        "workflow": {"file": sub_yaml, "with": {"item_id": "{{id}}"}},
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"]},
+            {"id": _PARENT_ID,
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "workflow": {"file": sub_yaml, "with": {"item_id": "{{item.id}}"}}},
         ],
     )
 
@@ -158,19 +154,15 @@ def _write_middle_sub_yaml(tmp_path: Path, leaf_yaml: str) -> str:
     middle = {
         "name": "middle-sub",
         "nodes": [
-            {
-                "id": _INNER_ID,
-                "name": "Inner Pool",
-                "run": ["/bin/sh", "-c", f"printf '%s' '{inner_manifest}'"],
-                "fan_out": {
-                    "template": {
-                        "workflow": {
+            {"id": "manifest",
+             "run": ["/bin/sh", "-c", f"printf '%s' '{inner_manifest}'"]},
+            {"id": _INNER_ID,
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "workflow": {
                             "file": leaf_yaml,
-                            "with": {"outer_id": "{{outer_id}}", "inner_id": "{{id}}"},
-                        },
-                    },
-                },
-            },
+                            "with": {"outer_id": "{{outer_id}}", "inner_id": "{{item.id}}"},
+                        }},
         ],
     }
     middle_path = tmp_path / "middle_sub.yaml"
@@ -185,16 +177,12 @@ def _build_nested_fanout_config(tmp_path: Path, middle_yaml: str) -> Graph:
     return Graph(
         name="nested-fanout-shared-outer-tree-test",
         nodes=[
-            {
-                "id": _OUTER_ID,
-                "name": "Outer Pool",
-                "run": ["/bin/sh", "-c", f"printf '%s' '{outer_manifest}'"],
-                "fan_out": {
-                    "template": {
-                        "workflow": {"file": middle_yaml, "with": {"outer_id": "{{id}}"}},
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": ["/bin/sh", "-c", f"printf '%s' '{outer_manifest}'"]},
+            {"id": _OUTER_ID,
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "workflow": {"file": middle_yaml, "with": {"outer_id": "{{item.id}}"}}},
         ],
     )
 

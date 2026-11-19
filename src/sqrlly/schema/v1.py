@@ -1,9 +1,8 @@
-"""Authoring models for the 1.0 grammar spike."""
+"""Payloads shared by workflow nodes, evals and settings."""
 
 import re
 import shlex
 from difflib import get_close_matches
-from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -11,7 +10,7 @@ from sqrlly.schema.json_schema import load_validator
 import yaml
 from pydantic import (
     BaseModel, ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt, PrivateAttr,
-    ValidationInfo, field_validator, model_validator,
+    field_validator, model_validator,
 )
 
 KINDS = ("agent", "llm", "run", "workflow")
@@ -196,54 +195,6 @@ class Case(Record):
         return self
 
 
-class Node(Record):
-    id: Name
-    name: Name | None = None
-    agent: Agent | None = None
-    llm: Prompt | None = None
-    run: Run | None = None
-    workflow: Workflow | None = None
-    depends_on: list[Name] = []
-    timeout: PositiveFloat | None = None
-    eval: Eval | None = None
-    for_each: Name | File | None = None
-    route: Annotated[list[Case], Field(min_length=1)] | None = None
-    outputs: Outputs | None = None
-    worktree: Worktree | None = None
-    promote: bool | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _count_kinds(cls, value: Any) -> Any:
-        if isinstance(value, dict) and len(value.keys() & set(KINDS)) > 1:
-            raise ValueError(f"choose at most one kind: {', '.join(KINDS)}")
-        return value
-
-    @model_validator(mode="after")
-    def _envelope(self) -> Self:
-        if self.name is None:
-            self.name = self.id
-        if self.id in RESERVED:
-            raise ValueError(f"reserved node id: {self.id}")
-        if self.for_each and self.route:
-            raise ValueError("for_each and route cannot appear together")
-        if self.llm or self.workflow:
-            for key in ("worktree", "promote"):
-                if key in self.model_fields_set:
-                    raise ValueError(f"{key} only applies to agent and run")
-        if self.outputs:
-            if self.llm and "files" in self.outputs.model_fields_set:
-                raise ValueError("llm cannot declare outputs.files")
-            if self.workflow and self.outputs.schema_file:
-                raise ValueError("workflow cannot declare outputs.schema")
-        if self.eval and (self.eval.llm or self.eval.agent) and not self.route:
-            kind = "llm" if self.eval.llm else "agent"
-            raise ValueError(f"an {kind} eval requires a route")
-        if any(case.otherwise for case in (self.route or [])[:-1]):
-            raise ValueError("else must be the last route case")
-        return self
-
-
 class CommonDefaults(Record):
     timeout: PositiveFloat | None = None
 
@@ -274,77 +225,6 @@ class Defaults(Record):
     workflow: CommonDefaults = CommonDefaults()
 
 
-class Settings(Record):
-    prompts: Name = "prompts/"
-    model: Name | None = None
-    defaults: Defaults = Defaults()
-    max_parallel_jobs: PositiveInt = 4
-    on_promote_conflict: Literal["fail", "warn", "overwrite", "skip"] = "fail"
-    on_manifest_drift: Literal["fail", "warn"] = "fail"
-    promote_exclude: list[Name] = []
-    worktree_setup: list[Name] = []
-    worktree_share: list[Name] = []
-
-
-class Graph(Record):
-    name: Name | None = None
-    nodes: Annotated[list[Node], Field(min_length=1)]
-    settings: Settings = Settings()
-
-    @model_validator(mode="after")
-    def _validate_graph(self, info: ValidationInfo) -> Self:
-        ids = {node.id for node in self.nodes}
-        if len(ids) != len(self.nodes):
-            raise ValueError("duplicate node id")
-        defaults = self.settings.defaults.agent
-        if isinstance(defaults.tools, list) and defaults.provider != "anthropic":
-            raise ValueError("agent tool-name lists require provider: anthropic")
-        for node in self.nodes:
-            for target in node.depends_on:
-                if target not in ids:
-                    raise ValueError(f"{node.id}.depends_on references unknown node {target}")
-            for case in node.route or []:
-                targets = case.then or case.otherwise
-                for target in targets if isinstance(targets, list) else [targets]:
-                    if target not in ids and target not in RESERVED:
-                        raise ValueError(f"{node.id}.route references unknown node {target}")
-            for step in (node, node.eval):
-                if step and step.agent:
-                    agent = step.agent
-                    tools = defaults.tools if agent.tools is None else agent.tools
-                    if isinstance(tools, list) and (agent.provider or defaults.provider) != "anthropic":
-                        raise ValueError(f"{node.id}: agent tool-name lists require provider: anthropic")
-        try:
-            TopologicalSorter({node.id: node.depends_on for node in self.nodes}).prepare()
-        except CycleError as err:
-            raise ValueError(f"depends_on cycle: {err.args[1]}") from err
-        if info.context and "workflow_dir" in info.context:
-            self._check_files(Path(info.context["workflow_dir"]))
-        return self
-
-    def _check_files(self, directory: Path) -> None:
-        directory = directory.resolve()
-        root = repository_root(directory)
-
-        for node in self.nodes:
-            for step in (node, node.eval):
-                if step is None:
-                    continue
-                prompt = step.agent or step.llm
-                if prompt and prompt.prompt:
-                    require_reference(root, directory / self.settings.prompts / prompt.prompt,
-                            f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
-                if step.outputs and step.outputs.schema_file:
-                    schema_path = directory / step.outputs.schema_file
-                    require_reference(root, schema_path, f"{node.id}.outputs.schema")
-                    step.outputs.load_schema(schema_path, root or directory)
-            if node.workflow:
-                require_reference(root, directory / node.workflow.file, f"{node.id}.workflow",
-                        ' ({text: "..."} is for inline agent or llm prompts)')
-            if isinstance(node.for_each, File):
-                require_reference(root, directory / node.for_each.file, f"{node.id}.for_each.file")
-
-
 class WorkflowLoader(yaml.SafeLoader):
     """Keep YAML words such as off and yes available as argv tokens and names."""
 
@@ -357,10 +237,3 @@ class WorkflowLoader(yaml.SafeLoader):
 WorkflowLoader.add_implicit_resolver(
     "tag:yaml.org,2002:bool", re.compile(r"^(?:true|false)$", re.IGNORECASE), list("tTfF"),
 )
-
-
-def load_workflow(path: str | Path) -> Graph:
-    path = Path(path)
-    with path.open(encoding="utf-8") as stream:
-        raw = yaml.load(stream, Loader=WorkflowLoader)
-    return Graph.model_validate(raw, context={"workflow_dir": path.parent})

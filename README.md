@@ -5,7 +5,7 @@
 - **Nodes** execute one of: an LLM prompt (agent-with-tools or text-only), an interpreted script (`.py` / `.js` / `.ts` / `.sh`), a binary, or a recursive subgraph.
 - **Local context** — agents in a Git repository start from the current files, including uncommitted changes.
 - **Evaluation** measures command output or prompts an agent. Ordered route cases decide when to retry, escalate or fail.
-- **Branching** — `route:` sends flow conditionally; `fan_out:` spawns parallel branches over a JSON manifest.
+- **Branching** — `route:` sends flow conditionally; `for_each` runs a node once per item and collects results in manifest order.
 - **Fault-recovery resume** — state checkpoints to SQLite; `--resume` re-runs seeded with the prior run's state and clears failures to retry.
 
 ## Install
@@ -43,16 +43,18 @@ workflows.
 
 ## Quickstart
 
-Bootstrap a runnable workflow in two commands — no git clone needed:
+This checkout documents the unreleased 1.0 workflow grammar. PyPI 0.10 uses the earlier YAML grammar. Run these examples from the checkout with `uv run sqrlly`.
+
+Create and run a workflow with one command node:
 
 ```bash
-sqrlly init my-workflow
-cd my-workflow && sqrlly run workflow.yaml
+uv run sqrlly init my-workflow
+uv run sqrlly run my-workflow/workflow.yaml --workdir my-workflow
 ```
 
 `sqrlly init` writes a workflow with one `run` node that prints a greeting.
 
-The jokes example generates candidates, scores them and selects a winner.
+The jokes example generates candidates, checks the number of jokes and selects a winner.
 
 ```yaml
 name: "Joke Generator"
@@ -71,8 +73,8 @@ nodes:
 ```
 
 ```bash
-sqrlly validate examples/jokes/workflow.yaml
-sqrlly run examples/jokes/workflow.yaml --log run.jsonl
+uv run sqrlly validate examples/jokes/workflow.yaml
+uv run sqrlly run examples/jokes/workflow.yaml --log run.jsonl
 ```
 
 - `validate` — compiles the graph and reports the node count.
@@ -138,10 +140,10 @@ Render any example's interactive view with `sqrlly view <workflow.yaml>`; `examp
 | Workflow | What it shows |
 |---|---|
 | [`examples/jokes/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/jokes/workflow.yaml) | Minimal: prompt + script gate + select. Start here. |
-| [`examples/route_classify/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/route_classify/workflow.yaml) | Inline `route:` case ladder over structured state. |
+| [`examples/route_classify/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/route_classify/workflow.yaml) | An LLM classifies a ticket against a JSON schema; route cases read its category. |
 | [`examples/pipeline_style/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/pipeline_style/workflow.yaml) | `route: [{then: <next>}]` forward-edge authoring; a linear pipeline. |
 | [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Full pipeline: prompts, multi-dim quality gates, a subgraph, and a rendered PDF. Try `sqrlly init --example absurd-paper`. |
-| [`examples/wave_planner/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/wave_planner/workflow.yaml) | Wave-driven dynamic-task pattern — `goto:` loop-back to a fan-out parent. |
+| [`examples/wave_planner/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/wave_planner/workflow.yaml) | Wave-driven dynamic-task pattern — a bounded route back to a producer that discovers more items. |
 
 ## Documentation
 

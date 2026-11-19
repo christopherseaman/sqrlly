@@ -1,14 +1,4 @@
-"""Wave-planner: emit a manifest of currently-pending questions.
-
-The fan_out router parses this script's stdout as JSON. Each pending
-question becomes a Send branch that runs `worker.py` with the
-question id. Already-answered questions are excluded — that's how
-"the next wave" naturally narrows.
-
-If no questions are pending the manifest is empty and fan-out
-dispatches zero children; the route node then finishes on its
-"reconcile_clean" branch.
-"""
+"""Emit the pending questions for this wave of repeated workers."""
 import json
 import sys
 from pathlib import Path

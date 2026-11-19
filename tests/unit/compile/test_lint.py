@@ -38,61 +38,12 @@ class TestHyphenatedIdWarnings:
         assert any("a-b" in w for w in warnings)
         assert any("c-d-e" in w for w in warnings)
 
-    def test_fan_out_final_node_id_is_checked(self):
-        """A hyphenated id on a fan-out final node is flagged too."""
-        parent = {
-            "id": "fan",
-            "name": "fan",
-            "run": ["echo"],
-            "fan_out": {
-                "template": {"agent": {"text": "test"}},
-                "final_nodes": [{"id": "merge-results", "name": "Merge"}],
-            },
-        }
-        config = make_config([parent])
-        warnings = collect_warnings(config)
-        # (A runtime-manifest fan-out also draws the drift advisory; filter to
-        # the hyphen check this test is about.)
-        hyphen = [w for w in warnings if "{{merge-results}}" in w]
-        assert len(hyphen) == 1
-        assert "merge_results" in hyphen[0]
-
-
-def _fan_node(node_id: str, *, manifest_path: str | None = None) -> dict:
-    fo: dict = {"template": {"agent": {"text": "test"}}}
-    if manifest_path is not None:
-        fo["manifest_path"] = manifest_path
-    return {
-        "id": node_id, "name": node_id,
-        "run": ["echo"], "fan_out": fo,
-    }
-
-
-class TestManifestDriftLint:
-    def test_runtime_manifest_fanout_warns(self):
-        """A fan-out whose manifest is a RUNTIME output (no manifest_path) gets
-        an advisory: --resume needs deterministic item ids."""
-        config = make_config([_fan_node("workers")])
-        drift = [
-            w for w in collect_warnings(config)
-            if "workers" in w and "resume" in w.lower()
-        ]
-        assert len(drift) == 1
-        assert "on_manifest_drift" in drift[0]
-
-    def test_static_manifest_path_is_silent(self):
-        """A static `manifest_path` file has stable ids by construction — no
-        drift advisory."""
-        config = make_config([_fan_node("workers", manifest_path="m.json")])
-        drift = [
-            w for w in collect_warnings(config)
-            if "workers" in w and "resume" in w.lower()
-        ]
-        assert drift == []
-
-    def test_non_fanout_node_is_silent(self):
-        config = make_config([_node("plain")])
-        assert [w for w in collect_warnings(config) if "resume" in w.lower()] == []
+def test_repeating_run_defaults_to_isolation_without_shared_worktree_warning():
+    config = make_config([
+        {"id": "batch", "run": "echo batch", "for_each": {"file": "items.json"}},
+        {"id": "serial", "run": "echo serial"},
+    ])
+    assert collect_warnings(config) == []
 
 
 def test_upstream_route_warns_without_attempt_limit():

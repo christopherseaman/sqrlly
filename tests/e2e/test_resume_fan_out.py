@@ -33,7 +33,6 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.runner import run_workflow
-from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import Graph
 
 
@@ -103,40 +102,11 @@ async def _run_phase(
     """Mirror cli/main.py's execute path with a real AsyncSqliteSaver."""
     async with AsyncSqliteSaver.from_conn_string(db_path) as cp:
         await cp.setup()
-        if resume:
-            prev = await cp.aget_tuple(
-                {"configurable": {"thread_id": thread_id}}
-            )
-            assert prev is not None, "phase 2 expected a saved checkpoint"
-            old = dict(prev.checkpoint.get("channel_values", {}))
-            from sqrlly.compile.resume import compute_skip_set
-            skip = (
-                set()
-                if rerun_all
-                else compute_skip_set(
-                    config,
-                    set(old.get("completed_nodes", set())),
-                    set(old.get("failed_nodes", set())),
-                    set(resume_from),
-                )
-            )
-            state = {
-                **old,
-                "completed_nodes": skip,
-                "failed_nodes": set(),
-                "retries": {},
-                "errors": [],
-                "workdir": str(workdir),
-                "dry_run": False,
-                "_resume_skip": skip,
-            }
-            await cp.adelete_thread(thread_id)
-        else:
-            await cp.adelete_thread(thread_id)
-            state = make_initial_state(
-                workdir=str(workdir), dry_run=False,
-            )
-
+        from sqrlly.cli.main import _seed_state
+        state = await _seed_state(
+            cp, config, str(workdir), resume=resume, resume_from=resume_from,
+            rerun_all=rerun_all, entry=None, thread_id=thread_id,
+        )
         compiled = build_workflow_graph(
             config,
             DispatchExecutor(workdir=str(workdir)),
@@ -261,12 +231,7 @@ def _build_gated_chain(workdir: Path) -> Graph:
 
 
 def _build_fanout_chain(workdir: Path) -> Graph:
-    """Fan-out chain: up -> fan (fans over one item) -> final_nodes=[agg].
-
-    Used to pin that `_final_fan_agg` re-runs when an ancestor is dirty
-    on resume (not frozen by the barrier's `node_id in completed_nodes`
-    guard).
-    """
+    """The join runs after the repeated command settles."""
     worker = _worker_path(workdir)
     manifest = json.dumps({"items": [{"id": "x"}]})
     return Graph(
@@ -276,21 +241,17 @@ def _build_fanout_chain(workdir: Path) -> Graph:
                 "id": "up", "name": "up",
                 "run": [_PYTHON, str(worker), "up"],
             },
-            {
-                "id": "fan", "name": "fan", "depends_on": ["up"],
-                "run": [_ECHO, "-n", manifest],
-                "fan_out": {
-                    "template": {
-                        "run": [_ECHO, "-n", "child-{{id}}"],
-                    },
-                    "final_nodes": [
-                        {
-                            "id": "agg", "name": "agg",
-                            "run": [_PYTHON, str(worker), "agg"],
-                        }
-                    ],
-                },
-            },
+            {"id": "manifest",
+             "run": [_ECHO, "-n", manifest],
+             "depends_on": ["up"]},
+            {"id": "fan",
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "run": [_ECHO, "-n", "child-{{item.id}}"]},
+            {"id": "agg",
+             "name": "agg",
+             "run": [_PYTHON, str(worker), "agg"],
+             "depends_on": ["fan"]},
         ],
     )
 
@@ -328,20 +289,8 @@ class TestResumeDirtyGuards:
         assert _read_runs(tmp_path, "g") == 2
 
     @pytest.mark.asyncio
-    async def test_fan_out_final_reruns_on_resume_from_ancestor(self, tmp_path):
-        """up -> fan (fan-out, final_nodes=[agg]). Phase 1 completes cleanly.
-        Resume with resume_from=up.
-
-        Without Part A fix: _final_fan_agg is in prior_completed but the
-        planner's BFS can't reach it (synthetic id, not in config.nodes) →
-        it stays in skip → barrier sees it in completed_nodes → defers → agg
-        body frozen at 1.
-        Without Part B fix: barrier reads the fully reseeded completed_nodes
-        (includes _final_fan_agg) → defers → agg body frozen at 1.
-        With both fixes: _final_fan_agg is in dirty (via Part A wiring), not
-        in skip, not in seeded completed_nodes → barrier re-runs → agg body
-        count=2.
-        """
+    async def test_join_reruns_on_resume_from_ancestor(self, tmp_path):
+        """The downstream join runs again after resuming from the producer."""
         config = _build_fanout_chain(tmp_path)
         db_path = str(tmp_path / ".checkpoint.db")
         thread_id = "fanout-resume"
@@ -351,15 +300,15 @@ class TestResumeDirtyGuards:
             tmp_path, config, db_path, thread_id, resume=False,
         )
         assert "fan" in result_1["completed_nodes"]
-        assert "_final_fan_agg" in result_1["completed_nodes"]
+        assert "agg" in result_1["completed_nodes"]
         assert _read_runs(tmp_path, "agg") == 1
 
-        # Phase 2: --resume-from up → fan and _final_fan_agg are dirty.
+        # Phase 2: --resume-from up → fan and agg are dirty.
         result_2 = await _run_phase(
             tmp_path, config, db_path, thread_id,
             resume=True, resume_from=("up",),
         )
-        assert "_final_fan_agg" in result_2["completed_nodes"]
+        assert "agg" in result_2["completed_nodes"]
         # Aggregation body re-ran.
         assert _read_runs(tmp_path, "agg") == 2
 
@@ -368,7 +317,7 @@ def _build_failable_fanout(workdir: Path) -> Graph:
     """up -> cfan (fans over alpha/beta/gamma) ; each child runs worker.py
     keyed by the per-item id, so a per-child run-counter (runs_<id>.txt) and
     the fail.txt marker (holding a bare item id) control exactly one child's
-    failure. No final_nodes — the assertion is purely on per-child re-run."""
+    failure. Branch counters record each child execution."""
     worker = _worker_path(workdir)
     manifest = json.dumps(
         {"items": [{"id": "alpha"}, {"id": "beta"}, {"id": "gamma"}]}
@@ -380,15 +329,13 @@ def _build_failable_fanout(workdir: Path) -> Graph:
                 "id": "up", "name": "up",
                 "run": [_PYTHON, str(worker), "up"],
             },
-            {
-                "id": "cfan", "name": "cfan", "depends_on": ["up"],
-                "run": [_ECHO, "-n", manifest],
-                "fan_out": {
-                    "template": {
-                        "run": [_PYTHON, str(worker), "{{id}}"],
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": [_ECHO, "-n", manifest],
+             "depends_on": ["up"]},
+            {"id": "cfan",
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "run": [_PYTHON, str(worker), "{{item.id}}"]},
         ],
     )
 
@@ -409,7 +356,7 @@ class TestResumeFailedChild:
         result_1 = await _run_phase(
             tmp_path, config, db_path, thread_id, resume=False,
         )
-        assert "cfan" in result_1["completed_nodes"]
+        assert "cfan" in result_1["failed_nodes"]
         assert "cfan::alpha" in result_1["completed_nodes"]
         assert "cfan::gamma" in result_1["completed_nodes"]
         assert "cfan::beta" in result_1["failed_nodes"]
@@ -457,33 +404,22 @@ def _build_dup_manifest_fanout(workdir: Path) -> Graph:
     return Graph(
         name="resume-dup-manifest",
         nodes=[
-            {
-                "id": "dp", "name": "dp",
-                "run": [_PYTHON, str(parent)],
-                "fan_out": {
-                    "template": {
-                        "run": [_ECHO, "-n", "child-{{id}}"],
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": [_PYTHON, str(parent)]},
+            {"id": "dp",
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "run": [_ECHO, "-n", "child-{{item.id}}"]},
         ],
     )
 
 
 class TestResumeAfterDuplicateManifest:
     @pytest.mark.asyncio
-    async def test_duplicate_manifest_fails_run_then_bare_resume_recovers(
+    async def test_duplicate_manifest_recovers_after_rerunning_producer(
         self, tmp_path,
     ):
-        """A duplicate-id manifest FAILS the run (the _fan_ dispatcher writes
-        a failure-update rather than raising), landing the parent in
-        failed_nodes. Bare --resume then dirties the parent via prior_failed,
-        it re-fans with a fresh (now-unique) manifest, and the run completes.
-
-        This is the recovery path the design demands: had _fan_ raised, the
-        parent would be completed-but-not-failed in the checkpoint and bare
-        --resume would freeze it and re-fail deterministically forever.
-        """
+        """Correcting the producer allows the failed repeating node to complete."""
         config = _build_dup_manifest_fanout(tmp_path)
         db_path = str(tmp_path / ".checkpoint.db")
         thread_id = "dup-manifest-resume"
@@ -500,11 +436,10 @@ class TestResumeAfterDuplicateManifest:
             "duplicate" in e.get("error", "") for e in result_1["errors"]
         )
 
-        # Phase 2: unique manifest now; bare --resume dirties dp (prior_failed)
-        # → it re-fans and the children run.
+        # Rerun the producer so the repeated node receives its corrected manifest.
         (tmp_path / "dedup.txt").write_text("go")
         result_2 = await _run_phase(
-            tmp_path, config, db_path, thread_id, resume=True,
+            tmp_path, config, db_path, thread_id, resume=True, resume_from=("manifest",),
         )
         assert "dp" in result_2["completed_nodes"]
         assert "dp::a" in result_2["completed_nodes"]
@@ -531,15 +466,12 @@ def _build_drift_fanout(workdir: Path, drift_policy: str = "fail") -> Graph:
     return Graph(
         name="resume-drift-fanout",
         nodes=[
-            {
-                "id": "cfan", "name": "cfan",
-                "run": [_PYTHON, str(dispatcher)],
-                "fan_out": {
-                    "template": {
-                        "run": [_PYTHON, str(worker), "{{id}}"],
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": [_PYTHON, str(dispatcher)]},
+            {"id": "cfan",
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "run": [_PYTHON, str(worker), "{{item.id}}"]},
         ],
         settings={"on_manifest_drift": drift_policy},
     )
@@ -578,38 +510,14 @@ def _build_subgraph_template_fanout(workdir: Path) -> Graph:
     return Graph(
         name="resume-subgraph-template-fanout",
         nodes=[
-            {
-                "id": "cfan", "name": "cfan",
-                "run": [_ECHO, "-n", manifest],
-                "fan_out": {
-                    "template": {
-                        "workflow": {"file": str(member), "with": {"childid": "{{id}}"}},
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": [_ECHO, "-n", manifest]},
+            {"id": "cfan",
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "workflow": {"file": str(member), "with": {"childid": "{{item.id}}"}}},
         ],
     )
-
-
-async def _resume_via_real_seed_state(
-    workdir: Path, config: Graph, db_path: str, thread_id: str,
-) -> dict:
-    """Phase 2 through the REAL cli `_seed_state` (which seeds
-    `_fan_prior_children`), NOT the test's hand-rolled seeding — so the drift
-    guard is exercised end-to-end on the production resume path."""
-    from sqrlly.cli.main import _seed_state
-
-    async with AsyncSqliteSaver.from_conn_string(db_path) as cp:
-        await cp.setup()
-        state = await _seed_state(
-            cp, config, str(workdir),
-            resume=True, resume_from=(), rerun_all=False,
-            entry=None, thread_id=thread_id,
-        )
-        compiled = build_workflow_graph(
-            config, DispatchExecutor(workdir=str(workdir)), checkpointer=cp,
-        )
-        return await run_workflow(compiled, state, config, thread_id=thread_id)
 
 
 class TestResumeManifestDrift:
@@ -637,9 +545,7 @@ class TestResumeManifestDrift:
         # guard halts before any child runs).
         (tmp_path / "fail.txt").unlink()
         (tmp_path / "refan.txt").write_text("go")
-        result_2 = await _resume_via_real_seed_state(
-            tmp_path, config, db_path, thread_id,
-        )
+        result_2 = await _run_phase(tmp_path, config, db_path, thread_id, resume=True, resume_from=("manifest",))
 
         # Parent failed loud with a drift error; NO r2-* child was dispatched.
         assert "cfan" in result_2["failed_nodes"]
@@ -652,11 +558,7 @@ class TestResumeManifestDrift:
 
     @pytest.mark.asyncio
     async def test_drift_to_empty_manifest_fails_loud(self, tmp_path):
-        """The MAXIMAL drift: a resume dispatcher that re-reads its manifest to
-        ZERO items drops every prior branch — the failed child is orphaned and
-        completed siblings vanish. This must fail loud (default), not silently
-        route to the no-items path and complete green. (Regression: the empty-
-        manifest early return must not bypass the drift guard.)"""
+        """Draining the manifest counts as removing every previous item."""
         worker = _worker_path(tmp_path)
         dispatcher = tmp_path / "drain_dispatcher.py"
         dispatcher.write_text(
@@ -668,13 +570,12 @@ class TestResumeManifestDrift:
         )
         config = Graph(
             name="resume-drain-fanout",
-            nodes=[{
-                "id": "cfan", "name": "cfan",
-                "run": [_PYTHON, str(dispatcher)],
-                "fan_out": {
-                    "template": {"run": [_PYTHON, str(worker), "{{id}}"]},
-                },
-            }],
+            nodes=[{"id": "manifest",
+                    "run": [_PYTHON, str(dispatcher)]},
+                   {"id": "cfan",
+                    "for_each": "manifest",
+                    "depends_on": ["manifest"],
+                    "run": [_PYTHON, str(worker), "{{item.id}}"]}],
             settings={"on_manifest_drift": "fail"},
         )
         db_path = str(tmp_path / ".checkpoint.db")
@@ -690,9 +591,7 @@ class TestResumeManifestDrift:
         # silently abandoned.
         (tmp_path / "fail.txt").unlink()
         (tmp_path / "drain.txt").write_text("go")
-        result_2 = await _resume_via_real_seed_state(
-            tmp_path, config, db_path, thread_id,
-        )
+        result_2 = await _run_phase(tmp_path, config, db_path, thread_id, resume=True, resume_from=("manifest",))
         assert "cfan" in result_2["failed_nodes"], (
             "empty-manifest drift silently completed green"
         )
@@ -702,9 +601,7 @@ class TestResumeManifestDrift:
 
     @pytest.mark.asyncio
     async def test_stable_id_resume_does_not_false_fire(self, tmp_path):
-        """The guard's core safety claim on a FLAT-template fan-out: a stable-id
-        fan-out resumed through the REAL `_seed_state` (guard live) must NOT
-        fire — only the failed child re-runs, completed siblings stay frozen."""
+        """Existing successful children keep their original call counts."""
         config = _build_failable_fanout(tmp_path)  # stable ids alpha/beta/gamma
         db_path = str(tmp_path / ".checkpoint.db")
         thread_id = "stable-no-false-fire"
@@ -713,9 +610,7 @@ class TestResumeManifestDrift:
         await _run_phase(tmp_path, config, db_path, thread_id, resume=False)
 
         (tmp_path / "fail.txt").unlink()
-        result_2 = await _resume_via_real_seed_state(
-            tmp_path, config, db_path, thread_id,
-        )
+        result_2 = await _run_phase(tmp_path, config, db_path, thread_id, resume=True)
         # Guard did NOT fire.
         assert "cfan" not in result_2["failed_nodes"]
         assert not any(
@@ -728,14 +623,7 @@ class TestResumeManifestDrift:
 
     @pytest.mark.asyncio
     async def test_subgraph_template_resume_does_not_false_fire(self, tmp_path):
-        """The champion's actual shape — a SUBGRAPH-template fan-out — resumed
-        through the real `_seed_state` with the guard live must NOT false-fire:
-        only the failed branch's subgraph re-runs; siblings freeze. (A branch
-        records only its `<parent>::<item>` id at the top level; the inner
-        subgraph node ids stay in the subgraph's own state, so the top-level
-        drift snapshot sees only the stable branch ids. The `direct_child_ids`
-        inner-id exclusion is defensive; its own contract is pinned by
-        `test_manifest_drift.py::TestDirectChildIds`.)"""
+        """Resuming the repeated workflow reruns only its failed item."""
         config = _build_subgraph_template_fanout(tmp_path)
         db_path = str(tmp_path / ".checkpoint.db")
         thread_id = "subgraph-no-false-fire"
@@ -753,9 +641,7 @@ class TestResumeManifestDrift:
 
         # Phase 2: resume through the real seed path — guard must NOT fire.
         (tmp_path / "fail.txt").unlink()
-        result_2 = await _resume_via_real_seed_state(
-            tmp_path, config, db_path, thread_id,
-        )
+        result_2 = await _run_phase(tmp_path, config, db_path, thread_id, resume=True)
         assert "cfan" not in result_2["failed_nodes"]
         assert not any(
             "drift" in e.get("error", "").lower() for e in result_2["errors"]
@@ -779,12 +665,27 @@ class TestResumeManifestDrift:
 
         (tmp_path / "fail.txt").unlink()
         (tmp_path / "refan.txt").write_text("go")
-        result_2 = await _resume_via_real_seed_state(
-            tmp_path, config, db_path, thread_id,
-        )
+        result_2 = await _run_phase(tmp_path, config, db_path, thread_id, resume=True, resume_from=("manifest",))
 
         # warn let the drifted manifest through: r2-* children ran, run clean.
         assert result_2["failed_nodes"] == set()
         assert _read_runs(tmp_path, "r2-alpha") == 1
         assert _read_runs(tmp_path, "r2-beta") == 1
         assert _read_runs(tmp_path, "r2-gamma") == 1
+
+
+async def test_clean_resume_expands_previously_empty_file(tmp_path):
+    source = tmp_path / "items.json"
+    source.write_text("[]")
+    config = Graph(nodes=[
+        {"id": "build", "for_each": {"file": "items.json"}, "run": ["printf", "%s", "{{item}}"]},
+        {"id": "join", "depends_on": ["build"], "run": ["printf", "%s", "{{build}}"]},
+    ])
+    db = str(tmp_path / "checkpoint.db")
+    before = await _run_phase(tmp_path, config, db, "empty-then-added", resume=False)
+    assert json.loads(before["node_outputs"]["join"]) == []
+    source.write_text('["new"]')
+    after = await _run_phase(tmp_path, config, db, "empty-then-added", resume=True)
+    assert not after["failed_nodes"], after["errors"]
+    assert json.loads(after["node_outputs"]["join"]) == ["new"]
+    assert len([key for key in after["completed_nodes"] if key.startswith("build::")]) == 1

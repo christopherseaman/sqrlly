@@ -13,8 +13,12 @@ from sqrlly.schema.models import Graph
 async def test_join_reads_promoted_branch_files(tmp_path):
     init_git_repo(tmp_path)
     config = Graph(nodes=[
-        {"id": "build", "run": ["echo", json.dumps([{"id": "a"}, {"id": "b"}])],
-         "fan_out": {"template": {"run": ["sh", "-c", "echo {{id}} > {{id}}.txt"]}}},
+        {"id": "manifest",
+         "run": ["echo", json.dumps([{"id": "a"}, {"id": "b"}])]},
+        {"id": "build",
+         "for_each": "manifest",
+         "depends_on": ["manifest"],
+         "run": ["sh", "-c", "echo {{item.id}} > {{item.id}}.txt"]},
         {"id": "read", "depends_on": ["build"], "run": ["cat", "a.txt", "b.txt"]},
     ])
     executor = ForemanExecutor(DispatchExecutor(str(tmp_path)), str(tmp_path))

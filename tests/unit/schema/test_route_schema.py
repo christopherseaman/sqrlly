@@ -36,7 +36,7 @@ def test_route_destinations_and_static_fallback():
     ({"route": [{"then": ["retry", "x"]}]}, "single"),
     ({"route": [{"then": "retry", "max_attempts": 0}]}, "greater than 0"),
     ({"route": [{"else": "ghost"}]}, "unknown node ghost"),
-    ({"fan_out": {}, "route": [{"else": "x"}]}, "fan_out.*route"),
+    ({"run": "true", "for_each": "items", "route": [{"else": "x"}]}, "for_each.*route"),
 ])
 def test_invalid_route(fields, error):
     with pytest.raises(ValidationError, match=error):

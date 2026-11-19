@@ -11,7 +11,7 @@ EXPECTED = [
     "sqrlly/_examples/jokes/select.md",
     "sqrlly/_examples/jokes/gates/validate_jokes.py",
     "sqrlly/_examples/route_classify/workflow.yaml",
-    "sqrlly/_examples/route_classify/scripts/triage.py",
+    "sqrlly/_examples/route_classify/category.json",
     "sqrlly/_examples/explicit_join.yaml",
     "sqrlly/_examples/pipeline_style/workflow.yaml",
     # absurd-paper: run-essential subset.

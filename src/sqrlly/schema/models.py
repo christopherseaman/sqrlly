@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from difflib import get_close_matches
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -18,85 +19,9 @@ from pydantic import (
 
 from sqrlly.schema.references import assign_ancestors, validate_references
 from sqrlly.schema.v1 import (
-    KINDS, RESERVED, Agent, Case, Defaults, Eval, Name, Outputs, Prompt, Run, Workflow, WorkflowLoader, Worktree,
-    repository_root, require_reference,
+    KINDS, RESERVED, Agent, Case, Defaults, Eval, File, Name, Outputs, Prompt, Run,
+    Workflow, WorkflowLoader, Worktree, repository_root, require_reference,
 )
-
-
-
-
-class KindStep(BaseModel):
-    outputs: Outputs | None = None
-    model_config = ConfigDict(extra="forbid")
-    agent: Agent | None = None
-    llm: Prompt | None = None
-    run: Run | None = None
-    workflow: Workflow | None = None
-
-    eval: Eval | None = None
-    route: list[Case] | None = Field(default=None, min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_route(self) -> Self:
-        if self.outputs:
-            if self.llm and "files" in self.outputs.model_fields_set:
-                raise ValueError("llm cannot declare outputs.files")
-            if self.workflow and self.outputs.schema_file:
-                raise ValueError("workflow cannot declare outputs.schema")
-            if not self.kind:
-                raise ValueError("outputs requires an executable kind")
-        if self.eval and (self.eval.agent or self.eval.llm) and not self.route:
-            kind = "agent" if self.eval.agent else "llm"
-            raise ValueError(f"{kind} eval requires a route")
-        if any(case.otherwise for case in (self.route or [])[:-1]):
-            raise ValueError("else must be the last route case")
-        return self
-
-    @model_validator(mode="before")
-    @classmethod
-    def _count_kinds(cls, value: Any) -> Any:
-        if isinstance(value, dict) and len(value.keys() & set(KINDS)) > 1:
-            raise ValueError(f"choose at most one kind: {', '.join(KINDS)}")
-        if isinstance(value, dict):
-            for key in value:
-                if key not in cls.model_fields:
-                    closest = get_close_matches(str(key), cls.model_fields, n=1, cutoff=0)[0]
-                    raise ValueError(f"unknown key {key!r}, closest legal key: {closest}")
-                if key in KINDS and value[key] is None:
-                    raise ValueError(f"{key} requires a value")
-        return value
-
-    @property
-    def kind(self) -> str | None:
-        return next((kind for kind in KINDS if getattr(self, kind) is not None), None)
-
-
-class FanOutTemplate(KindStep):
-    """Template for nodes spawned during fan-out over a manifest."""
-    model_config = ConfigDict(extra="forbid")
-
-
-class FanOutFinalNode(KindStep):
-    """A node that runs after fan-out completes, consuming aggregate output."""
-    model_config = ConfigDict(extra="forbid")
-    id: Name
-    name: Name = Field(default_factory=lambda data: data["id"])
-    description: str | None = None
-
-
-class FanOut(BaseModel):
-    """Fan-out configuration: spawn N parallel instances over a manifest.
-
-    The presence of the ``fan_out:`` block on a node IS the activation —
-    there is no separate enable flag. To disable fan-out for a node,
-    remove the block entirely. (The legacy ``enabled: bool`` field was
-    removed in the post-Stage-5c audit because ``fan_out: { template:
-    ... }`` with ``enabled: false`` was a silent author footgun.)
-    """
-    model_config = ConfigDict(extra="forbid")
-    manifest_path: str | None = None
-    template: FanOutTemplate | None = None
-    final_nodes: list[FanOutFinalNode] = []
 
 
 class Settings(BaseModel):
@@ -160,16 +85,59 @@ class Settings(BaseModel):
     worktree_setup: list[str] = []
 
 
-class Node(KindStep):
+class Node(BaseModel):
+    outputs: Outputs | None = None
+    model_config = ConfigDict(extra="forbid")
+    agent: Agent | None = None
+    llm: Prompt | None = None
+    run: Run | None = None
+    workflow: Workflow | None = None
+
+    eval: Eval | None = None
+    route: list[Case] | None = Field(default=None, min_length=1)
     _ancestors: list[str] = PrivateAttr(default_factory=list)
     id: Name
     name: Name = Field(default_factory=lambda data: data["id"])
     description: str | None = None
     depends_on: list[str] = []
-    fan_out: FanOut | None = None
+    for_each: Name | File | None = None
     timeout: float | None = None
     worktree: Worktree | None = None
     promote: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate_route(self) -> Self:
+        if self.outputs:
+            if self.llm and "files" in self.outputs.model_fields_set:
+                raise ValueError("llm cannot declare outputs.files")
+            if self.workflow and self.outputs.schema_file:
+                raise ValueError("workflow cannot declare outputs.schema")
+            if not self.kind:
+                raise ValueError("outputs requires an executable kind")
+        if self.eval and (self.eval.agent or self.eval.llm) and not self.route:
+            kind = "agent" if self.eval.agent else "llm"
+            raise ValueError(f"{kind} eval requires a route")
+        if any(case.otherwise for case in (self.route or [])[:-1]):
+            raise ValueError("else must be the last route case")
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _count_kinds(cls, value: Any) -> Any:
+        if isinstance(value, dict) and len(value.keys() & set(KINDS)) > 1:
+            raise ValueError(f"choose at most one kind: {', '.join(KINDS)}")
+        if isinstance(value, dict):
+            for key in value:
+                if key not in cls.model_fields:
+                    closest = get_close_matches(str(key), cls.model_fields, n=1, cutoff=0)[0]
+                    raise ValueError(f"unknown key {key!r}, closest legal key: {closest}")
+                if key in KINDS and value[key] is None:
+                    raise ValueError(f"{key} requires a value")
+        return value
+
+    @property
+    def kind(self) -> str | None:
+        return next((kind for kind in KINDS if getattr(self, kind) is not None), None)
 
     @model_validator(mode="after")
     def _worktree_kind(self) -> Self:
@@ -182,16 +150,14 @@ class Node(KindStep):
         return self
 
     @model_validator(mode="after")
-    def _fan_out_route_exclusive(self) -> "Node":
-        # fan_out and route pick incompatible dispatchers: a gated fan-out
-        # parent goes to _fan_<id> while route goes to _route_<id>, and an
-        # ungated node fires BOTH static out-edges (double dispatch). To
-        # branch after a fan-out, route from a downstream node instead.
-        if self.fan_out is not None and self.route is not None:
-            raise ValueError(
-                f"Node {self.id!r} sets both fan_out and route — mutually "
-                f"exclusive; route from a node downstream of the fan-out."
-            )
+    def _repetition(self) -> Self:
+        if self.for_each is not None:
+            if self.route:
+                raise ValueError("for_each and route cannot appear together")
+            if not self.kind:
+                raise ValueError("for_each requires an executable kind")
+        elif "for_each" in self.model_fields_set:
+            raise ValueError("for_each requires a source")
         return self
 
     def effective_timeout(self, settings: Settings) -> float | None:
@@ -228,7 +194,7 @@ class Graph(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Name = "workflow"
-    nodes: list[Node]
+    nodes: list[Node] = Field(min_length=1)
     settings: Settings = Settings()
 
     @property
@@ -257,38 +223,34 @@ class Graph(BaseModel):
             raise ValueError("agent tool-name lists require provider: anthropic")
         node_ids = {node.id for node in self.nodes}
         for node in self.nodes:
-            steps: list[KindStep] = [node]
-            if node.fan_out:
-                if node.fan_out.template:
-                    steps.append(node.fan_out.template)
-                steps.extend(node.fan_out.final_nodes)
-            for step in steps:
-                if isinstance(step, (Node, FanOutFinalNode)) and step.id in RESERVED:
-                    raise ValueError(f"reserved node id: {step.id}")
-                for payload in (step, step.eval):
-                    if payload is None:
-                        continue
-                    if payload.agent:
-                        agent = payload.agent
-                        tools = defaults.tools if agent.tools is None else agent.tools
-                        if isinstance(tools, list) and (agent.provider or defaults.provider) != "anthropic":
-                            raise ValueError(f"{node.id}: agent tool-name lists require provider: anthropic")
-                    prompt = payload.agent or payload.llm
-                    if directory and prompt and prompt.prompt:
-                        require_reference(root, directory / self.settings.prompts / prompt.prompt,
-                                          f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
-                    if directory and payload.outputs and payload.outputs.schema_file:
-                        schema_path = directory / payload.outputs.schema_file
-                        label = f"{node.id}.eval" if payload is step.eval else node.id
-                        require_reference(root, schema_path, f"{label}.outputs.schema")
-                        payload.outputs.load_schema(schema_path, root or directory)
-                if directory and step.workflow:
-                    require_reference(root, directory / step.workflow.file, f"{node.id}.workflow",
-                                      ' ({text: "..."} is for inline agent or llm prompts)')
-                for case in step.route or []:
-                    for target in case.targets:
-                        if target not in node_ids and target not in RESERVED:
-                            raise ValueError(f"{node.id}.route references unknown node {target}")
+            if node.id in RESERVED or any(char in node.id for char in (":", "|")):
+                raise ValueError(f"reserved node id: {node.id}")
+            if directory and isinstance(node.for_each, File):
+                require_reference(root, directory / node.for_each.file, f"{node.id}.for_each.file")
+            for payload in (node, node.eval):
+                if payload is None:
+                    continue
+                if payload.agent:
+                    agent = payload.agent
+                    tools = defaults.tools if agent.tools is None else agent.tools
+                    if isinstance(tools, list) and (agent.provider or defaults.provider) != "anthropic":
+                        raise ValueError(f"{node.id}: agent tool-name lists require provider: anthropic")
+                prompt = payload.agent or payload.llm
+                if directory and prompt and prompt.prompt:
+                    require_reference(root, directory / self.settings.prompts / prompt.prompt,
+                                      f"{node.id}.prompt", ' (for inline prompts use {text: "..."})')
+                if directory and payload.outputs and payload.outputs.schema_file:
+                    schema_path = directory / payload.outputs.schema_file
+                    label = f"{node.id}.eval" if payload is node.eval else node.id
+                    require_reference(root, schema_path, f"{label}.outputs.schema")
+                    payload.outputs.load_schema(schema_path, root or directory)
+            if directory and node.workflow:
+                require_reference(root, directory / node.workflow.file, f"{node.id}.workflow",
+                                  ' ({text: "..."} is for inline agent or llm prompts)')
+            for case in node.route or []:
+                for target in case.targets:
+                    if target not in node_ids and target not in RESERVED:
+                        raise ValueError(f"{node.id}.route references unknown node {target}")
         return self
 
     @model_validator(mode="after")
@@ -312,6 +274,10 @@ class Graph(BaseModel):
                         f"Node '{node.id}' depends on '{dep}' "
                         f"which references nonexistent node"
                     )
+        try:
+            TopologicalSorter({node.id: node.depends_on for node in self.nodes}).prepare()
+        except CycleError as exc:
+            raise ValueError(f"depends_on cycle: {exc.args[1]}") from exc
         assign_ancestors(self)
         return self
 

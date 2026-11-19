@@ -4,7 +4,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from sqrlly.schema.v1 import load_workflow
+from sqrlly.schema.models import load_workflow
 
 
 def write_workflow(directory, nodes, filename="flow.yaml", **fields):

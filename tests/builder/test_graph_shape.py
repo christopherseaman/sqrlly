@@ -243,81 +243,17 @@ class TestEvaluationNodeShape:
         assert _edges(graph) == {(START, "p1"), ("p1", END)}
 
 
-class TestDynamicGraphShape:
-    def _dynamic_phase(self, template_evaluation=None):
-        template = {"agent": {"text": "test"}}
-        if template_evaluation is not None:
-            template["eval"] = template_evaluation
-        dsc = {
-            "template": template,
-            "final_nodes": [
-                {"id": "f0", "name": "F0", "agent": {"text": "test"}},
-            ],
-        }
-        return {
-            "id": "p",
-            "name": "P",
-            "run": ["/usr/bin/echo", "manifest"],
-            "fan_out": dsc,
-        }
-
-    def test_ungated_template_registers_template_and_final_nodes(self):
-        config = make_config([self._dynamic_phase()])
-        graph = build_workflow_graph(config)
-        nodes = graph.get_graph().nodes
-        assert "_sub_p" in nodes and "_final_p_f0" in nodes
-        # Fan-out dispatch is a _fan_<id> node, not conditional edges.
-        assert "_fan_p" in nodes
-        edges = _edges(graph)
-        # Ungated parent: plain edge parent → _fan_<id>.
-        assert ("p", "_fan_p") in edges
-        # No conditional edges for fan-out dispatch (Command(goto=[Send...])).
-        assert _conditional_edges(graph) == set()
-
-    def test_gated_template_registers_nodes_and_parent_fanout(self):
-        # The evaluation is on the TEMPLATE (children), so the PARENT `p`
-        # is ungated: exec → _fan_<id> plain edge, no _eval_p gate on the
-        # parent. Child gates live inside the _sub_ inline retry loop.
-        config = make_config([self._dynamic_phase(
-            template_evaluation={"run": ["true"]},
-        )])
-        graph = build_workflow_graph(config)
-        nodes = graph.get_graph().nodes
-        assert "_sub_p" in nodes
-        assert "_fan_p" in nodes
-        assert "_eval_p" not in nodes  # parent ungated
-        edges = _edges(graph)
-        assert ("p", "_fan_p") in edges
-        # No conditional edges anywhere — _fan_ is Command-driven.
-        assert _conditional_edges(graph) == set()
-
-    def _gated_parent_phase(self):
-        """A fan-out whose PARENT carries the evaluation (parent-gate)."""
-        return {
-            "id": "p",
-            "name": "P",
-            "run": ["/usr/bin/echo", "manifest"],
-            "eval": {"run": ["true"]},
-            "fan_out": {
-                "template": {"agent": {"text": "test"}},
-                "final_nodes": [
-                    {"id": "f0", "name": "F0", "agent": {"text": "test"}},
-                ],
-            },
-        }
-
-    def test_parent_gated_fanout_wires_gate_to_fan(self):
-        """A parent-gated fan-out: exec → _eval_<id> gate, gate gotoes
-        _fan_<id> on pass. No _decide_<id>, no conditional edges."""
-        config = make_config([self._gated_parent_phase()])
-        graph = build_workflow_graph(config)
-        nodes = graph.get_graph().nodes
-        assert "_eval_p" in nodes
-        assert "_decide_p" not in nodes
-        assert "_fan_p" in nodes
-        edges = _edges(graph)
-        assert ("p", "_eval_p") in edges
-        assert _conditional_edges(graph) == set()
+class TestRepeatedNodeShape:
+    def test_producer_worker_and_join_compile(self):
+        config = make_config([
+            {"id": "plan", "run": ["echo", "[]"]},
+            {"id": "build", "depends_on": ["plan"], "for_each": "plan", "run": ["echo", "{{item}}"]},
+            {"id": "report", "depends_on": ["build"], "run": ["echo", "done"]},
+        ])
+        edges = _edges(build_workflow_graph(config))
+        assert (START, "plan") in edges
+        assert (START, "build") not in edges
+        assert (START, "report") not in edges
 
 
 class TestCycleDetection:
@@ -335,7 +271,7 @@ class TestCycleDetection:
             )
 
     def test_circular_dependency_rejected(self):
-        with pytest.raises(ValueError, match="[Cc]ircular"):
+        with pytest.raises(ValueError, match="depends_on cycle"):
             config = make_config(
                 [
                     {"id": "a", "name": "A", "agent": {"text": "test"}, "depends_on": ["b"]},
@@ -345,7 +281,7 @@ class TestCycleDetection:
             build_workflow_graph(config)
 
     def test_three_node_cycle_rejected(self):
-        with pytest.raises(ValueError, match="[Cc]ircular"):
+        with pytest.raises(ValueError, match="depends_on cycle"):
             config = make_config(
                 [
                     {"id": "a", "name": "A", "agent": {"text": "test"}, "depends_on": ["c"]},

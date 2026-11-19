@@ -52,6 +52,7 @@ class ForemanExecutor:
         self._recover = recover
         self.reexecute: set[str] = set()
         self._dispatched: set[str] = set()
+        self._fan_children: set[str] = set()
         self._memory_poll_s = memory_poll_interval_s
         self.run_id = run or uuid.uuid4().hex
         excluded = [str(self._prefix / ".sqrlly")]
@@ -73,6 +74,10 @@ class ForemanExecutor:
             return node_id
         return json.dumps([*self._names, node_id], separators=(",", ":"))
 
+    def start_fan_child(self, child_id: str) -> None:
+        # Only the join can remove these trees, after all child success stamps are checkpointed.
+        self._fan_children.add(self._key(child_id))
+
     def _tree(self, key: str) -> Path:
         digest = hashlib.sha256(self.snapshots.ref(key, "in").encode()).hexdigest()
         return self._pool / f"wt-{digest}"
@@ -90,7 +95,7 @@ class ForemanExecutor:
         if self._pool.resolve() != self._pool:
             raise RuntimeError(f"Worktree pool has a symlink ancestor: {self._pool}")
         if not tree.exists():
-            if self._recover and key not in self.reexecute and key not in self._dispatched:
+            if self._recover and key not in self.reexecute and key not in self._dispatched and key not in self._fan_children:
                 out = self.snapshots.ref(key, "out")
                 if _git(self._root, "rev-parse", "--revs-only", out):
                     raise RuntimeError(f"Previous dispatch already produced {out}; checkpoint completion is missing. Inspect the ref before a fresh run.")

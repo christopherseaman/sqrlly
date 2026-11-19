@@ -8,21 +8,20 @@ langgraph imports.
 from __future__ import annotations
 
 import json
-import logging
+import hashlib
+from urllib.parse import quote
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqrlly.runtime._json import extract_json
 from sqrlly.runtime.result import ManifestError
 from sqrlly.runtime.state import WorkflowState
 from sqrlly.schema.models import Node
+from sqrlly.schema.references import split_manifest_source
+from sqrlly.schema.v1 import File, repository_root, require_reference
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     from sqrlly.schema.models import Graph
-
-logger = logging.getLogger(__name__)
 
 
 def find_terminal_nodes(config: "Graph") -> list[str]:
@@ -38,26 +37,6 @@ def find_terminal_nodes(config: "Graph") -> list[str]:
     return [n.id for n in config.nodes if n.id not in depended_on]
 
 
-def direct_child_ids(parent_id: str, node_ids: Iterable[str]) -> set[str]:
-    """A fan-out parent's DIRECT branch ids (``<parent>::<item>``) in ``node_ids``.
-
-    Excludes the bare parent, other parents, and any deeper
-    ``<parent>::<item>::<inner>`` id. Today a subgraph-template branch records
-    only its own ``<parent>::<item>`` id at the top level — inner subgraph node
-    ids stay in the subgraph's own state (``compile/subgraph.py::make_subgraph_node``
-    returns just the branch id), so they never reach ``completed_nodes`` — but
-    this exclusion is DEFENSIVE: if an inner id ever surfaced at the top level
-    (e.g. a future fan-out-in-subgraph resume), counting it as a branch child
-    would make the drift guard false-fire on the (working) subgraph-template
-    shape.
-    """
-    prefix = f"{parent_id}::"
-    return {
-        nid for nid in node_ids
-        if nid.startswith(prefix) and "::" not in nid[len(prefix):]
-    }
-
-
 def manifest_drift(prior_children: set[str], new_child_ids: set[str]) -> set[str]:
     """Prior fan-out branch ids NOT covered by the freshly read manifest.
 
@@ -69,96 +48,68 @@ def manifest_drift(prior_children: set[str], new_child_ids: set[str]) -> set[str
     return set(prior_children) - set(new_child_ids)
 
 
-def _normalize_items(items: object) -> list[dict]:
-    """Coerce a manifest's items into a list of objects.
+def _array(value: Any, *, allow_wrapper: bool) -> list:
+    if allow_wrapper and isinstance(value, dict):
+        value = value.get("items")
+    if not isinstance(value, list):
+        raise ValueError("manifest must be a JSON array")
+    return value
 
-    A bare scalar item (string / number / bool) becomes
-    ``{"id": str(item)}`` so a manifest like ``["alpha", "beta"]`` fans
-    out with ``{{id}}`` bound per branch — rather than crashing on
-    ``item.get("id")``. A non-list manifest, or an item that is neither
-    object nor scalar (a nested list / null), is an author error and
-    raises.
-    """
-    if not isinstance(items, list):
-        raise ValueError(
-            "fan-out manifest must be a JSON array (or {\"items\": [...]}), "
-            f"got {type(items).__name__}"
-        )
-    out: list[dict] = []
-    for i, item in enumerate(items):
-        if isinstance(item, dict):
-            if "id" not in item:
-                # An id-less dict item collapses every branch onto one
-                # `<parent>::unknown` child (the fan-out body keys child_id
-                # off item.get("id", "unknown")). Warn loudly — this is a
-                # silent N→1 fan-out collapse the author rarely intends.
-                logger.warning(
-                    "fan-out manifest item %d is missing 'id' (%r) — every "
-                    "such item collapses onto a single '::unknown' branch; "
-                    "give each manifest item a unique 'id'.",
-                    i, item,
-                )
-            out.append(item)
-        elif isinstance(item, (str, int, float, bool)):
-            out.append({"id": str(item)})
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def _child_ids(parent: str, items: list) -> list[tuple[str, Any]]:
+    branches = []
+    seen = set()
+    counts = {}
+    for item in items:
+        if isinstance(item, dict) and "id" in item:
+            raw = item["id"]
+            # Preserve ordinary string ids and reserve @ and ! for the other namespaces.
+            key = quote(raw, safe="", errors="surrogatepass") if isinstance(raw, str) else "!" + quote(_canonical(raw), safe="")
         else:
-            raise ValueError(
-                f"fan-out manifest item {i} must be an object or scalar, "
-                f"got {type(item).__name__}: {item!r}"
-            )
-    return out
+            digest = hashlib.sha256(_canonical(item).encode("ascii")).hexdigest()
+            ordinal = counts.get(digest, 0)
+            counts[digest] = ordinal + 1
+            key = f"@{digest}.{ordinal}"
+        child_id = f"{parent}::{key}"
+        if child_id in seen:
+            raise ValueError(f"duplicate manifest id {child_id!r}")
+        seen.add(child_id)
+        branches.append((child_id, item))
+    return branches
 
 
-def _read_manifest(state: WorkflowState, node: Node) -> list[dict]:
-    """Resolve the manifest a fan-out parent dispatches over.
-
-    Two-step resolution: first try parsing the parent's own
-    ``node_outputs`` entry as JSON (canonical for runtime-generated
-    manifests); on parse failure or missing key, fall back to the
-    on-disk path declared in ``fan_out.manifest_path`` (canonical for
-    static manifests checked into the repo). Returns ``[]`` on miss
-    so the conditional-edge router can route to ``no_items`` cleanly.
-    Items are normalized via :func:`_normalize_items` (scalars coerced
-    to ``{"id": ...}``).
-    """
-    output = state.get("node_outputs", {}).get(node.id, "")
+def _read_manifest(
+    state: WorkflowState, node: Node, *, workflow_dir: Path | str | None = None,
+) -> list[tuple[str, Any]]:
+    """Read the declared source and pair each raw JSON value with its stable branch id."""
+    source = node.for_each
     try:
-        data = json.loads(extract_json(output))
-        if isinstance(data, dict) and "items" in data:
-            return _normalize_items(data["items"])
-        if isinstance(data, list):
-            return _normalize_items(data)
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    if node.fan_out and node.fan_out.manifest_path:
-        path = node.fan_out.manifest_path
-        manifest_file = Path(state.get("workdir", ".")) / path
-        # A declared manifest_path that can't be read is an author error
-        # (typo / missing file / bad JSON) — halt loudly rather than
-        # silently fanning out over zero items. (An empty-but-valid
-        # manifest still returns [] below and routes to no_items.)
-        try:
-            raw = manifest_file.read_text()
-        except (FileNotFoundError, OSError) as e:
-            raise ManifestError(
-                f"fan-out '{node.id}': manifest_path {path!r} could not be "
-                f"read under {state.get('workdir', '.')!r} ({e})"
-            )
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise ManifestError(
-                f"fan-out '{node.id}': manifest_path {path!r} is not valid "
-                f"JSON ({e})"
-            )
-        if isinstance(data, dict) and "items" in data:
-            return _normalize_items(data["items"])
-        if isinstance(data, list):
-            return _normalize_items(data)
-        raise ManifestError(
-            f"fan-out '{node.id}': manifest_path {path!r} must be a JSON "
-            f"array or object with an 'items' array, got {type(data).__name__}"
-        )
-
-    return []
+        if isinstance(source, File):
+            directory = Path(workflow_dir or state.get("workdir", ".")).resolve()
+            path = directory / source.file
+            require_reference(repository_root(directory), path, "for_each.file")
+            items = _array(json.loads(path.read_text(encoding="utf-8")), allow_wrapper=True)
+        else:
+            if not isinstance(source, str):
+                raise ValueError("missing manifest source")
+            structured = state.get("node_structured_outputs", {})
+            outputs = state.get("node_outputs", {})
+            root, fields = split_manifest_source(source, node._ancestors or node.depends_on)
+            if root in structured:
+                value = structured[root]
+                for field in fields:
+                    if not isinstance(value, dict) or field not in value:
+                        raise ValueError(f"source {source!r} has no field {field!r}")
+                    value = value[field]
+                items = _array(value, allow_wrapper=False)
+            elif not fields and root in outputs:
+                items = _array(json.loads(extract_json(outputs[root])), allow_wrapper=True)
+            else:
+                raise ValueError(f"source {source!r} has no output")
+        return _child_ids(node.id, items)
+    except (ValueError, OSError, TypeError, UnicodeError) as exc:
+        raise ManifestError(f"for_each {node.id!r} ({source}): {exc}") from exc

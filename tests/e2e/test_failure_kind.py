@@ -141,15 +141,12 @@ async def test_subgraph_fanout_child_infra_abort_settles(tmp_path):
     manifest = json.dumps({"items": [{"id": "alpha"}, {"id": "beta"}]})
     config = Graph(
         name="sg-fanout-infra",
-        nodes=[{
-            "id": "cfan", "name": "cfan",
-            "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"],
-            "fan_out": {
-                "template": {
-                    "workflow": {"file": "member.yaml", "with": {"x": "{{id}}"}},
-                },
-            },
-        }],
+        nodes=[{"id": "manifest",
+                "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"]},
+               {"id": "cfan",
+                "for_each": "manifest",
+                "depends_on": ["manifest"],
+                "workflow": {"file": "member.yaml", "with": {"x": "{{item.id}}"}}}],
         settings={"worktree_setup": ["sh -c 'exit 1'"]},
     )
     buf = StringIO()

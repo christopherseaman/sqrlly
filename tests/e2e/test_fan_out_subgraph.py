@@ -1,24 +1,4 @@
-"""End-to-end per-child subgraph fan-out (Stage 5b carve-out).
-
-Each fan-out manifest item drives one Send branch through a compiled
-subgraph instead of a single executor call. Demonstrates:
-
-    1. test_fan_out_per_child_subgraph_dispatch — 2-item manifest, each
-       Send runs a 2-node draft→critique subgraph; downstream sees both
-       items' terminal outputs in `child_outputs`.
-    2. test_fan_out_subgraph_failure_surfaces_to_parent — a subgraph
-       node that fails (real `false` exit code) flips that branch's
-       child_id into `failed_nodes` on the parent.
-    3. test_fan_out_subgraph_cycle_detected_at_compile_time — a fan-out
-       template referencing a cyclic subgraph chain raises
-       SubgraphCycleError before any execution.
-    4. test_fan_out_subgraph_inputs_render_per_item — each Send branch
-       renders its own manifest fields into the subgraph's `inputs:`,
-       so per-item state never leaks between branches.
-
-All tests use real DispatchExecutor + real subprocesses (echo / false);
-no mocks of any kind.
-"""
+"""Execute a child workflow for each item and collect its terminal output."""
 
 from __future__ import annotations
 
@@ -53,14 +33,12 @@ def _parent_with_fan_out_subgraph(items, sub_yaml_name="single.yaml",
     return {
         "name": "Parent",
         "nodes": [
-            {
-                "id": "manifest_emitter",
-                "name": "Manifest Emitter",
-                "run": [_ECHO, "-n", manifest],
-                "fan_out": {
-                    "template": {"workflow": workflow},
-                },
-            },
+            {"id": "manifest",
+             "run": [_ECHO, "-n", manifest]},
+            {"id": "manifest_emitter",
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "workflow": workflow},
         ],
     }
 
@@ -69,7 +47,7 @@ def _parent_with_fan_out_subgraph(items, sub_yaml_name="single.yaml",
 async def test_fan_out_per_child_subgraph_dispatch(tmp_path):
     """2-item manifest → 2 Send branches → each runs a 2-node subgraph.
 
-    Asserts both items' terminal outputs land in `child_outputs[parent::id]`.
+    Asserts both items' terminal outputs land in `node_outputs[parent::id]`.
     """
     # 2-node subgraph: step1 echoes input, step2 echoes f"final-{step1}".
     _yaml(tmp_path / "single.yaml", {
@@ -94,7 +72,7 @@ async def test_fan_out_per_child_subgraph_dispatch(tmp_path):
         {"id": "beta", "topic": "BETA"},
     ]
     parent_dict = _parent_with_fan_out_subgraph(
-        items, inputs_decl={"topic": "{{topic}}"},
+        items, inputs_decl={"topic": "{{item.topic}}"},
     )
     parent_config = Graph(**parent_dict)
     executor = DispatchExecutor(workdir=str(tmp_path))
@@ -108,8 +86,8 @@ async def test_fan_out_per_child_subgraph_dispatch(tmp_path):
     # which echoes "final-<topic>\n" — but echo strips the literal
     # newline because subprocess buffers it. Either way "final-ALPHA"
     # appears in the alpha-branch output, "final-BETA" in beta-branch.
-    alpha_output = result["child_outputs"]["manifest_emitter::alpha"]
-    beta_output = result["child_outputs"]["manifest_emitter::beta"]
+    alpha_output = result["node_outputs"]["manifest_emitter::alpha"]
+    beta_output = result["node_outputs"]["manifest_emitter::beta"]
     assert "final-ALPHA" in alpha_output, f"alpha got: {alpha_output!r}"
     assert "final-BETA" in beta_output, f"beta got: {beta_output!r}"
     # Per-item isolation: alpha branch must NOT see beta's topic
@@ -209,15 +187,15 @@ async def test_fan_out_subgraph_inputs_render_per_item(tmp_path):
     ]
     parent_dict = _parent_with_fan_out_subgraph(
         items, sub_yaml_name="persona_sub.yaml",
-        inputs_decl={"persona": "{{persona}}"},
+        inputs_decl={"persona": "{{item.persona}}"},
     )
     parent_config = Graph(**parent_dict)
     executor = DispatchExecutor(workdir=str(tmp_path))
     graph = build_workflow_graph(parent_config, executor, _base_dir=tmp_path)
     result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
 
-    x_out = result["child_outputs"]["manifest_emitter::x"]
-    y_out = result["child_outputs"]["manifest_emitter::y"]
+    x_out = result["node_outputs"]["manifest_emitter::x"]
+    y_out = result["node_outputs"]["manifest_emitter::y"]
     assert "hello-wizard" in x_out
     assert "hello-rogue" in y_out
     # Cross-branch isolation

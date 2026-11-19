@@ -16,11 +16,12 @@ from sqrlly.schema.models import Graph
 @pytest.mark.parametrize("worktree", ["off", "isolated"])
 async def test_run_children_obey_worktree_override(tmp_path, worktree):
     init_git_repo(tmp_path)
-    node = {"id": "build", "worktree": worktree, "run": ["echo", json.dumps([{"id": "a"}])],
-            "fan_out": {"template": {"run": ["pwd"]}}}
+    nodes = [{"id": "manifest", "run": ["echo", json.dumps([{"id": "a"}])]},
+             {"id": "build", "worktree": worktree, "for_each": "manifest",
+              "depends_on": ["manifest"], "run": ["pwd"]}]
     executor = ForemanExecutor(DispatchExecutor(str(tmp_path)), str(tmp_path))
     try:
-        graph = build_workflow_graph(Graph(nodes=[node]), executor, _base_dir=tmp_path)
+        graph = build_workflow_graph(Graph(nodes=nodes), executor, _base_dir=tmp_path)
         result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
         path = Path(result["node_outputs"]["build::a"].strip())
         assert result["failed_nodes"] == set(), result["errors"]

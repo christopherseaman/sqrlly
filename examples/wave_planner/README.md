@@ -8,59 +8,13 @@ a wave that finds none completes the workflow.
 
 ## Topology
 
-```
-planner ─→ dispatcher (fan_out) ─→ workers (Send×N)
-               ▲                       │
-               │                       ▼
-               └── gate (route) ←── reconcile
-```
+`planner` seeds questions in `state.json`. `dispatcher` reads the file and emits pending questions as JSON. The `workers` node uses `for_each: dispatcher` and passes `{{item.id}}` to each worker. A worker locks the shared state file while marking its question done.
 
-- **planner** seeds initial tasks into `state.json`.
-- **dispatcher** reads `state.json`, emits a JSON manifest of
-  pending items; sqrlly's fan_out machinery dispatches one
-  worker child per item via LangGraph `Send`.
-- **workers** run in parallel, each marking its own task `done`
-  in `state.json`.
-- **reconcile** inspects post-wave state and may add follow-up
-  tasks. Stdout signals the gate: `reconcile_added:<id>` to loop,
-  `reconcile_clean` to exit.
-- **gate** routes to `dispatcher` when reconcile reports a new task. The case allows up to ten waves.
-
-## Why this pattern
-
-Static fan-out (the standard `fan_out:` block on a dependency-
-graph node) requires the manifest of work-items to be known when
-the parent node runs. The wave pattern lets a workflow *discover*
-work-items as it goes — typical use cases:
-
-- Crawl a research question; sub-questions emerge from initial
-  findings.
-- Process a queue where workers occasionally enqueue new items
-  via reconcile.
-- Iterative refinement loops where an evaluator decides whether
-  another pass is needed.
-
-Two sqrlly primitives make it work:
-
-1. `dispatcher` has BOTH `depends_on: [planner]` AND is the
-   `then:` target of the gate. The compile layer wires both
-   edges; the planner→dispatcher edge fires once at startup,
-   the gate→dispatcher goto fires on subsequent waves.
-
-2. `Command(goto=dispatcher)` always re-executes dispatcher's
-   body. The fan_out router then reads the freshly-written
-   `node_outputs[dispatcher]` rather than a cached value from
-   the first wave.
+After all workers finish, `reconcile` checks for follow-up questions. The route returns to `dispatcher` when `reconcile` discovers a new question, up to ten waves. On the second wave, workers see only the newly queued question.
 
 ## Running
 
-This example shares state across waves via a single `state.json`
-file in the workdir. sqrlly normally isolates each node in
-its own git worktree (the Foreman) when the workdir is a git
-repo — sibling worktrees can't see each other's state mutations,
-which would break the wave pattern.
-
-So run with a non-git workdir:
+The workers use `worktree: off` to update one shared file in Git and plain directories. Use a fresh workdir for the example.
 
 ```bash
 mkdir -p /tmp/wave-demo
@@ -72,13 +26,13 @@ You'll see two waves run:
 
 ```
 Note: workdir is not a git repo — running without worktree isolation (foreman disabled).
-Completed: 7 nodes
-  Nodes: dispatcher, dispatcher::q_competitor_share, dispatcher::q_growth_rate,
-         dispatcher::q_market_size, gate, planner, reconcile
+Completed: 8 nodes
+  Nodes: dispatcher, gate, planner, reconcile, workers, workers::q_competitor_share,
+         workers::q_growth_rate, workers::q_market_size
 ```
 
 The runner lists each completed node ID once. The second wave adds
-`dispatcher::q_competitor_share` after reconcile queues that question.
+`workers::q_competitor_share` after reconcile queues that question.
 
 `/tmp/wave-demo/state.json` has the final state with all three
 questions marked `done`.
@@ -102,13 +56,3 @@ nodes template-read `{{upstream_id}}`) instead of a shared
 file. sqrlly's state is automatically visible across
 worktrees because it's tracked in the LangGraph WorkflowState,
 not on disk.
-
-## Recursion limit
-
-LangGraph caps super-step count at `recursion_limit=25` by
-default. Each wave is ~4 super-steps (dispatcher, workers,
-reconcile, gate), so the default supports up to ~6 waves before
-hitting the limit. Workflows whose reconcile chains can exceed
-that should raise the limit explicitly via
-`compiled.invoke(..., config={"recursion_limit": N})` or the
-equivalent for `astream`.

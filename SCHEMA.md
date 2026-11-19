@@ -15,7 +15,7 @@ The top-level document.
 | `nodes` | `list[Node]` | required | The workflow's nodes. |
 | `settings` | `Settings` | `Settings()` | Global settings (see below). |
 
-Validation rejects duplicate or reserved node ids, missing or self dependencies and unknown route destinations. A fan-out parent can measure output, but an explicit route belongs on a downstream node.
+Validation rejects duplicate or reserved node ids, missing or self dependencies and unknown route destinations. A node cannot combine `for_each` and `route`.
 
 ## Settings
 
@@ -67,13 +67,13 @@ A successful tree is removed after capture. With `promote: false`, the run repor
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `id` | `str` | required | Unique id; referenced by `depends_on` and template `{{id}}`. |
+| `id` | `str` | required | Unique id used by `depends_on`, routes and template references. |
 | `name` | `str` | node id | Human-readable label. |
 | `description` | `str \| None` | `None` | Free text. |
 | `depends_on` | `list[str]` | `[]` | Static dependencies. |
 | `eval` | mapping | omitted | Measure the node output before routing. |
 | `outputs` | mapping | optional | Validate files and structured results after execution. |
-| `fan_out` | `FanOut \| None` | `None` | Manifest-driven `Send` fan-out. |
+| `for_each` | string or file mapping | omitted | Repeat this node once per item. |
 | `route` | case list | omitted | Select the first matching destination. |
 | `timeout` | `float \| None` | `None` | Per-node timeout; falls back to `settings.default_timeout`. |
 | `worktree` | `isolated` or `off` | per-kind default | Select the execution directory for an agent or command. |
@@ -128,7 +128,7 @@ A prompt eval takes the usual prompt options, an optional `model`, `timeout` and
 
 ## Outputs
 
-`outputs.files` lists file paths or globs relative to the execution worktree. Each entry must match a file. The same patterns limit which files the node promotes. Agents, commands and workflows can declare files.
+`outputs.files` lists file paths or globs relative to the execution worktree. Each entry must match a regular file. Directory symlinks are never traversed. The same patterns limit which files the node promotes. Agents, commands and workflows can declare files.
 
 `outputs.schema` names a JSON Schema file relative to the workflow YAML. Agents and LLMs pass it to their provider CLI. A command must print a single matching JSON document. Workflows can declare files, and LLMs can declare a schema.
 
@@ -159,47 +159,28 @@ Predicates can read the current node's `eval`, `attempt` and `history`, plus dep
 
 With no explicit route, a command eval retries nonzero exits up to three total attempts. A prompt eval requires an explicit route.
 
-## FanOut
+## Repeating a node
 
-A `fan_out:` block activates manifest-driven `Send` fan-out — its
-presence is the activation; there is no enable flag.
+`for_each` belongs on the node that runs for each item. All four node kinds support it. A repeating node can measure each result with `eval`. Put an explicit `route` on a separate node.
 
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `manifest_path` | `str \| None` | `None` | On-disk JSON manifest fallback. |
-| `template` | `FanOutTemplate \| None` | `None` | What each Send branch runs. |
-| `final_nodes` | `list[FanOutFinalNode]` | `[]` | Nodes that run after all branches, consuming aggregated output. |
+```yaml
+nodes:
+  - id: plan
+    run: [python3, "{{workflow_dir}}/plan.py"]
+  - id: build
+    depends_on: [plan]
+    for_each: plan
+    run: [python3, "{{workflow_dir}}/build.py", "{{item.id}}"]
+  - id: report
+    depends_on: [build]
+    run: [python3, "{{workflow_dir}}/report.py", "{{build}}"]
+```
 
-The manifest is read from the parent node's JSON output, falling back to
-`manifest_path`. Each Send branch runs the template's kind (and
-`template.eval`, with its own inline retry loop). Each branch's
-template renders against a per-item Jinja context: dep outputs,
-`{{<parent_id>}}` (the parent's output), and every key on the manifest
-item.
+`for_each: plan.tasks` selects an array field from a producer with `outputs.schema`. Use `for_each: plan` for a structured array or text containing a JSON array or `{"items": [...]}`. Declare the producer in `depends_on`. A static source uses `for_each: {file: items.json}`. The file resolves relative to the workflow YAML.
 
-**Manifest structure and validation:**
+Each child receives its value as `{{item}}`. For an object use `{{item.field}}`. The repeating node exposes a JSON list of child results in manifest order, including an empty list for zero items. A downstream node consumes the whole list. Accessing a field directly on that list (`{{build.field}}`) fails validation.
 
-- Manifest items without an `id` field log a WARNING — each collapses onto the single `<parent_id>::unknown` child id, so two or more of them produce a duplicate child id and fail the parent (below) instead of silently collapsing N→1.
-- Duplicate child ids in the manifest **fail the parent node** before dispatch (the error lists the duplicate ids; the run reports failure, and a bare `--resume` re-fans the parent once the manifest is fixed). Each item must have a unique `id` to produce one branch per item.
-- An unreadable, invalid-JSON, or mis-shaped `manifest_path` fails the parent node the same way — a recoverable node failure, not an aborting exception.
-
-**FanOutTemplate** fields:
-
-| Field | Type | Default | Effect |
-|---|---|---|---|
-| `agent`, `llm`, `run`, `workflow` | kind | | Operation for each branch. |
-| `eval`, `route` | measurement and case list | omitted | Measure each branch and route its result. |
-
-Final nodes take an id, an optional name and description, one kind, an optional eval and an optional output contract.
-A `workflow` template loads a child graph per item.
-
-## Fan-out resume behavior
-
-On `--resume` after a failed run, fan-out children that failed are re-run; siblings that completed successfully are frozen (not re-billed). This asymmetry means a workflow that fans out over a manifest can efficiently re-test only the broken items without re-running good ones. The parent re-reads its manifest on re-fan; if prior branch ids are dropped, the run halts or warns per `settings.on_manifest_drift` (see the `on_manifest_drift` row) — a stable-id or purely additive re-fan never trips it.
-
-When using `--resume-from <fan_out_parent>`, the parent re-fans over its manifest, but only non-completed children from that fan-out are dispatched — completed siblings remain frozen.
-
----
+An explicit object `id` identifies the child. An item without an id uses a hash of its value, with a duplicate ordinal to distinguish identical values. On resume, newly inserted items run and completed children keep their existing results. An edited id-less value drops its previous child id. Dropped ids fail under the default `settings.on_manifest_drift: fail`; set `warn` to proceed.
 
 ## Failure kinds (JSONL `node_failed.kind`)
 

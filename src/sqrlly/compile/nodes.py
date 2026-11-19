@@ -13,7 +13,6 @@ from langgraph.types import Command
 from sqrlly.compile.evaluation import select_case
 from sqrlly.compile.lint import iter_route_edges
 from sqrlly.compile.outputs import execute_with_outputs
-from sqrlly.runtime._json import bind_json
 from sqrlly.runtime.gates import build_eval_preamble
 from sqrlly.runtime.executor.prompt import retry_delay
 from sqrlly.runtime.gates import run_evaluation
@@ -36,6 +35,12 @@ def settle_nodes(executor, node: Node, settings: Settings, ids: list[str]) -> di
     if retained:
         update["retained_refs"] = retained
     return update
+
+
+def is_frozen(node_id: str, state: WorkflowState) -> bool:
+    required = state.get("required_attempts", {}).get(node_id, 0)
+    settled = state.get("settled_attempts", {}).get(node_id, 0)
+    return node_id in state.get("_resume_skip", set()) and required <= settled
 
 
 def check_dep_failed(node: Node, state: WorkflowState) -> dict | None:
@@ -84,7 +89,7 @@ class _TemplateOutput:
 
     def __init__(self, text, value):
         self._text = text
-        self._value = bind_json(value)
+        self._value = value
 
     def __str__(self):
         return self._text
@@ -113,7 +118,7 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     # alongside their own dep outputs. Top-level graphs have no inputs.
     inputs = state.get("node_inputs", {}) or {}
     context.update(inputs)
-    context["workflow_inputs"] = bind_json(inputs)
+    context["workflow_inputs"] = inputs
     for dep in node._ancestors or node.depends_on:
         if dep in outputs:
             context[dep] = bind_output(state, dep)
@@ -170,7 +175,10 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
         for nid, records in history.items()
     }
 
-    incoming = state.get("route_context", {}).get(node.id) or {}
+    routes = state.get("route_context", {})
+    if node.id not in routes:
+        context.update(state.get("workflow_route_context", {}))
+    incoming = routes.get(node.id) or {}
     sender_id = incoming.get("sender")
     if sender_id is not None:
         context["sender_id"] = sender_id
@@ -185,6 +193,8 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     if preamble:
         context["_route_eval_preamble"] = preamble
 
+    if state.get("_fan_child_id") == node.id:
+        context["item"] = state["_fan_out_item"]
     return context
 
 
@@ -241,6 +251,7 @@ def _make_execution_node(
     executor: NodeExecutor | None = None,
     *,
     effective_settings: Settings | None = None,
+    defer_promotion: bool = False,
 ):
     """Execute the node with its effective settings and verify its output files."""
     settings = effective_settings or config.settings
@@ -250,8 +261,7 @@ def _make_execution_node(
         # Resume skip: a node frozen in the prior-run snapshot does not
         # re-execute. Its completed_nodes/node_outputs are already reseeded,
         # so downstream context and the deps join-barrier still see it.
-        skip = state.get("_resume_skip")
-        if skip and node.id in skip:
+        if is_frozen(node.id, state):
             return {}
         for check in (check_dep_failed, check_dry_run):
             if (r := check(node, state)) is not None:
@@ -290,8 +300,6 @@ def _make_execution_node(
 
         update = assemble_success_update(node, exec_result)
         update["attempts"] = attempts
-        if node.fan_out:
-            update["fan_ready"] = {node.id: False}
         if exec_result.worktree:
             update["node_worktrees"] = {node.id: exec_result.worktree}
         elif hasattr(executor, "get_worktree"):
@@ -299,7 +307,7 @@ def _make_execution_node(
             if wt:
                 update["node_worktrees"] = {node.id: wt}
         if not (node.eval or node.route):
-            promotion = settle_nodes(executor, node, settings, [node.id])
+            promotion = {} if defer_promotion else settle_nodes(executor, node, settings, [node.id])
             update.update(promotion)
             if not promotion.get("failed_nodes"):
                 update["completed_nodes"] = {node.id}
@@ -327,7 +335,7 @@ def count_attempts(node, body):
     return counted
 
 
-async def settle(node, state, settings, executor, context=None):
+async def settle(node, state, settings, executor, context=None, *, authored_id=None):
     key = node.id
     attempt = state.get("attempts", {}).get(key, 1)
     history = list(state.get("evaluations", {}).get(key, []))
@@ -335,7 +343,7 @@ async def settle(node, state, settings, executor, context=None):
     variables = build_context(node, state) if context is None else dict(context)
     output = state.get("node_outputs", {}).get(key, "")
     variables.update(output=output, node_output=output, node_id=key, attempt=attempt)
-    variables[key] = bind_output(state, key)
+    variables[authored_id or key] = bind_output(state, key)
     try:
         if node.eval:
             cwd = state.get("node_worktrees", {}).get(key) or state.get("workdir", ".")
@@ -414,7 +422,7 @@ def _make_gate_node(node, config, executor=None, *, exec_id, pass_targets, effec
     async def gate(state):
         if node.id in state.get("failed_nodes", set()):
             return Command(goto=END)
-        if node.id in state.get("_resume_skip", set()):
+        if is_frozen(node.id, state):
             previous = state.get("route_destinations", {}).get(node.id)
             return Command(goto=previous or fallback)
         attempt = state.get("attempts", {}).get(node.id, 1)

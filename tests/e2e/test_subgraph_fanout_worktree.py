@@ -50,16 +50,12 @@ def _build_parent_config(tmp_path: Path, sub_yaml: str) -> Graph:
     return Graph(
         name="subgraph-fanout-worktree-test",
         nodes=[
-            {
-                "id": _PARENT_ID,
-                "name": "Writer Pool",
-                "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"],
-                "fan_out": {
-                    "template": {
-                        "workflow": {"file": sub_yaml, "with": {"item_id": "{{id}}"}},
-                    },
-                },
-            },
+            {"id": "manifest",
+             "run": ["/bin/sh", "-c", f"printf '%s' '{manifest}'"]},
+            {"id": _PARENT_ID,
+             "for_each": "manifest",
+             "depends_on": ["manifest"],
+             "workflow": {"file": sub_yaml, "with": {"item_id": "{{item.id}}"}}},
         ],
     )
 

@@ -2,32 +2,33 @@ name: Route Classifier
 nodes:
   - id: triage
     name: Triage Ticket
-    run: [python3, '{{workflow_dir}}/scripts/triage.py', 'production down on auth-service, urgent']
-
-  - id: decide
-    name: Route by category
-    depends_on: [triage]
+    llm:
+      text: |
+        Classify this support ticket. Use urgent for production outages, escalate for
+        blockers needing a manager, spam for unsolicited messages, and standard otherwise.
+        Ticket: production down on auth-service, urgent
+    outputs: {schema: category.json}
     route:
-      - when: triage == 'spam'
+      - when: triage.category == 'spam'
         then: drop_spam
-      - when: triage == 'urgent'
+      - when: triage.category == 'urgent'
         then: page_oncall
-      - when: triage == 'escalate'
+      - when: triage.category == 'escalate'
         then: escalate
       - else: standard_queue
 
   - id: drop_spam
     name: Drop spam
-    run: [echo, 'dropped: {{triage}}']
+    run: [echo, 'dropped: {{triage.category}}']
 
   - id: page_oncall
     name: Page on-call rotation
-    run: [echo, 'paged on-call: {{triage}}']
+    run: [echo, 'paged on-call: {{triage.category}}']
 
   - id: escalate
     name: Escalate to manager
-    run: [echo, 'escalated: {{triage}}']
+    run: [echo, 'escalated: {{triage.category}}']
 
   - id: standard_queue
     name: Standard queue
-    run: [echo, 'queued: {{triage}}']
+    run: [echo, 'queued: {{triage.category}}']

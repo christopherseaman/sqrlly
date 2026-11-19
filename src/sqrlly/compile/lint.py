@@ -21,34 +21,7 @@ def collect_warnings(config: Graph) -> list[str]:
         + _upstream_route_warnings(config)
         + _worktree_setup_exclude_warnings(config)
         + _shared_worktree_warnings(config)
-        + _fanout_resume_drift_warnings(config)
     )
-
-
-def _fanout_resume_drift_warnings(config: Graph) -> list[str]:
-    """Advise deterministic item ids on a fan-out whose manifest is a RUNTIME
-    output (no static ``manifest_path``).
-
-    On ``--resume`` the parent re-reads its manifest and re-fans; if the
-    dispatcher mints non-deterministic ids (uuid / counter / positional
-    index), completed siblings silently vanish and the failed child is
-    orphaned while all N re-run. The runtime drift guard
-    (``settings.on_manifest_drift``) catches it, but flagging it at
-    ``validate`` time steers authors to stable ids up front. A static
-    ``manifest_path`` file has stable ids by construction — silent.
-    """
-    out: list[str] = []
-    for node in config.nodes:
-        fo = node.fan_out
-        if fo is not None and fo.manifest_path is None:
-            out.append(
-                f"node '{node.id}': fan-out manifest is a runtime output — on "
-                f"'--resume' the dispatcher must emit deterministic item "
-                f"'id's, else completed children are re-billed and the failed "
-                f"child orphaned. Set 'settings.on_manifest_drift: warn' to "
-                f"opt into intentional re-fanning."
-            )
-    return out
 
 
 def _upstream_route_warnings(config: Graph) -> list[str]:
@@ -67,7 +40,7 @@ def _worktree_setup_exclude_warnings(config: Graph) -> list[str]:
 
 def _shared_worktree_warnings(config: Graph) -> list[str]:
     shared = [node for node in config.nodes if node.kind in ("agent", "run")
-              and node.effective_worktree(config.settings) == "off"]
+              and node.effective_worktree(config.settings, fan_child=node.for_each is not None) == "off"]
     return [
         f"{left.id} and {right.id} use worktree: off without a dependency path; both can write the base checkout"
         for index, left in enumerate(shared) for right in shared[index + 1:]
@@ -81,16 +54,10 @@ def _hyphenated_id_warnings(config: Graph) -> list[str]:
     A hyphenated id referenced as ``{{the-id}}`` in a Jinja template
     parses as subtraction (``the - id``), silently producing wrong or
     empty output rather than the node's value. Underscores are safe.
-    Covers top-level node ids and fan-out final-node ids.
     """
-    ids: list[str] = []
-    for node in config.nodes:
-        ids.append(node.id)
-        if node.fan_out:
-            ids.extend(fn.id for fn in node.fan_out.final_nodes)
-
     out: list[str] = []
-    for node_id in ids:
+    for node in config.nodes:
+        node_id = node.id
         if "-" not in node_id:
             continue
         templated = "{{" + node_id + "}}"

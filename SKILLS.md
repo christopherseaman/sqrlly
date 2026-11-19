@@ -94,29 +94,19 @@ For per-worker worktrees, gates and logs, use fan-out.
      - else: review
    ```
    Attempt 3 falls through to escalation. Without an escalation case, an exhausted retry fails the node. When no predicate matches and no matching case exhausted its limit, dependents run normally. The default context carries the latest measurement and attempt. Use `none` to suppress it.
-4. **Parallelize** with a `fan_out:` block — one branch per manifest
-   item, joined by `final_nodes`:
+4. Repeat a node with `for_each` and consume its ordered output from a dependent.
    ```yaml
-   fan_out:
-     manifest_path: items.json   # JSON: [{"id": "a", ...}, ...] or {"items": [...]}
-     template:
-       llm: item.md
-       # eval: ...          # optional: gate each branch
-     final_nodes:                 # inline nodes; run once after all branches join
-       - id: summarize
-         name: Summarize
-         llm: summarize.md
+   nodes:
+     - {id: plan, run: [python3, "{{workflow_dir}}/plan.py"]}
+     - id: build
+       depends_on: [plan]
+       for_each: plan
+       run: [python3, "{{workflow_dir}}/build.py", "{{item.id}}"]
+     - id: report
+       depends_on: [build]
+       run: [python3, "{{workflow_dir}}/report.py", "{{build}}"]
    ```
-   Each inline final node has an id and a kind. Optional fields include
-   `eval` and `outputs`. Each
-   manifest item is a JSON **object**; its fields become template
-   variables (`{{id}}`, `{{name}}`, …). A bare string item is treated
-   as `{"id": "<string>"}`. The manifest may instead be produced at run
-   time as this node's JSON output — a ``` code fence or surrounding
-   prose around the JSON array/object is tolerated — with `manifest_path`
-   as the static fallback (a *declared* manifest_path that's missing or
-   invalid JSON halts the run; an empty-but-valid manifest warns and
-   skips the fan-out).
+   Here `plan` emits a JSON array or an object with an `items` array. Select a schema field with `for_each: plan.tasks`. Read a static array from beside the YAML with `for_each: {file: items.json}`. A scalar item is available as `{{item}}`; object fields use `{{item.field}}`. The report receives child results in the original order. Put any explicit route on a separate node.
 
 Do not guess field names. Every model is `extra="forbid"` — a typo'd
 key is a hard validation error. The exhaustive field reference is
@@ -163,20 +153,7 @@ present). The live renderer shows only per-node status, so this epilogue
 is where a terminal run tells you where output / logs / artifacts
 landed. `--quiet` suppresses it.
 
-`sqrlly graph <config>` prints a Mermaid topology diagram of the
-**authored** workflow — the same schema reconstruction `sqrlly view`
-uses, not the compiled LangGraph (whose gate/route/fan-out routing is
-runtime `Command(goto=...)` and would render edge-less). It draws
-`depends_on` edges, declared `route:` edges (dotted, labeled with the
-`when` predicate), fan-out parents (hexagon) with a dashed `×N per item`
-stand-in for their runtime children (entered `1→N`, fanning back in
-`N→1` on the synthesis step / declared `final_nodes`), and gated nodes
-(styled). Compiled synthetics (`_eval_` / `_fan_` / `_sub_`) never
-appear. `sqrlly view <config>` renders that same topology as a
-self-contained interactive HTML viewer with a per-node config panel
-(and, with `--log`, a status overlay). Only the realized per-manifest
-fan-out *children* — created at run time, varying per run and per re-fan
-wave — are absent from both.
+`sqrlly graph <config>` prints the authored dependencies and route destinations as Mermaid. Each repeating node has a ×N stand-in labeled with its item source. `sqrlly view <config>` renders the same topology as interactive HTML. Supply `--log` to overlay execution status.
 
 ## Debug a run
 
@@ -207,7 +184,7 @@ wave — are absent from both.
   every node (pre-0.6 behavior). `--resume-from <node>` re-runs a
   specific node and everything downstream (implies `--resume`). When
   `<node>` is a fan-out parent with prior-run completed children, only
-  the failed children re-run (completed siblings freeze, no re-bill);
+  new and failed children run (completed siblings freeze, no re-bill);
   `--resume-from` on any non-fan-out node re-runs it and all downstream
   dependents as usual. **v1 limitation:** a subgraph re-runs in full
   unless its reference node completed cleanly; inner nodes aren't
@@ -233,14 +210,7 @@ large parallel build that loses one branch resumes cheaply.
 - Route cases may send execution to an ancestor. Bound those loops with `max_attempts`.
 - **Subgraphs share the schema** — a subgraph `.yaml` is an ordinary
   workflow and must validate standalone.
-- **Fan-out manifests need STABLE item ids for `--resume`** — a manifest
-  generated at runtime must emit deterministic `id`s (not a uuid /
-  per-run counter / positional index). On `--resume` a manifest that
-  DROPS a prior branch id trips `settings.on_manifest_drift` (default
-  `fail` halts before any `Send`; `warn` proceeds) — else completed
-  siblings silently vanish and the failed child is orphaned. A stable-id
-  or purely additive re-fan never trips it; `validate`/`run` flag any
-  runtime-manifest fan-out with an advisory.
+- A stable `item.id` preserves child identity when the object changes. Items without ids use their value hash and a duplicate ordinal. Inserting a new item on resume runs only the new child. Editing or removing an id-less value drops its old id; the default drift policy then fails. Set `settings.on_manifest_drift: warn` to accept such removals.
 - Run trusted workflows only. A command runs with the host user's filesystem permissions.
 ## Reference
 

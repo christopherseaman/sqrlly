@@ -14,6 +14,7 @@ flow (node → prompt file fetch → render → backend) lives behind
 ``DispatchExecutor`` and is exercised here through that entry point.
 """
 
+import json
 import time
 
 import pytest
@@ -46,6 +47,11 @@ class TestRenderTemplate:
     def test_substitutes_known_variables(self):
         result = render_template("Hello {{name}}", {"name": "world"})
         assert result == "Hello world"
+
+    def test_json_fields_render_by_name_and_serialize_as_objects(self):
+        item = {"items": [{"keys": {"values": [1]}}]}
+        assert render_template("{{item.items[0].keys.values[0]}}", {"item": item}) == "1"
+        assert json.loads(render_template("{{item|tojson}}", {"item": item})) == item
 
     def test_unknown_variables_render_empty(self):
         """Jinja2 default Undefined renders missing vars as empty string."""

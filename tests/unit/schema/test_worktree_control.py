@@ -35,8 +35,8 @@ def test_node_overrides_kind_default():
     ("worktree_gc", {"settings": {"worktree_gc": "never"}}),
     ("promote_include", {"settings": {"promote_include": []}}),
     ("worktree_setup_exclude", {"settings": {"worktree_setup_exclude": []}}),
-    ("promote", {"nodes": [{"id": "n", "fan_out": {"promote": True}}]}),
-    ("worktree", {"nodes": [{"id": "n", "fan_out": {"template": {"worktree": "isolated"}}}]}),
+    ("fan_out", {"nodes": [{"id": "n", "fan_out": {"promote": True}}]}),
+    ("fan_out", {"nodes": [{"id": "n", "fan_out": {"template": {"worktree": "isolated"}}}]}),
 ])
 def test_removed_controls_raise(key, graph):
     with pytest.raises(ValidationError, match=key):

@@ -201,20 +201,14 @@ class TestBranchTimeout:
         manifest.write_text(json.dumps([{"id": "item1", "name": "Item 1"}]))
 
         prompt = tmp_path / "template.md"
-        prompt.write_text("Process {{name}}")
+        prompt.write_text("Process {{item.name}}")
 
         config = make_config(
             [
-                {
-                    "id": "parent",
-                    "name": "Parent",
-                    "run": [_ECHO, "-n", "ok"],
-                    "timeout": 0.3,
-                    "fan_out": {
-                        "manifest_path": "manifest.json",
-                        "template": {"agent": "template.md"},
-                    },
-                },
+                {"id": "parent",
+                 "for_each": {"file": str(manifest)},
+                 "timeout": 0.3,
+                 "agent": "template.md"},
             ]
         )
         executor = SelectiveSlowExecutor(slow_delay=5.0)

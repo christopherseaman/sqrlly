@@ -2,8 +2,6 @@ import pytest
 from pydantic import ValidationError
 
 from sqrlly.schema.models import (
-    FanOut,
-    FanOutTemplate,
     Graph,
     Node,
     Outputs,
@@ -107,79 +105,6 @@ class TestDependencyValidation:
         node = Node(id="p1", name="P1", agent="t.md")
         assert node.depends_on == []
 
-
-class TestFanOut:
-    def test_dynamic_config(self):
-        config = FanOut(
-            manifest_path="manifest.json",
-            template={"agent": "template.md"},
-        )
-        assert config.manifest_path == "manifest.json"
-        assert config.template is not None
-
-    def test_template_with_evaluation(self):
-        config = FanOut(
-            manifest_path="m.json",
-            template={
-                "agent": "template.md",
-                "eval": {"run": ["true"]},
-            },
-        )
-        assert config.template.eval.run.cmd == ["true"]
-
-    def test_legacy_enabled_field_rejected(self):
-        """`enabled` was removed in the post-Stage-5c audit — the
-        block's presence is the activation. Authors carrying old YAML
-        get a loud Pydantic ValidationError pointing at the unsupported
-        field instead of silent fan-out skipping."""
-        from pydantic import ValidationError as _VE
-        with pytest.raises(_VE, match="enabled"):
-            FanOut(enabled=True, template={"agent": "t.md"})
-
-    def test_final_nodes(self):
-        config = FanOut(
-            manifest_path="m.json",
-            template={"agent": "t.md"},
-            final_nodes=[
-                {
-                    "id": "summary",
-                    "name": "Summary",
-                    "agent": "s.md",
-                }
-            ],
-        )
-        assert len(config.final_nodes) == 1
-        assert config.final_nodes[0].id == "summary"
-        assert config.final_nodes[0].agent.prompt == "s.md"
-
-    def test_final_node_accepts_output_contract(self):
-        """C1: `output_contract` is valid on a fan-out final node (it runs
-        through the standard execution path, which enforces it)."""
-        config = FanOut(
-            template={"agent": "t.md"},
-            final_nodes=[
-                {
-                    "id": "summary",
-                    "name": "Summary",
-                    "agent": "s.md",
-                    "outputs": {
-                        "files": ['summary.md'],
-                    },
-                }
-            ],
-        )
-        fn = config.final_nodes[0]
-        assert fn.outputs.files == ["summary.md"]
-
-    def test_empty_block_is_well_formed(self):
-        """A bare `FanOut()` is structurally valid (template is optional
-        at the schema level — runtime validates required fields when
-        the parent node is wired). Activation is by presence-of-block,
-        not by an `enabled` flag."""
-        config = FanOut()
-        assert config.template is None
-        assert config.manifest_path is None
-        assert config.final_nodes == []
 
 def test_kitchen_sink_composes_a_child_workflow(kitchen_sink_workflow_path):
     from sqrlly.schema.models import load_workflow

@@ -142,7 +142,7 @@ Three-layer split (enforced by `tests/architecture/test_layers.py`):
 - `v1.py` defines the agent, llm, run and workflow payloads.
 
 **`src/sqrlly/compile/`** — YAML → LangGraph (no cli imports).
-- `graph.py` wires execution nodes to a settlement node (`_eval_<id>`) for eval and route. A fan-out dispatcher (`_fan_<id>`) sends each manifest item to its branch.
+- `graph.py` wires execution nodes to a settlement node (`_eval_<id>`) for eval and route. The repeating node dispatches its items to a worker. A join collects completed children in manifest order.
 - `nodes.py` builds execution context and settles ordered route cases. The settlement update records the attempt, measurement, destination and forwarded context.
 - `dynamic.py` — fan-out via Send, inline retry loop.
 - `subgraph.py` — recursive composition, cycle detection, depth cap.
@@ -262,18 +262,7 @@ resolver sees) — distinct from faking what an external system returns.
 - **Hyphenated node IDs in Jinja templates** — `{{research-phase}}`
   parses as subtraction; use underscores. `validate`/`run` emit an
   advisory warning (`compile/lint.py`).
-- **`graph` and `view` render the AUTHORED topology, not the compiled
-  graph** — both use the same schema reconstruction
-  (`cli/view.py::render_mermaid` / `_route_targets`): depends_on edges,
-  declared `route:` edges (dashed), fan-out parents as hexagons, gated
-  nodes stroke-styled. Compiled synthetics (`_eval_`/`_route_`/`_fan_`/
-  `_sub_`) are never drawn — their routing is runtime `Command(goto=...)`,
-  invisible to a static render (a compiled-graph render would show
-  gated/fan-out topology edge-less). Fan-out multiplicity IS drawn: a
-  dashed ×N stand-in node represents the runtime children (entered
-  `1→N`), declared `final_nodes` render as chained real steps, and the
-  parent's dependents fan in `N→1` from the chain exit — only the
-  realized per-manifest child NODES (created at run time) are absent.
+- `graph` and `view` render authored dependencies and routes. A ×N stand-in beside each repeating node shows where its workers run. Realized child ids appear in the run log.
 - Successful isolated worktrees are removed after their output ref is captured. Failed trees stay available. A clean run prunes earlier inactive runs’ refs for that workflow.
 - **`--resume` skips completed nodes (0.6.0)** — bare `--resume` reseeds
   the prior checkpoint and skips nodes that completed cleanly and aren't
@@ -295,7 +284,7 @@ resolver sees) — distinct from faking what an external system returns.
   ignored on `--resume`; re-run from scratch.
 - Route context is keyed by destination. A selected case forwards its measurement according to `context`.
 - Promote compares the current base blob with the input snapshot before applying the result. The default conflict policy fails the node. `promote: false` retains the output ref and leaves the base alone.
-- **Bad-manifest fan-out fails the run (recoverable)** — the `_fan_<id>` dispatcher (`compile/graph.py::_make_fan_dispatcher`) FAILS the parent node with a `make_failure_update` `Command(goto=END)` — NOT a raise — on either (a) a `_read_manifest` `ManifestError` (unreadable / invalid-JSON / mis-shaped `manifest_path`, raised in `_read_manifest`) or (b) a DUPLICATE child id (literal duplicate, or the `::unknown` collapse of ≥2 id-less items; a dict item missing `id` also WARNs in `_normalize_items`). Failing the node (not raising) puts the parent in `failed_nodes` so bare `--resume` dirties it via `prior_failed` and re-fans once the manifest is fixed; a raise would leave the parent completed-but-not-failed (the gate committed one super-step earlier) and bare `--resume` would freeze it and re-fail deterministically. The parent can land in BOTH `completed_nodes` (gate committed) and `failed_nodes` (`_fan_` failed) in that checkpoint — `compile/resume.py::compute_skip_set`'s dirty subtraction handles it. (Note: `_read_manifest` still RAISES `ManifestError` when called directly, e.g. via `cli/main.py`; only the dispatcher converts it.)
+- A malformed item collection or duplicate explicit id fails the repeating node before children run.
 - **JSONL `gate_evaluated` precedes `node_completed`/`node_failed`** — the collapsed gate emits its EvaluationRecord and its outcome (completed / failed) in ONE super-step update, so `runtime/logging.py::_emit_update_events` orders `gate_evaluated` BEFORE both `node_completed` and `node_failed` ("gate ran, then the node settled"). For the pre-collapse split top-level pair the record already landed a super-step earlier, so this preserves that order; it is a VISIBLE JSONL order change for fan-out children and dynamic gated parents (whose single merged update previously emitted `node_completed` first). In-repo consumers (`terminal.py`, `view.py`) are order-insensitive.
 - `settings.defaults.agent.backend_max_retries` and `settings.defaults.llm.backend_max_retries`
   (default `2`) control retries of the SAME backend dispatch on a backend exception
@@ -312,35 +301,7 @@ resolver sees) — distinct from faking what an external system returns.
   `compile/nodes.py::settle` turns into a node failure carrying the
   dispatch's kind (no evaluation record, no node retry).
 - **`settings:` rejects unknown keys (`extra=forbid`, 0.7.6)** — a typo'd or stale `settings` key now raises a `ValidationError` at load (previously silently ignored). Every other schema model already enforced this; `settings` was the last to adopt it. Run `sqrlly validate` to surface the offending key.
-- **`--resume` re-runs only failed fan-out children** — a fan-out parent
-  with a failed child in the prior checkpoint is dirtied in
-  `compile/resume.py::compute_skip_set` (the failed child's `<parent>::<item>`
-  id is mapped back to its parent and seeded into the dirty frontier), so the
-  parent re-fans; the per-child gate in `compile/dynamic.py::_make_fan_out_node`
-  freezes a child on `child_id in _resume_skip` alone, so completed siblings
-  are NOT re-billed and only the formerly-failed child (never in the frozen
-  snapshot) re-runs. Requires STABLE manifest ids across the re-fan — the
-  child id is `<parent>::<item.id>`, so a dispatcher whose ids change on
-  resume (uuid / per-run counter) yields ids absent from the snapshot, which
-  would re-bill all N, orphan the failed child, and vanish completed siblings.
-  **Guarded:** the `_fan_<id>` dispatcher (`compile/graph.py::_fan_drift_command`,
-  called from BOTH the empty-manifest branch and the per-item path) compares
-  the re-fanned ids against the prior run's direct branch ids (seeded
-  per-parent as `_fan_prior_children` at resume in `cli/main.py::_seed_state`)
-  and, on any DROPPED prior branch, halts the parent BEFORE any `Send` per
-  `settings.on_manifest_drift` (`fail` default / `warn` to proceed). A drained
-  manifest (zero items on resume) is the maximal drift and is caught the same
-  way, not routed to the no-items path. Subgraph-template fan-outs don't
-  false-fire because a branch records only its `<parent>::<item>` id at the top
-  level (inner subgraph node ids stay in subgraph state — `make_subgraph_node`
-  returns just the branch id); `compile/_manifest.py::direct_child_ids`
-  additionally excludes any `<parent>::<item>::<inner>` id as a defensive
-  backstop. It keys on
-  DROPPED ids, so it fully catches ids that change every run; positional-index
-  / reset-counter ids are caught only when items are removed (not inserted /
-  reordered) — the `validate` advisory on runtime-manifest fan-outs steers to
-  stable ids for those. No-op on fresh / `--entry` / `--rerun-all`; a stable-id
-  or purely additive re-fan never trips it.
+- A repeating node reconstructs its ordered output on resume. Stable explicit ids or value hashes with duplicate ordinals preserve completed children when new items appear. Dropped ids trigger `settings.on_manifest_drift`; an edited id-less item counts as dropped.
 - **No first-class managed-team / oversight node** — there is no supervised
   coordinator primitive, and none is planned near-term. The supported approach
   is an authoring pattern: a prompt node granted the `Task` tool

@@ -7,14 +7,18 @@ nodes:
   - id: dispatcher
     name: Dispatch a wave of pending questions
     depends_on: [planner]
-    fan_out:
-      template:
-        run: [python3, '{{workflow_dir}}/scripts/worker.py', '{{id}}']
     run: [python3, '{{workflow_dir}}/scripts/dispatcher.py']
+
+  - id: workers
+    name: Answer each pending question
+    depends_on: [dispatcher]
+    for_each: dispatcher
+    worktree: 'off'
+    run: [python3, '{{workflow_dir}}/scripts/worker.py', '{{item.id}}']
 
   - id: reconcile
     name: Discover follow-up questions
-    depends_on: [dispatcher]
+    depends_on: [workers]
     run: [python3, '{{workflow_dir}}/scripts/reconcile.py']
 
   - id: gate

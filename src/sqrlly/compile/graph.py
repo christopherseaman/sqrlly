@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
@@ -13,32 +12,24 @@ from langgraph.types import Command, Send
 
 from sqrlly.compile._manifest import (
     _read_manifest,
-    find_terminal_nodes,
     manifest_drift,
 )
 from sqrlly.compile.lint import iter_route_edges
-from sqrlly.compile.dynamic import _make_final_fan_out_node, _make_fan_out_node, fan_child_node
+from sqrlly.compile.dynamic import item_node, make_item_worker, make_item_join
 from sqrlly.compile.nodes import (
     _make_execution_node,
     _make_gate_node,
     make_failure_update,
-    settle_nodes,
+    all_deps_completed,
+    is_frozen,
+    check_dep_failed,
 )
-from sqrlly.compile.subgraph import node_subgraph_path
 from sqrlly.runtime.result import ManifestError
 from sqrlly.runtime.state import WorkflowState
 from sqrlly.schema.models import Graph, Node, Settings
 
 if TYPE_CHECKING:
     from sqrlly.runtime.result import NodeExecutor
-
-
-def _collect_route_targets(node):
-    targets = set()
-    for case in node.route or []:
-        dest = case.then or case.otherwise
-        targets.update(dest if isinstance(dest, list) else [dest])
-    return targets - {"retry", "fail"}
 
 
 def _detect_cycles(config: Graph) -> None:
@@ -129,120 +120,48 @@ def _fan_drift_command(
     return None
 
 
-def _make_fan_dispatcher(
-    node: Node, no_items_targets: list[str], settings: Settings,
-):
-    """Build the ``_fan_<id>`` dispatcher node body for a fan-out parent.
-
-    Reached only by ``Command(goto=_fan_<id>)`` from the gate (gated
-    parent) or a plain edge (ungated parent). Returns ``Command(goto=...)``:
-    ``END`` on parent failure, a plain ``{}`` defer while the parent is
-    unsettled, ``Command(goto=no_items_targets)`` + WARN on an empty
-    manifest, a ``make_failure_update`` Command on a `_read_manifest`
-    ``ManifestError`` (unreadable / invalid-JSON / mis-shaped
-    ``manifest_path``) or colliding child ids (NOT a raise — failing the
-    node lets bare ``--resume`` dirty the parent and re-fan with a fresh
-    manifest, rather than leaving the parent completed-but-not-failed and
-    re-failing deterministically), and the per-item ``Send`` array
-    otherwise. ``state`` here is committed post-gate state, so Send payloads
-    need no update baking.
-    """
-    template_node_id = f"_sub_{node.id}"
-
-    def dispatcher(state: WorkflowState):
-        # 1. Parent failed → END, no fan-out.
+def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_dir=None):
+    def dispatch(state: WorkflowState):
         if node.id in state.get("failed_nodes", set()):
             return Command(goto=END)
-
-        # 2. Parent not settled yet: defer. Safer than a pre-emptive fire —
-        #    LangGraph re-fires _fan_ when the parent settles. The final-node
-        #    barrier's case-3 guard stays as belt-and-braces.
-        settled = state.get("completed_nodes", set()) | state.get(
-            "failed_nodes", set()
-        )
-        if node.id not in settled:
+        if failure := check_dep_failed(node, state):
+            return Command(update=failure, goto=END)
+        if not all_deps_completed(node, state):
             return {}
-
-        # A ManifestError (unreadable / invalid-JSON / mis-shaped
-        # manifest_path) FAILS the parent node rather than escaping as a
-        # raise: the gate committed completed_nodes a super-step earlier, so a
-        # raise would leave the parent completed-but-not-failed in the
-        # checkpoint and bare --resume would freeze it and re-fail forever.
-        # Failing the node puts it in failed_nodes → dirty on --resume → re-fan.
+        frozen = state.get("_resume_skip", set())
+        if is_frozen(node.id, state):
+            return Command(goto=dependents or END)
+        attempt = state.get("attempts", {}).get(node.id, 0)
+        baseline = state.get("_fan_resume_attempts", {}).get(node.id)
+        recovering = attempt == baseline and state.get("required_attempts", {}).get(node.id, 0) <= attempt
         try:
-            items = _read_manifest(state, node)
-        except ManifestError as e:
-            return Command(
-                update=make_failure_update(node.id, str(e)),
-                goto=END,
-            )
-
-        # 3. Empty manifest → route to the no-items target(s). Concrete ids
-        #    (not a route_map key) so an empty manifest can fan to EVERY
-        #    dependent; the list may contain END. BUT on --resume with prior
-        #    children, an empty re-fan is the MAXIMAL drift (every prior branch
-        #    dropped, the failed child orphaned) — run it through the drift
-        #    policy BEFORE the no-items short-circuit, else fail/warn is
-        #    bypassed and the run silently completes green.
-        if not items:
-            drift_cmd = _fan_drift_command(
-                node, state.get("_fan_prior_children", {}).get(node.id),
-                set(), state.get("_resume_skip", set()), settings,
-            )
-            if drift_cmd is not None:
-                return drift_cmd
-            logging.getLogger(__name__).warning(
-                "fan-out %r: manifest resolved to zero items — routing to "
-                "no-items target(s) %s instead of fanning out.",
-                node.id, no_items_targets,
-            )
-            # Emit the concrete-id list as-is (may contain END). Returning a
-            # list — not an unwrapped scalar — is what lets an empty manifest
-            # fan to EVERY dependent.
-            return Command(update={"fan_ready": {node.id: True}}, goto=list(no_items_targets))
-
-        # 4. Fail loud on colliding child ids. Each branch's child id is
-        #    `<parent>::<item_id>` (matching dynamic._make_fan_out_node). Two
-        #    items mapping to one id (literal duplicate, or ≥2 id-less dict
-        #    items collapsing onto `::unknown`) would silently merge into one
-        #    branch. Fail the node (not raise) so the run ends failed and bare
-        #    --resume dirties the parent → re-fan with a fresh manifest.
-        seen: set[str] = set()
-        duplicates: set[str] = set()
-        for item in items:
-            child_id = f"{node.id}::{item.get('id', 'unknown')}"
-            if child_id in seen:
-                duplicates.add(child_id)
-            seen.add(child_id)
-        if duplicates:
-            return Command(
-                update=make_failure_update(
-                    node.id,
-                    f"fan-out {node.id!r}: manifest produces duplicate child "
-                    f"id(s) {sorted(duplicates)!r} — each item needs a unique "
-                    f"'id' (id-less items collapse onto '{node.id}::unknown').",
-                ),
-                goto=END,
-            )
-
-        # 4b. Manifest-drift guard (--resume only) — see _fan_drift_command.
-        #     `_fan_prior_children` is seeded ONLY on resume; absent => no-op.
-        drift_cmd = _fan_drift_command(
-            node, state.get("_fan_prior_children", {}).get(node.id),
-            seen, state.get("_resume_skip", set()), settings,
-        )
-        if drift_cmd is not None:
-            return drift_cmd
-
-        # 5. Dispatch one Send per item. state is committed post-gate state,
-        #    so children see merged completed_nodes / evaluations directly.
-        return Command(update={"fan_children": {node.id: [f"{node.id}::{item.get('id', 'unknown')}" for item in items]}}, goto=[
-            Send(template_node_id, {**state, "_fan_out_item": item})
-            for item in items
-        ])
-
-    dispatcher.__name__ = f"fan_{node.id}"
-    return dispatcher
+            if state.get("dry_run") and isinstance(node.for_each, str):
+                items = []
+            else:
+                items = _read_manifest(state, node, workflow_dir=workflow_dir)
+        except ManifestError as exc:
+            failure = make_failure_update(node.id, str(exc))
+            if not recovering:
+                failure["fan_children"] = {node.id: []}
+            return Command(update=failure, goto=END)
+        children = [child for child, _ in items]
+        if recovering:
+            drift = _fan_drift_command(node, state.get("_fan_prior_children", {}).get(node.id),
+                                      set(children), frozen, settings)
+            if drift:
+                return drift
+        generation = attempt + 1
+        inherited = set(children).intersection(frozen) if recovering else set()
+        update = {"fan_children": {node.id: children}, "fan_ready": {node.id: False},
+                  "attempts": {node.id: generation},
+                  "fan_child_attempts": dict.fromkeys(inherited, generation)}
+        sends = [
+            Send(f"_sub_{node.id}", {**state, "_fan_child_id": child, "_fan_out_item": item,
+                                     "_fan_attempt": generation, "_resume_skip": frozen - {child}})
+            for child, item in items if child not in inherited
+        ]
+        return Command(update=update, goto=sends or f"_settle_{node.id}")
+    return dispatch
 
 
 def build_workflow_graph(
@@ -295,42 +214,11 @@ def build_workflow_graph(
     base_dir = config.workflow_dir or Path(_base_dir or ".")
 
     builder = StateGraph(WorkflowState)
-    terminal_ids = set(find_terminal_nodes(config))
-    node_map = {p.id: p for p in config.nodes}
-
-    # Reverse dependency map: dependents[x] = ids declaring `x` in their
-    # depends_on, in declaration order. Built once instead of an O(N)
-    # rescan of config.nodes per gated/dynamic node below.
-    dependents: dict[str, list[str]] = {n.id: [] for n in config.nodes}
-    for p in config.nodes:
-        for dep in p.depends_on:
-            if dep in dependents:
-                dependents[dep].append(p.id)
-
-    gated_node_ids: set[str] = set()
-    dynamic_fan_out_ids: set[str] = set()
-    subgraph_node_ids: set[str] = set()
+    dependents = {node.id: [] for node in config.nodes}
     for node in config.nodes:
-        if node.eval or node.route:
-            gated_node_ids.add(node.id)
-        if node.fan_out is not None:
-            dynamic_fan_out_ids.add(node.id)
-        if node_subgraph_path(node) is not None:
-            subgraph_node_ids.add(node.id)
-            # Cycle detection happens once at top-level — nested calls
-            # see _depth>0 so they skip this and rely on the depth cap.
-            if _depth == 0:
-                detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings,
-                                    inputs=frozenset(node.workflow.inputs))
-    # ----- Node registration -----
+        for dep in node.depends_on:
+            dependents[dep].append(node.id)
 
-    # compile_fn is shared by recursive subgraph machinery and per-child
-    # fan-out subgraphs: both compile a referenced YAML at parent build
-    # time and invoke it later. Defined once so call sites don't drift.
-    # `logger` propagates so nested subgraphs keep emitting prefixed events.
-    # ``effective_settings`` (Phase 3) is the pre-merged scope view from
-    # the subgraph wrapper; threaded into the recursive call so subgraph
-    # nodes receive their own scope's settings.
     def compile_fn(c, executor=None, _depth=0, effective_settings=None, logger=None):
         return build_workflow_graph(
             c, executor=executor, _depth=_depth,
@@ -338,223 +226,46 @@ def build_workflow_graph(
             effective_settings=effective_settings,
         )
 
-    def build_subgraph(node):
-        child = load_graph(node.workflow.file, base_dir, settings, inputs=frozenset(node.workflow.inputs))
-        return make_subgraph_node(
-            node, child, compile_fn, executor, _depth, logger,
-            timeout=node.effective_timeout(settings),
-        )
-
-    # Execution nodes for every configured node.
+    forward_targets = {target for _, _, target, back in iter_route_edges(config) if not back}
+    command_sources = {n.id for n in config.nodes if n.eval or n.route or n.for_each}
     for node in config.nodes:
-        if node.id in subgraph_node_ids:
-            builder.add_node(node.id, build_subgraph(node))
-        else:
-            builder.add_node(
-                node.id,
-                _make_execution_node(
-                    node, config, executor,
-                    effective_settings=settings,
-                ),
-            )
+        downstream = dependents[node.id]
+        build_subgraph = None
+        if node.workflow:
+            inputs = frozenset(node.workflow.inputs)
+            if _depth == 0:
+                detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings, inputs=inputs)
+            child_config = load_graph(node.workflow.file, base_dir, settings, inputs=inputs)
 
-    # Dynamic node child template + final nodes.
-    final_node_ids: dict[tuple[str, str], str] = {}
-    gated_final_ids: set[str] = set()
-    # Lookup the per-id Node object used for gate construction. Populated
-    # for gated finals (synthetic Node mirrors the FanOutFinalNode config);
-    # top-level gated nodes look up directly via node_map.
-    final_synthetic_nodes: dict[str, Node] = {}
-    for node_id in dynamic_fan_out_ids:
-        node = node_map[node_id]
-        builder.add_node(
-            f"_sub_{node.id}",
-            _make_fan_out_node(
-                node, config, executor,
-                compile_fn=compile_fn, base_dir=base_dir, depth=_depth,
-                logger=logger,
-                effective_settings=settings,
-            ),
-        )
-
-        for idx, final_node in enumerate(node.fan_out.final_nodes):
-            fid = f"_final_{node.id}_{final_node.id}"
-            final_node_ids[(node.id, final_node.id)] = fid
-            builder.add_node(
-                fid, _make_final_fan_out_node(
-                    node, final_node, config, executor, is_first=(idx == 0),
-                    build_subgraph=build_subgraph,
-                    effective_settings=settings,
-                ),
-            )
-            if final_node.eval or final_node.route:
-                gated_final_ids.add(fid)
-                # Synthetic Node mirrors the FanOutFinalNode; its gate is
-                # registered as ``_eval_<fid>`` by _wire_evaluation_pair
-                # when the final chain is wired below.
-                final_synthetic_nodes[fid] = Node(
-                    id=fid, name=final_node.name,
-                    eval=final_node.eval, route=final_node.route, depends_on=[node.id],
+            def build_subgraph(reference, child=child_config):
+                return make_subgraph_node(
+                    reference, child, compile_fn, executor, _depth, logger,
+                    timeout=reference.effective_timeout(settings),
                 )
-                final_synthetic_nodes[fid]._ancestors = [*node._ancestors, node.id]
 
-    # ----- exit_node: what downstream deps plain-edge from -----
-    # For gated nodes, downstream waits on the eval node, not execution.
-
-    exit_node: dict[str, str] = {}
-    needs_conditional: set[str] = set()
-
-    for node in config.nodes:
-        if node.id in dynamic_fan_out_ids:
-            dsc = node.fan_out
-            if dsc.final_nodes:
-                last_final_id = final_node_ids[(node.id, dsc.final_nodes[-1].id)]
-                exit_node[node.id] = (
-                    f"_eval_{last_final_id}"
-                    if last_final_id in gated_final_ids
-                    else last_final_id
-                )
-            else:
-                exit_node[node.id] = f"_settle_{node.id}"
-            needs_conditional.add(node.id)
-        elif node.id in gated_node_ids:
-            exit_node[node.id] = f"_eval_{node.id}"
-            needs_conditional.add(node.id)
+        if node.for_each:
+            builder.add_node(node.id, _make_fan_dispatcher(node, downstream, settings, config.workflow_dir))
+            worker = f"_sub_{node.id}"
+            join = f"_settle_{node.id}"
+            prototype = item_node(node, settings)
+            builder.add_node(worker, make_item_worker(prototype, config, executor, settings, build_subgraph))
+            builder.add_node(join, make_item_join(prototype, executor, settings, downstream))
+            builder.add_edge(worker, join)
         else:
-            exit_node[node.id] = node.id
-
-    # ----- Plain edges: start + dep-to-node -----
-
-    # Back edges may return to a root. Only forward routes suppress its START edge.
-    route_goto_targets = {target for _, _, target, back_edge in iter_route_edges(config) if not back_edge}
-    for node in config.nodes:
-        if node.fan_out:
-            for step in [node.fan_out.template, *node.fan_out.final_nodes]:
-                route_goto_targets |= _collect_route_targets(step)
-
-    has_incoming: set[str] = set()
-
-    for node in config.nodes:
-        if not node.depends_on:
-            continue
+            body = build_subgraph(node) if node.workflow else _make_execution_node(
+                node, config, executor, effective_settings=settings,
+            )
+            builder.add_node(node.id, body)
+            if node.eval or node.route:
+                _wire_evaluation_pair(builder, node, node.id, downstream or [END], config,
+                                      executor=executor, effective_settings=settings)
+            elif not downstream:
+                builder.add_edge(node.id, END)
 
         for dep in node.depends_on:
-            if dep in needs_conditional:
-                # Conditional edge from the dep (or its eval) handles routing.
-                pass
-            else:
-                builder.add_edge(exit_node[dep], node.id)
-            has_incoming.add(node.id)
-
-    if entry is not None:
-        builder.add_edge(START, entry)
-    else:
-        for node in config.nodes:
-            if node.id not in has_incoming and node.id not in route_goto_targets:
-                builder.add_edge(START, node.id)
-
-    # ----- Top-level gated node wiring (non-dynamic) -----
-
-    for node in config.nodes:
-        if node.id not in gated_node_ids or node.id in dynamic_fan_out_ids:
-            continue
-        _wire_evaluation_pair(
-            builder, node, node.id, dependents[node.id] or [END], config,
-            executor=executor, effective_settings=settings,
-        )
-
-    # ----- Dynamic node wiring -----
-
-    for node_id in dynamic_fan_out_ids:
-        node = node_map[node_id]
-        dsc = node.fan_out
-        template_id = f"_sub_{node.id}"
-        fan_id = f"_fan_{node.id}"
-
-        settle_id = f"_settle_{node.id}"
-
-        def settle_fan(state: WorkflowState, parent=node):
-            children = state.get("fan_children", {}).get(parent.id, [])
-            failed = state.get("failed_nodes", set())
-            if any(child in failed for child in children):
-                return make_failure_update(parent.id, "Fan-out child failed", kind="upstream_failed")
-            if not all(child in state.get("completed_nodes", set()) for child in children):
-                return {}
-            update = settle_nodes(executor, fan_child_node(parent, settings), settings, children)
-            if update.get("failed_nodes"):
-                return update
-            update["fan_ready"] = {parent.id: True}
-            # Routed destinations may read promoted files once every branch has settled.
-            routes = state.get("route_destinations", {})
-            targets = []
-            for child in children:
-                target = routes.get(child)
-                if target:
-                    targets.extend(target if isinstance(target, list) else [target])
-            if targets:
-                return Command(update=update, goto=list(dict.fromkeys(targets)))
-            return update
-
-        builder.add_node(settle_id, settle_fan)
-        builder.add_edge(template_id, settle_id)
-        # _sub_ → first_final (child evaluates inline per branch).
-        # Final chain: each gated final is followed by its eval with retry
-        # self-loop; ungated finals get a plain edge to the next in line.
-        if dsc.final_nodes:
-            builder.add_edge(settle_id, final_node_ids[(node.id, dsc.final_nodes[0].id)])
-            for i in range(len(dsc.final_nodes) - 1):
-                cur = final_node_ids[(node.id, dsc.final_nodes[i].id)]
-                nxt = final_node_ids[(node.id, dsc.final_nodes[i + 1].id)]
-                if cur in gated_final_ids:
-                    _wire_evaluation_pair(
-                        builder, final_synthetic_nodes[cur], cur, [nxt],
-                        config, executor=executor, effective_settings=settings,
-                    )
-                else:
-                    builder.add_edge(cur, nxt)
-
-        # Branch exit → parent's dependents.
-        deps_of = dependents[node.id]
-        last_final = (
-            final_node_ids[(node.id, dsc.final_nodes[-1].id)]
-            if dsc.final_nodes else None
-        )
-        if last_final and last_final in gated_final_ids:
-            _wire_evaluation_pair(
-                builder, final_synthetic_nodes[last_final], last_final,
-                deps_of or [END], config,
-                executor=executor, effective_settings=settings,
-            )
-        else:
-            for tgt in (deps_of or [END]):
-                builder.add_edge(exit_node[node.id], tgt)
-
-        # Empty manifests continue at the first final node or the parent dependents.
-        if dsc.final_nodes:
-            no_items_targets = [f"_final_{node.id}_{dsc.final_nodes[0].id}"]
-        else:
-            no_items_targets = deps_of or [END]
-        builder.add_node(
-            fan_id, _make_fan_dispatcher(node, no_items_targets, settings)
-        )
-
-        if node.id in gated_node_ids:
-            _wire_evaluation_pair(
-                builder, node, node.id, [fan_id], config,
-                executor=executor, effective_settings=settings,
-            )
-        else:
-            # Ungated parent: plain edge parent → _fan_<id> (the dispatcher
-            # defers until the parent settles).
-            builder.add_edge(node.id, fan_id)
-
-    # Nodes with an evaluation or route dispatch their own terminal command.
-    for node in config.nodes:
-        if (
-            node.id in terminal_ids
-            and node.id not in gated_node_ids
-            and node.id not in dynamic_fan_out_ids
-        ):
-            builder.add_edge(node.id, END)
+            if dep not in command_sources:
+                builder.add_edge(dep, node.id)
+        if entry == node.id or (entry is None and not node.depends_on and node.id not in forward_targets):
+            builder.add_edge(START, node.id)
 
     return builder.compile(checkpointer=checkpointer)

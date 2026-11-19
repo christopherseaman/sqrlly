@@ -1,21 +1,20 @@
 import pytest
 from pydantic import ValidationError
 
-from sqrlly.schema.models import FanOutFinalNode, FanOutTemplate, Graph, Node, Settings, load_workflow
+from sqrlly.schema.models import Graph, Node, Settings, load_workflow
 
 
-@pytest.mark.parametrize("model,fields", [(Node, {"id": "a"}), (FanOutTemplate, {}), (FanOutFinalNode, {"id": "a"})])
-def test_kind_selection(model, fields):
-    assert model(**fields).kind is None
-    assert model(**fields, agent="a.md").agent.prompt == "a.md"
-    assert model(**fields, llm={"text": "Hello"}).llm.text == "Hello"
-    assert model(**fields, run='echo "a b"').run.cmd == ["echo", "a b"]
-    workflow = model(**fields, workflow={"file": "b.yaml", "with": {"name": "Alex"}})
+def test_kind_selection():
+    assert Node(id="a").kind is None
+    assert Node(id="a", agent="a.md").agent.prompt == "a.md"
+    assert Node(id="a", llm={"text": "Hello"}).llm.text == "Hello"
+    assert Node(id="a", run='echo "a b"').run.cmd == ["echo", "a b"]
+    workflow = Node(id="a", workflow={"file": "b.yaml", "with": {"name": "Alex"}})
     assert workflow.workflow.inputs == {"name": "Alex"}
     with pytest.raises(ValidationError, match="agent, llm, run, workflow"):
-        model(**fields, run="pwd", workflow="a.yaml")
+        Node(id="a", run="pwd", workflow="a.yaml")
     with pytest.raises(ValidationError, match="execute"):
-        model(**fields, execute={"url": "a.md"})
+        Node(id="a", execute={"url": "a.md"})
 
 
 @pytest.mark.parametrize("run", ["echo {{ a }}", "echo hi | cat", [], {"cmd": [""]}, {"cmd": "pwd", "env": {"X": 2}}])
@@ -30,14 +29,19 @@ def test_removed_settings(key):
         Settings.model_validate({key: {}})
 
 
-def test_fan_out_files_resolve_at_load(tmp_path, monkeypatch):
+def test_repeating_files_resolve_at_load(tmp_path, monkeypatch):
     path = tmp_path / "workflow.yaml"
-    path.write_text("settings: {prompts: text}\nnodes:\n- id: batch\n  fan_out:\n    template: {agent: task.md}\n    final_nodes: [{id: end, workflow: end.yaml}]\n")
+    path.write_text("settings: {prompts: text}\nnodes:\n"
+                    "- {id: batch, agent: task.md, for_each: {file: items.json}}\n"
+                    "- {id: end, depends_on: [batch], workflow: end.yaml}\n")
     monkeypatch.chdir(tmp_path.parent)
+    with pytest.raises(ValidationError, match="items.json"):
+        load_workflow(path)
+    (tmp_path / "items.json").write_text("[]")
     with pytest.raises(ValidationError, match="task.md"):
         load_workflow(path)
     (tmp_path / "text").mkdir()
-    (tmp_path / "text/task.md").write_text("hello")
+    (tmp_path / "text/task.md").write_text("{{item.title}}")
     with pytest.raises(ValidationError, match="end.yaml"):
         load_workflow(path)
     (tmp_path / "end.yaml").write_text("nodes: [{id: end}]")
@@ -45,7 +49,8 @@ def test_fan_out_files_resolve_at_load(tmp_path, monkeypatch):
     assert graph.name == "workflow"
     assert graph.workflow_dir == tmp_path
     assert graph.settings.workflow_dir == tmp_path
-    assert graph.nodes[0].fan_out.final_nodes[0].workflow.file == "end.yaml"
+    assert graph.nodes[0].for_each.file == "items.json"
+    assert graph.nodes[1].workflow.file == "end.yaml"
 
 
 def test_per_kind_defaults_and_node_overrides():
@@ -57,12 +62,12 @@ def test_per_kind_defaults_and_node_overrides():
     assert Node(id="a", run="pwd", promote=False).effective_promote(settings) is False
 
 
-def test_named_tools_follow_effective_provider_in_fan_out():
-    nodes = [{"id": "fan", "fan_out": {"template": {"agent": {"text": "hi", "tools": ["Read"]}}}}]
+def test_named_tools_follow_effective_provider_on_repeating_agent():
+    nodes = [{"id": "fan", "for_each": {"file": "items.json"}, "agent": {"text": "hi", "tools": ["Read"]}}]
     with pytest.raises(ValidationError, match="anthropic"):
         Graph(nodes=nodes)
     graph = Graph(nodes=nodes, settings={"defaults": {"agent": {"provider": "anthropic"}}})
-    assert graph.nodes[0].fan_out.template.agent.tools == ["Read"]
+    assert graph.nodes[0].agent.tools == ["Read"]
 
 
 def test_child_uses_inherited_settings_during_validation(tmp_path):
