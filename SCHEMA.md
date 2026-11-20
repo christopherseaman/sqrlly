@@ -206,7 +206,7 @@ worse, the node name). `workflow_end` also carries a `failed_kinds` map
 | `backend_error` | A non-overload prompt backend error exhausted its retry budget in a node or prompt eval. | **transient** |
 | `timeout` | Node execution or an eval reached its deadline. | **transient** |
 | `infra` | Worktree creation or setup failed, including a failed `worktree_share` link or `worktree_setup` command. | **transient** |
-| `gate_failure` | A route selected `fail` or exhausted a matching case. This kind also covers an eval result that could not be parsed or failed schema validation. | **deterministic** |
+| `gate_failure` | A route selected `fail` or exhausted a matching case. This kind also covers invalid JSON or schema validation errors in evals that require a schema. | **deterministic** |
 | `node_error` | A node failed to execute, read a manifest, satisfy an output contract, or evaluate a route predicate. This kind also covers unclassified node failures. | **deterministic** |
 | `upstream_failed` | This node did **not** do the failing work: a `depends_on` id already failed, or an inner subgraph/fan-out branch node failed. The real failure is elsewhere in the same JSONL stream (a bare sibling id, or a `parent::child`-prefixed inner id). | **not-this-node** |
 
