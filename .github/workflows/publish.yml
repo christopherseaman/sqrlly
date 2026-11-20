@@ -35,6 +35,25 @@ jobs:
       - name: Verify metadata with twine
         run: uvx --from twine twine check dist/*.whl dist/*.tar.gz
 
+      - name: Smoke test the wheel
+        shell: bash
+        run: |
+          smoke_dir="$(mktemp -d "${RUNNER_TEMP}/sqrlly-wheel.XXXXXX")"
+          cd "$smoke_dir"
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python "${GITHUB_WORKSPACE}"/dist/*.whl
+          .venv/bin/sqrlly init --example explicit_join explicit_join
+          cat > smoke.yaml <<'YAML'
+          name: Wheel smoke test
+          nodes:
+            - id: joined
+              workflow: explicit_join/workflow.yaml
+            - id: verify
+              depends_on: [joined]
+              run: [test, '{{joined}}', '=', "A=A done | B=B done | C=C done\n"]
+          YAML
+          .venv/bin/sqrlly run smoke.yaml
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
