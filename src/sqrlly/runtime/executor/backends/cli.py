@@ -21,7 +21,6 @@ import signal
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
 
 from sqrlly.runtime.executor.backends._overload import (
     OVERLOAD_SUBSTRINGS,
@@ -31,31 +30,14 @@ from sqrlly.schema.json_schema import load_validator, provider_envelope
 from sqrlly.runtime.result import ExecutionResult
 
 
-async def _kill_process_group(proc: Any) -> None:
-    """SIGTERM → brief wait → SIGKILL the child's process GROUP, then reap.
-
-    The child is spawned with ``start_new_session=True``, so it is the
-    leader of its own process group and ``os.getpgid(proc.pid)`` is the
-    group containing every descendant the provider CLI forked (MCP servers,
-    test runners, headless browsers). ``proc.kill()`` would signal only the
-    direct child and leak that tree; ``os.killpg`` reaches the whole group.
-
-    No ``/proc`` walk is needed: the parent is still alive (it is the group
-    leader) when we signal, so the descendants have not reparented to PID 1
-    and a single group signal reaches them all. We reap the parent with ``proc.wait()`` afterward so the OS does not
-    accumulate a zombie.
-    """
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        # Already exited between the timeout and here; just reap.
-        await proc.wait()
-        return
+async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Terminate the process group created by ``start_new_session=True``."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.killpg(pgid, sig)
+            # The group keeps its original ID after the leader exits.
+            os.killpg(proc.pid, sig)
         except ProcessLookupError:
-            break  # group already gone
+            break
         if sig is signal.SIGTERM:
             await asyncio.sleep(0.5)  # grace period for clean shutdown
     await proc.wait()

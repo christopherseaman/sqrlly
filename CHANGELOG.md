@@ -8,6 +8,7 @@ All notable changes to sqrlly are documented here. Format follows
 ### Fixed
 
 - A child workflow returns the output from its selected route when other destinations remain unvisited.
+- `sqrlly run` exits with status 130 on Ctrl-C. Cancellation stops subprocess groups even after their leaders exit.
 
 ### Migration
 

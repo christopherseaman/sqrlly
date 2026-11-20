@@ -656,6 +656,9 @@ def run(
         result = asyncio.run(
             _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file, quiet, entry, safe_mode)
         )
+    except KeyboardInterrupt:
+        click.echo("Interrupted.", err=True)
+        raise click.exceptions.Exit(130) from None
     except BlockingIOError as exc:
         raise click.ClickException("This workflow run is already active") from exc
     except (EvaluationError, ManifestError, RouteError) as e:
