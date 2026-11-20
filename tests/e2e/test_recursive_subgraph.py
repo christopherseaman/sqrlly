@@ -87,6 +87,7 @@ async def test_simple_recursive_subgraph(tmp_path):
     [
         ("first", False, "last", "first"),
         ("first", True, "last", "first"),
+        ("last", True, "last", "last"),
         ("both", True, "last", "last"),
         ("both", True, "", ""),
         ("stop", True, "last", "router-stop"),
@@ -98,8 +99,9 @@ async def test_downstream_consumes_routed_subgraph_output(tmp_path, mode, router
         "id": "choose",
         "run": [_ECHO, "-n", f"router-{mode}"],
         "route": [
-            {"when": str(mode == "first"), "then": "first"},
-            {"when": str(mode == "both"), "then": ["first", "last"]},
+            {"when": "choose == 'router-first'", "then": "first"},
+            {"when": "choose == 'router-last'", "then": "last"},
+            {"when": "choose == 'router-both'", "then": ["first", "last"]},
         ],
     }
     branches = [
