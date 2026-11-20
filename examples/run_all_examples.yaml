@@ -1,5 +1,6 @@
 # Run the examples that share this workflow's workdir. Run wave_planner
 # separately in a fresh workdir because it writes its own state.json.
+# The agent_recovery walkthrough uses a disposable Git repository and pauses for repair.
 name: Run All Examples (parallel)
 nodes:
   - id: smoke

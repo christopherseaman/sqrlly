@@ -11,7 +11,7 @@ def test_list_examples_flag_lists_all():
     assert res.exit_code == 0
     for name in (
         "jokes", "route_classify", "explicit_join", "pipeline_style",
-        "absurd-paper",
+        "absurd-paper", "agent_recovery",
     ):
         assert name in res.output
 

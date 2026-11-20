@@ -21,6 +21,15 @@ SKILL_INSTALL_REL = Path(".agents/skills/sqrlly/SKILL.md")
 
 # Curated examples scaffoldable via `sqrlly init --example`. dest -> repo src.
 EXAMPLES: dict[str, dict] = {
+    "agent_recovery": {
+        "description": "Promote an agent's edit in Git and resume a failed worker. Start with README.md.",
+        "files": {
+            "workflow.yaml": "examples/agent_recovery/workflow.yaml",
+            "README.md": "examples/agent_recovery/README.md",
+            "items.json": "examples/agent_recovery/items.json",
+            "worker.py": "examples/agent_recovery/worker.py",
+        },
+    },
     "jokes": {
         "description": "LLM prompt + quality gate + multi-node (needs an authed `codex` CLI).",
         "files": {
@@ -105,17 +114,17 @@ def init_example(name: str, directory: str) -> None:
             f"{', '.join(sorted(EXAMPLES))}."
         )
     target = Path(directory)
-    workflow_path = target / "workflow.yaml"
-    if workflow_path.exists():
-        raise click.ClickException(
-            f"{workflow_path} already exists. "
-            f"Remove it or pick a different directory."
-        )
-    for dest_rel, src_rel in EXAMPLES[name]["files"].items():
+    files = EXAMPLES[name]["files"]
+    for dest_rel in files:
+        dest = target / dest_rel
+        if dest.exists() or dest.is_symlink():
+            raise click.ClickException(f"{dest} already exists. Pick a different directory.")
+    for dest_rel, src_rel in files.items():
         text = _load_example_file(src_rel)
         out = target / dest_rel
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        with out.open("x", encoding="utf-8") as stream:
+            stream.write(text)
 
     display = str(target) if str(target) != "." else "the current directory"
     click.echo(f"Scaffolded example {name!r} into {display}.")
@@ -123,6 +132,9 @@ def init_example(name: str, directory: str) -> None:
     click.echo("Next steps:")
     if str(target) != ".":
         click.echo(f"  cd {target}")
+    if "README.md" in files:
+        click.echo("  Follow README.md to set up and run this example.")
+        return
     click.echo("  sqrlly validate workflow.yaml")
     click.echo("  sqrlly run workflow.yaml")
 

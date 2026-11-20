@@ -59,6 +59,10 @@ packages = ["src/sqrlly"]
 # Curated examples scaffoldable via `sqrlly init --example` — pipx/uv-tool
 # users have no repo checkout, so the run-essential files ride in the wheel
 # under sqrlly/_examples/ (read by cli/init.py::_load_example_file).
+"examples/agent_recovery/workflow.yaml" = "sqrlly/_examples/agent_recovery/workflow.yaml"
+"examples/agent_recovery/README.md" = "sqrlly/_examples/agent_recovery/README.md"
+"examples/agent_recovery/items.json" = "sqrlly/_examples/agent_recovery/items.json"
+"examples/agent_recovery/worker.py" = "sqrlly/_examples/agent_recovery/worker.py"
 "examples/jokes/workflow.yaml" = "sqrlly/_examples/jokes/workflow.yaml"
 "examples/jokes/generate.md" = "sqrlly/_examples/jokes/generate.md"
 "examples/jokes/select.md" = "sqrlly/_examples/jokes/select.md"

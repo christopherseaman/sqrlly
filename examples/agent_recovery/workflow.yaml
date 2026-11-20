@@ -1,0 +1,28 @@
+name: agent-recovery
+nodes:
+  - id: edit
+    agent:
+      tools: edit
+      text: |
+        Use your tools to create message.txt in the current directory.
+        Write one line containing exactly "release notes ready" without quotes.
+        Leave all other files alone.
+    worktree: isolated
+    outputs:
+      files: [message.txt]
+
+  - id: publish
+    depends_on: [edit]
+    for_each: {file: items.json}
+    worktree: off
+    run: [python3, "{{workflow_dir}}/worker.py", "{{item.id}}"]
+
+  - id: report
+    depends_on: [publish]
+    run:
+      - python3
+      - -c
+      - "from pathlib import Path; import sys; Path('report.json').write_text(sys.argv[1] + '\\n')"
+      - "{{publish}}"
+    outputs:
+      files: [report.json]

@@ -12,7 +12,7 @@ from sqrlly.cli import init as initmod
 def test_catalog_has_curated_examples():
     assert set(initmod.EXAMPLES) == {
         "jokes", "route_classify", "explicit_join", "pipeline_style",
-        "absurd-paper",
+        "absurd-paper", "agent_recovery",
     }
     for name, spec in initmod.EXAMPLES.items():
         assert spec["description"]
@@ -26,6 +26,15 @@ def test_load_example_file_reads_repo_source():
     # returns the real file content.
     text = initmod._load_example_file("examples/jokes/workflow.yaml")
     assert "Joke Generator" in text
+
+
+def test_example_preserves_existing_readme_before_scaffolding(tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text("project notes")
+    with pytest.raises(ClickException, match="README.md already exists"):
+        initmod.init_example("agent_recovery", str(tmp_path))
+    assert list(tmp_path.iterdir()) == [readme]
+    assert readme.read_text() == "project notes"
 
 
 def test_load_example_file_unknown_raises():

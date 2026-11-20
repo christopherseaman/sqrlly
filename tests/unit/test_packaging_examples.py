@@ -6,6 +6,10 @@ import zipfile
 from pathlib import Path
 
 EXPECTED = [
+    "sqrlly/_examples/agent_recovery/workflow.yaml",
+    "sqrlly/_examples/agent_recovery/README.md",
+    "sqrlly/_examples/agent_recovery/items.json",
+    "sqrlly/_examples/agent_recovery/worker.py",
     "sqrlly/_examples/jokes/workflow.yaml",
     "sqrlly/_examples/jokes/generate.md",
     "sqrlly/_examples/jokes/select.md",
