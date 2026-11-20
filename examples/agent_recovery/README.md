@@ -6,15 +6,19 @@ base directory. The workers use `worktree: off` so they can read a
 repaired destination file on resume. Alpha has a destination file at
 the start. Beta gets one before resume.
 
-Use Git, Python 3, an authenticated `codex` CLI on PATH, and a version
-of sqrlly that supports the 1.0 workflow grammar. The commands below
-use `uv` from the root of the sqrlly checkout. For a scaffold made
-with `sqrlly init --example agent_recovery`, run from the scaffold
-directory, set `workflow=workflow.yaml`, and use `sqrlly` in place of
-`uv run sqrlly`.
+Use Git, Python 3, an authenticated Codex CLI, and sqrlly with the
+1.0 grammar. For an installed CLI, start in the directory created by
+`sqrlly init --example agent_recovery`. From a source checkout, use
+this setup first:
 
 ```bash
-workflow=examples/agent_recovery/workflow.yaml
+cd examples/agent_recovery
+sqrlly() { uv run sqrlly "$@"; }
+```
+
+Create a disposable repository and run the workflow from the example directory.
+
+```bash
 scratch=$(mktemp -d)
 repo="$scratch/repo"
 git init -q "$repo"
@@ -22,8 +26,8 @@ printf '%s\n' Alpha > "$repo/alpha.txt"
 git -C "$repo" add alpha.txt
 git -C "$repo" -c user.name=Demo -c user.email=demo@example.invalid commit -qm "Add alpha destination"
 
-uv run sqrlly validate "$workflow"
-uv run sqrlly run "$workflow" --workdir "$repo" --log "$scratch/first.jsonl"
+sqrlly validate workflow.yaml
+sqrlly run workflow.yaml --workdir "$repo" --log "$scratch/first.jsonl"
 ```
 
 The run exits with status 1 because `publish::beta` cannot find
@@ -40,7 +44,7 @@ with the same workflow path and workdir to reuse the checkpoint.
 
 ```bash
 printf '%s\n' Beta > "$repo/beta.txt"
-uv run sqrlly run "$workflow" --workdir "$repo" --log "$scratch/resume.jsonl" --resume
+sqrlly run workflow.yaml --workdir "$repo" --log "$scratch/resume.jsonl" --resume
 cat "$repo/report.json"
 ```
 
