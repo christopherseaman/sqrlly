@@ -68,7 +68,8 @@ def test_clean_resume_inserts_one_child_and_rebuilds_ordered_aggregate(scenario)
     assert (workdir / "calls").read_text().splitlines() == ["fast", "slow"]
     assert json.loads((workdir / "aggregate").read_text()) == ["slow", "fast"]
     write_items(config, a, new, b)
-    run(config, workdir, "--resume")
+    output = run(config, workdir, "--resume")
+    assert "skipping 2 completed nodes from the checkpoint" in output
     assert counts(workdir) == {"fast": 1, "slow": 1, "middle": 1}
     assert json.loads((workdir / "aggregate").read_text()) == ["slow", "middle", "fast"]
 

@@ -413,15 +413,7 @@ async def _seed_state(
         }
         if rerun_all:
             state.pop("_cold_entry", None)
-            source = "all nodes (rerun-all)"
-        elif resume_from:
-            source = ", ".join(sorted(resume_from))
-        else:
-            source = "failed nodes"
-        click.echo(
-            f"Resuming: skipping {len(skip)} completed; re-running "
-            f"{len(prior_completed - skip)} (from: {source})."
-        )
+        click.echo(f"Resuming: skipping {len(skip)} completed nodes from the checkpoint.")
         # Wipe the thread so reducers don't merge with stale state
         await cp.adelete_thread(thread_id)
         return state
