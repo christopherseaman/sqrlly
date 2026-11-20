@@ -120,6 +120,8 @@ The qualified form lets `sqrlly validate child.yaml` check the child independent
 Validating the parent also checks literal input keys against its `workflow.with` mapping.
 At the top level, `workflow_inputs` is an empty mapping. An ancestor named `workflow_inputs` binds its output under that name.
 
+The parent receives the output of the terminal node reached in the child workflow. If several terminals produce output, the last one in YAML declaration order wins, even when its output is empty.
+
 A node with only an id and dependencies joins its predecessors without launching a process.
 
 ## Eval

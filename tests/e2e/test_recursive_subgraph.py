@@ -82,6 +82,44 @@ async def test_simple_recursive_subgraph(tmp_path):
     assert result["node_outputs"]["sub_node"] == "from-child-b"
 
 
+@pytest.mark.parametrize(
+    ("mode", "router_last", "last_output", "expected"),
+    [
+        ("first", False, "last", "first"),
+        ("first", True, "last", "first"),
+        ("both", True, "last", "last"),
+        ("both", True, "", ""),
+        ("stop", True, "last", "router-stop"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_downstream_consumes_routed_subgraph_output(tmp_path, mode, router_last, last_output, expected):
+    router = {
+        "id": "choose",
+        "run": [_ECHO, "-n", f"router-{mode}"],
+        "route": [
+            {"when": str(mode == "first"), "then": "first"},
+            {"when": str(mode == "both"), "then": ["first", "last"]},
+        ],
+    }
+    branches = [
+        {"id": "first", "run": [_ECHO, "-n", "first"]},
+        {"id": "last", "run": [_ECHO, "-n", last_output]},
+    ]
+    _yaml(tmp_path / "sub.yaml", {"nodes": [*branches, router] if router_last else [router, *branches]})
+    config = Graph(nodes=[
+        {"id": "sub_ref", "workflow": "sub.yaml"},
+        {"id": "consume", "depends_on": ["sub_ref"], "run": [_ECHO, "-n", "consumed:{{sub_ref}}"]},
+    ])
+    executor = DispatchExecutor(workdir=str(tmp_path))
+    graph = build_workflow_graph(config, executor, _base_dir=tmp_path)
+
+    result = await graph.ainvoke(make_initial_state(workdir=str(tmp_path)))
+
+    assert result["node_outputs"]["sub_ref"] == expected
+    assert result["node_outputs"]["consume"] == f"consumed:{expected}"
+
+
 @pytest.mark.asyncio
 async def test_subgraph_runnable_standalone(tmp_path):
     """Same YAML file runs both standalone and as a subgraph reference.

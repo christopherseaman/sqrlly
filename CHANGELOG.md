@@ -5,6 +5,10 @@ All notable changes to sqrlly are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A child workflow returns the output from its selected route when other destinations remain unvisited.
+
 ### Migration
 
 - The 1.0 YAML grammar requires migrating 0.10 workflows. Use [SCHEMA.md](SCHEMA.md) for the new field names and value shapes.

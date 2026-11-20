@@ -53,17 +53,13 @@ def load_graph(
 
 
 def _terminal_node_output(sub_state: dict[str, Any], sub_config: Graph) -> str:
-    """Pick the subgraph's terminal node and return its output.
-
-    A terminal node is one not depended on by any other node. If multiple
-    terminals exist, picks the last one defined. Returns "" if subgraph
-    has no node_outputs.
-    """
-    terminals = find_terminal_nodes(sub_config)
-    if not terminals:
-        return ""
+    """Return the last declared terminal's recorded output."""
     outputs = sub_state.get("node_outputs", {})
-    return outputs.get(terminals[-1], "")
+    routes = sub_state.get("route_destinations", {})
+    for node_id in reversed(find_terminal_nodes(sub_config)):
+        if node_id in outputs and not routes.get(node_id):
+            return outputs[node_id]
+    return ""
 
 
 def make_subgraph_node(

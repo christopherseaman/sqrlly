@@ -19,12 +19,7 @@ if TYPE_CHECKING:
 
 
 def find_terminal_nodes(config: "Graph") -> list[str]:
-    """Node ids not depended on by any other node, in declaration order.
-
-    A subgraph's terminal output is the *last* such node; the top-level
-    builder wants the set. Returning an ordered list serves both —
-    callers ``set(...)`` it or take ``[-1]`` as needed.
-    """
+    """Return declaration-ordered nodes with no static dependents."""
     depended_on: set[str] = set()
     for node in config.nodes:
         depended_on.update(node.depends_on)
