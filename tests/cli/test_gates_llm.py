@@ -1,9 +1,12 @@
 """Prompt measurements through a real provider CLI."""
 
+import json
 import sys
 
 import pytest
+from click.testing import CliRunner
 
+from sqrlly.cli.main import cli
 from sqrlly.compile.graph import build_workflow_graph
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.state import make_initial_state
@@ -48,3 +51,36 @@ async def test_escalation_prompt_receives_final_measurement(tmp_path):
     answer = state["node_outputs"]["escalate"]
     assert token in answer
     assert "3" in answer.replace(token, "")
+
+
+@pytest.mark.cli
+def test_malformed_prompt_eval_fails_node(tmp_path):
+    workflow = tmp_path / "workflow.yaml"
+    log = tmp_path / "events.jsonl"
+    workflow.write_text("""
+nodes:
+  - id: checked
+    run: [echo, ready]
+    eval:
+      agent:
+        text: Assess the result.
+        provider: openai
+        cli_args: [--version]
+    route:
+      - else: next
+  - id: next
+    run: [echo, approved]
+""")
+    result = CliRunner().invoke(
+        cli, ["run", str(workflow), "-w", str(tmp_path), "--log", str(log), "-q"],
+    )
+
+    assert result.exit_code == 1, result.output
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    failure = next(event for event in events if event["event"] == "node_failed")
+    assert failure["node"] == "checked"
+    assert failure["kind"] == "gate_failure"
+    assert "eval.outputs.schema eval-score.schema.json: Expecting value" in failure["error"]
+    end = next(event for event in events if event["event"] == "workflow_end")
+    assert end["failed_kinds"] == {"checked": "gate_failure"}
+    assert end["completed"] == 0
