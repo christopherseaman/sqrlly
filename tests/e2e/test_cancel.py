@@ -27,7 +27,11 @@ def test_sigint_reaps_child_and_resume_continues(tmp_path, worker_mode):
     trap 'wait "$child"; exit 143' TERM
     sleep 60 &
     child=$!
-    printf '%s %s\\n' "$$" "$child" > started
+    if ! printf '%s %s\\n' "$$" "$child" > started; then
+        kill "$child"
+        wait "$child"
+        exit 1
+    fi
     if test "$2" = exit; then exit 0; fi
     wait "$child"
 fi
