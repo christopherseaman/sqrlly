@@ -8,8 +8,15 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+import psutil
 import pytest
 import yaml
+
+
+def _is_live(process):
+    with suppress(psutil.NoSuchProcess):
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    return False
 
 
 @pytest.mark.parametrize("worker_mode", ["wait", "exit"])
@@ -38,7 +45,7 @@ printf '%s\\n' "$1"
     cli = [str(Path(sys.executable).with_name("sqrlly")), "run", str(config)]
     started = tmp_path / "started"
     started.touch()
-    pgid = None
+    worker = sleeper = None
     with (tmp_path / "interrupt.log").open("w+") as log:
         with subprocess.Popen(
             cli, cwd=tmp_path, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
@@ -51,43 +58,46 @@ printf '%s\\n' "$1"
                         pytest.fail(f"Sleep did not start:\n{log.read()}")
                     time.sleep(0.02)
                 worker_pid, sleep_pid = map(int, pids.split())
-                sleep_group = os.getpgid(sleep_pid)
-                assert sleep_group in {worker_pid, proc.pid} and sleep_group != os.getpgrp()
-                pgid = sleep_group
+                sleeper = psutil.Process(sleep_pid)
+                pgid = os.getpgid(sleep_pid)
+                assert pgid in {worker_pid, proc.pid} and pgid != os.getpgrp()
 
                 if worker_mode == "exit":
-                    while time.monotonic() < startup_deadline:
-                        try:
-                            os.kill(worker_pid, 0)
-                        except ProcessLookupError:
-                            break
+                    while psutil.pid_exists(worker_pid) and time.monotonic() < startup_deadline:
                         time.sleep(0.02)
-                    else:
-                        pytest.fail("Worker did not exit before SIGINT")
+                    assert not psutil.pid_exists(worker_pid), "Worker did not exit before SIGINT"
+                else:
+                    worker = psutil.Process(worker_pid)
+                assert _is_live(sleeper), "Sleep exited before SIGINT"
 
                 deadline = time.monotonic() + 5
                 proc.send_signal(signal.SIGINT)
                 exit_code = proc.wait(timeout=max(0, deadline - time.monotonic()))
                 log.seek(0)
                 assert exit_code == 130, log.read()
-                while time.monotonic() < deadline:
-                    try:
+                if worker_mode == "exit":
+                    # The orphan's new parent controls when it gets reaped.
+                    while _is_live(sleeper) and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    assert not _is_live(sleeper), "Orphaned sleep survived SIGINT"
+                else:
+                    while time.monotonic() < deadline:
+                        try:
+                            os.killpg(pgid, 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.02)
+                    assert not sleeper.is_running(), "Sleep PID remained after SIGINT"
+                    with pytest.raises(ProcessLookupError):
                         os.killpg(pgid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(0.02)
-                with pytest.raises(ProcessLookupError):
-                    os.kill(sleep_pid, 0)
-                with pytest.raises(ProcessLookupError):
-                    os.killpg(pgid, 0)
-                pgid = None
                 assert not (tmp_path / "result").exists()
             finally:
-                if pgid is not None:
-                    with suppress(ProcessLookupError):
-                        os.killpg(pgid, signal.SIGTERM)
                 if proc.poll() is None:
                     proc.kill()
+                for process in (sleeper, worker):
+                    if process is not None and _is_live(process):
+                        with suppress(psutil.NoSuchProcess):
+                            process.terminate()
 
     (tmp_path / "resume").touch()
     resumed = subprocess.run([*cli, "--resume"], cwd=tmp_path, capture_output=True, text=True, timeout=20)

@@ -126,6 +126,7 @@ nodes:
 - `--workdir / -w <dir>` — working directory (default `.`).
 - `--dry-run` traces topology without running commands or prompts. Items from producer nodes are unavailable during a dry run.
 - `--resume` seeds from the prior run's state and retries failures. It skips completed nodes by default.
+  If an isolated node stops before sqrlly records its result, inspect its retained worktree before starting a fresh run.
 - `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
 - `--rerun-all` with `--resume` replays every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
