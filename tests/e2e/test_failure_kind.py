@@ -86,6 +86,35 @@ async def test_node_failed_events_carry_the_right_kind(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_malformed_eval_result_settles_as_gate_failure(tmp_path):
+    (tmp_path / "review.json").write_text('{"type": "object"}')
+    config = Graph(
+        name="malformed-eval",
+        nodes=[{
+            "id": "build",
+            "run": [_PYTHON, "-c", "print('built')"],
+            "eval": {
+                "run": [_PYTHON, "-c", "print('not json at all')"],
+                "outputs": {"schema": "review.json"},
+            },
+        }],
+    )
+    buf = StringIO()
+    compiled = build_workflow_graph(
+        config, DispatchExecutor(workdir=str(tmp_path)), checkpointer=None,
+    )
+    state = make_initial_state(workdir=str(tmp_path), dry_run=False)
+    result = await run_workflow(compiled, state, config, logger=JsonlLogger(buf))
+
+    assert result["failed_nodes"] == {"build"}
+    events = [json.loads(line) for line in buf.getvalue().splitlines()]
+    failure = next(event for event in events if event["event"] == "node_failed")
+    assert failure["node"] == "build"
+    assert failure["kind"] == "gate_failure"
+    assert "eval.outputs.schema review.json: Expecting value" in failure["error"]
+
+
+@pytest.mark.asyncio
 async def test_infra_abort_settles_as_node_failed_not_traceback(tmp_path):
     """A worktree-setup infra abort (a setup command exiting non-zero) settles
     the graph as a `node_failed` with `kind: infra` — the run RETURNS with the

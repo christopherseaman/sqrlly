@@ -2,12 +2,14 @@
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
+from sqrlly.runtime import gates
 from sqrlly.runtime.gates import build_eval_preamble, run_evaluation
-from sqrlly.runtime.result import EvaluationBackendError, EvaluationError
-from sqrlly.schema.models import Node, Settings
+from sqrlly.runtime.result import EvaluationBackendError, EvaluationError, ExecutionResult
+from sqrlly.schema.models import Node, Outputs, Settings
 
 
 @pytest.mark.parametrize("stdout", ['{"quality": 4, "exit_code": 0}', "[3]", "plain text"])
@@ -63,6 +65,27 @@ async def test_prompt_measurement_exposes_score_and_explanation(tmp_path, monkey
     assert result["score"] == 0.75
     assert result["explanation"] == "tested"
     assert '"score": 0.75' in result["text"]
+
+
+@pytest.mark.parametrize(("reply", "diagnostic"), [
+    ('{"score": 0.75, "explanation": "tested"}', None),
+    ("not json at all", "Expecting value"),
+    ('{"score": "high", "explanation": "tested"}', "is not of type 'number'"),
+])
+def test_prompt_eval_reply_validation(reply, diagnostic):
+    schema = Path(gates.__file__).with_name("eval-score.schema.json")
+    outputs = Outputs(schema=str(schema))
+    outputs.load_schema(schema)
+    result = ExecutionResult(output=reply)
+    if diagnostic is None:
+        assert gates._validated_eval_output(outputs, result) == {
+            "score": 0.75, "explanation": "tested",
+        }
+    else:
+        with pytest.raises(EvaluationError, match=r"eval.outputs.schema eval-score\.schema\.json") as exc:
+            gates._validated_eval_output(outputs, result)
+        assert diagnostic in str(exc.value)
+
 
 @pytest.mark.parametrize("value", ['{"quality": 4}', '{"quality": "four"}', "invalid json"])
 async def test_run_eval_validates_declared_schema(tmp_path, value):

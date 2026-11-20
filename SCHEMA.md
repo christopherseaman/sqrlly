@@ -131,6 +131,8 @@ An eval has exactly one of `run`, `llm` and `agent`. The command or prompt runs 
 An eval accepts `timeout` in seconds and `outputs.schema` as a workflow-relative JSON Schema file.
 An `agent` or `llm` eval accepts the usual prompt options and an optional eval-level `model` override.
 Without a schema, a prompt eval returns numeric `score` and string `explanation`.
+If a successful prompt backend returns invalid JSON or a result that fails the eval schema, the node fails with `gate_failure`.
+The error names the eval schema and reports the parse or validation problem.
 Every measurement appends its attempt number and result to the node's history.
 The JSONL event `gate_evaluated` carries `node`, `attempt` and a nested `result`. For a command, read `result.exit_code`, `result.text` and any JSON fields. A prompt measurement carries `result.text` and its schema fields.
 
@@ -204,7 +206,7 @@ worse, the node name). `workflow_end` also carries a `failed_kinds` map
 | `backend_error` | A non-overload prompt backend error exhausted its retry budget in a node or prompt eval. | **transient** |
 | `timeout` | Node execution or an eval reached its deadline. | **transient** |
 | `infra` | Worktree creation or setup failed, including a failed `worktree_share` link or `worktree_setup` command. | **transient** |
-| `gate_failure` | A route selected `fail` or exhausted a matching case. This kind also covers an eval result that failed schema validation. | **deterministic** |
+| `gate_failure` | A route selected `fail` or exhausted a matching case. This kind also covers an eval result that could not be parsed or failed schema validation. | **deterministic** |
 | `node_error` | A node failed to execute, read a manifest, satisfy an output contract, or evaluate a route predicate. This kind also covers unclassified node failures. | **deterministic** |
 | `upstream_failed` | This node did **not** do the failing work: a `depends_on` id already failed, or an inner subgraph/fan-out branch node failed. The real failure is elsewhere in the same JSONL stream (a bare sibling id, or a `parent::child`-prefixed inner id). | **not-this-node** |
 
