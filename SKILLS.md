@@ -7,13 +7,16 @@ description: Author, validate, run, and debug sqrlly workflows. Use when the tas
 
 sqrlly compiles a YAML workflow into a runnable LangGraph and executes
 it. A workflow is a list of **nodes**; each node runs an LLM prompt, a
-script, a binary, or a nested workflow. Quality **gates** retry failing
-nodes with feedback; **routing** and **fan-out** handle branching and
-parallelism.
+script, a binary, or a nested workflow. An `eval` measures results.
+Ordered route cases handle branching, retries, and escalation.
+`for_each` repeats a node across items.
 
 ## Prerequisites
 
-Install the CLI: `pipx install sqrlly` (or `uv tool install sqrlly`).
+This guide requires the 1.0 grammar. Before the 1.0 release, run
+`uv run --project /path/to/sqrlly sqrlly` in place of `sqrlly` in the
+commands below. Use the [0.10.0 guide](https://github.com/christopherseaman/sqrlly/blob/v0.10.0/SKILLS.md)
+for the PyPI 0.10.0 release.
 
 LLM nodes drive a local agent CLI, so the chosen backend must be installed
 and authenticated — auth is per-CLI, not sqrlly's job:
@@ -21,11 +24,11 @@ and authenticated — auth is per-CLI, not sqrlly's job:
 - `provider: openai` uses Codex (default).
 - `provider: anthropic` uses Claude.
 
-Script, binary, and subgraph nodes need no backend.
+Command nodes need no prompt backend. A child workflow needs a backend
+if it runs a prompt.
 
-No repo checkout? `sqrlly init --example jokes` scaffolds a runnable
-example on disk (`--list-examples` for the set: `jokes`,
-`route_classify`, `explicit_join`, `pipeline_style`).
+`sqrlly init --example jokes` scaffolds a runnable example on disk.
+`sqrlly init --list-examples` prints the catalog.
 
 ## Author a workflow
 
@@ -139,7 +142,7 @@ executing),
 `--entry <node>` (cold-start: run `<node>` + downstream, no checkpoint —
 see below), `--log <path>`.
 
-Use `sqrlly run --entry <node>` to re-run a synthesis/integration tail against
+Use `sqrlly run path/to/workflow.yaml --entry <node>` to run a workflow tail against
 a hand-prepared workdir with NO prior checkpoint: it freezes everything
 upstream and runs `<node>` + its downstream. The entry node must READ the
 upstream artifacts from disk — `{{upstream}}` template vars are EMPTY on a cold
@@ -193,11 +196,9 @@ landed. `--quiet` suppresses it.
 Set `settings.defaults.agent.backend_max_retries` or `settings.defaults.llm.backend_max_retries` to absorb transient backend blips (a
 `claude exited 1`, or an overload once the model-downgrade chain has no lower
 model — at once for Codex models) by retrying the same dispatch (default two retries) with `retry_backoff` between attempts — separate from the route case’s
-`max_attempts`. A `.md` LLM gate dispatch gets the same retry and downgrade; if
-it still fails, the node fails with kind `backend_error` / `overload` (no
-score is recorded and the node body is not re-run). On `--resume`, a fan-out whose child failed re-runs ONLY that
-child: the parent re-fans and completed siblings stay frozen (no re-bill), so a
-large parallel build that loses one branch resumes cheaply.
+`max_attempts`. An `agent` or `llm` eval uses the same backend retry policy.
+If that budget runs out, the node fails with `backend_error` or `overload`
+before recording a measurement.
 
 ## Footguns
 
@@ -208,10 +209,17 @@ large parallel build that loses one branch resumes cheaply.
   key. `settings:` adopted this in v0.7.6, making it consistent with every
   other schema model. Confirm exact field names in `SCHEMA.md`.
 - Route cases may send execution to an ancestor. Bound those loops with `max_attempts`.
-- **Subgraphs share the schema** — a subgraph `.yaml` is an ordinary
-  workflow and must validate standalone.
-- A stable `item.id` preserves child identity when the object changes. Items without ids use their value hash and a duplicate ordinal. Inserting a new item on resume runs only the new child. Editing or removing an id-less value drops its old id; the default drift policy then fails. Set `settings.on_manifest_drift: warn` to accept such removals.
+- Child workflows use the same schema. Use `{{workflow_inputs.source}}` for
+  caller-supplied inputs so the child can validate standalone.
+- A stable `item.id` preserves child identity when the object changes.
+  Resume rereads a static manifest or uses the producer's saved output.
+  Use `--resume-from <producer>` to refresh a producer from changed inputs.
+  New items run and completed children keep their results. Editing an item
+  without an explicit id drops its old value-based id. The default drift
+  policy fails when an id disappears. Set `settings.on_manifest_drift: warn`
+  to accept removals.
 - Run trusted workflows only. A command runs with the host user's filesystem permissions.
+
 ## Reference
 
 - Install this skill into a repo: `sqrlly init --skill` → writes

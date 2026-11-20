@@ -14,12 +14,12 @@ After all workers finish, `reconcile` checks for follow-up questions. The route 
 
 ## Running
 
-The workers use `worktree: off` to update one shared file in Git and plain directories. Use a fresh workdir for the example.
+The workers use `worktree: off` to update one shared file. Run the example in a fresh workdir on a system that supports Python's `fcntl.flock`, such as Linux or macOS.
 
 ```bash
-mkdir -p /tmp/wave-demo
+wave_dir=$(mktemp -d)
 uv run sqrlly validate examples/wave_planner/workflow.yaml
-uv run sqrlly run examples/wave_planner/workflow.yaml --workdir /tmp/wave-demo
+uv run sqrlly run examples/wave_planner/workflow.yaml --workdir "$wave_dir"
 ```
 
 You'll see two waves run:
@@ -34,20 +34,17 @@ Completed: 8 nodes
 The runner lists each completed node ID once. The second wave adds
 `workers::q_competitor_share` after reconcile queues that question.
 
-`/tmp/wave-demo/state.json` has the final state with all three
+`$wave_dir/state.json` has the final state with all three
 questions marked `done`.
 
 ## Real workflows
 
-The deterministic Python scripts in `scripts/` exist so the
-example runs without any backend keys and the e2e test stays
-stable. Real workflows replace them with LLM-driven nodes:
+The deterministic Python scripts in `scripts/` let the example run without a model backend. A workflow using a model could replace them with `llm` nodes:
 
-- A "research" worker that invokes Claude/DeepSeek to answer
+- A research worker that invokes Codex or Claude to answer
   the question, emitting both the answer and any follow-up
   questions in its output.
-- A reconcile node that runs an LLM gate over partial results
-  and decides whether to enqueue follow-ups.
+- A reconcile node that reads partial results and emits new questions for the next wave.
 
 When combining the wave pattern with worktree isolation in a
 real workflow, thread state through sqrlly's `node_outputs`

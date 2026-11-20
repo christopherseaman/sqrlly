@@ -11,8 +11,8 @@ The top-level document.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `name` | `str` | optional | Workflow name. Part of the checkpoint thread id. |
-| `nodes` | `list[Node]` | required | The workflow's nodes. |
+| `name` | `str` | YAML filename stem | Workflow name. Part of the checkpoint thread id. |
+| `nodes` | `list[Node]` | required | A nonempty list of workflow nodes. |
 | `settings` | `Settings` | `Settings()` | Global settings (see below). |
 
 Validation rejects duplicate or reserved node ids, missing or self dependencies and unknown route destinations. A node cannot combine `for_each` and `route`.
@@ -37,6 +37,8 @@ Unknown keys in `settings:` are rejected with a `ValidationError` — no silent 
 `settings.model` supplies a shared model for prompt nodes. Without a model selection the provider CLI chooses.
 `settings.defaults.agent` and `settings.defaults.llm` can select a provider and model per kind.
 Prompt kinds each default to two backend retries. Set `settings.defaults.agent.backend_max_retries` or `settings.defaults.llm.backend_max_retries` to change that budget.
+Commands default to zero retries. Set `settings.defaults.run.backend_max_retries` to change that budget.
+Set `settings.defaults.agent.tools` and `settings.defaults.agent.cli_args` to configure agent tool access and CLI arguments.
 Node options override kind defaults. Each of the four kinds accepts a default timeout.
 `settings.prompts` sets the prompt directory relative to the YAML file.
 
@@ -75,7 +77,7 @@ A successful tree is removed after capture. With `promote: false`, the run repor
 | `outputs` | mapping | optional | Validate files and structured results after execution. |
 | `for_each` | string or file mapping | omitted | Repeat this node once per item. |
 | `route` | case list | omitted | Select the first matching destination. |
-| `timeout` | `float \| None` | `None` | Per-node timeout; falls back to `settings.default_timeout`. |
+| `timeout` | `float \| None` | `None` | Per-node timeout in seconds. Falls back to the kind default, then `settings.default_timeout`. The global timeout applies to nodes inside a child workflow. Set a node or kind timeout to limit the child workflow as a whole. |
 | `worktree` | `isolated` or `off` | per-kind default | Select the execution directory for an agent or command. |
 | `promote` | boolean | true for isolated nodes | Apply the node’s snapshot delta when it settles. |
 
@@ -124,7 +126,11 @@ A node with only an id and dependencies joins its predecessors without launching
 
 An eval has exactly one of `run`, `llm` and `agent`. The command or prompt runs in the node's worktree. Pass the output explicitly to a command argument with `{{output}}`. A command exposes `eval.exit_code`, `eval.text` and fields of a single JSON object printed to stdout.
 
-A prompt eval takes the usual prompt options, an optional `model`, `timeout` and `outputs.schema` (a workflow-relative JSON Schema file). Without a schema, a prompt eval returns numeric `score` and string `explanation`. Every measurement appends its attempt number and result to the node's history. The JSONL event `gate_evaluated` carries `node`, `attempt` and a nested `result`. For a command, read `result.exit_code`, `result.text` and any JSON fields. A prompt measurement carries `result.text` and its schema fields.
+An eval accepts `timeout` in seconds and `outputs.schema` as a workflow-relative JSON Schema file.
+An `agent` or `llm` eval accepts the usual prompt options and an optional eval-level `model` override.
+Without a schema, a prompt eval returns numeric `score` and string `explanation`.
+Every measurement appends its attempt number and result to the node's history.
+The JSONL event `gate_evaluated` carries `node`, `attempt` and a nested `result`. For a command, read `result.exit_code`, `result.text` and any JSON fields. A prompt measurement carries `result.text` and its schema fields.
 
 ## Outputs
 
@@ -161,7 +167,7 @@ With no explicit route, a command eval retries nonzero exits up to three total a
 
 ## Repeating a node
 
-`for_each` belongs on the node that runs for each item. All four node kinds support it. A repeating node can measure each result with `eval`. Put an explicit `route` on a separate node.
+`for_each` belongs on the node that runs for each item. All four node kinds support it. Use `eval.run` to check each item. A prompt eval requires an explicit route, so put it inside a repeated child workflow or on a downstream node that evaluates the collected results.
 
 ```yaml
 nodes:
@@ -180,7 +186,7 @@ nodes:
 
 Each child receives its value as `{{item}}`. For an object use `{{item.field}}`. The repeating node exposes a JSON list of child results in manifest order, including an empty list for zero items. A downstream node consumes the whole list. Accessing a field directly on that list (`{{build.field}}`) fails validation.
 
-An explicit object `id` identifies the child. An item without an id uses a hash of its value, with a duplicate ordinal to distinguish identical values. On resume, newly inserted items run and completed children keep their existing results. An edited id-less value drops its previous child id. Dropped ids fail under the default `settings.on_manifest_drift: fail`; set `warn` to proceed.
+An explicit object `id` identifies the child. An item without an id uses a hash of its value, with a duplicate ordinal to distinguish identical values. On resume, sqrlly compares the previous manifest with the static file or the producer's saved output. Newly inserted items run and completed children keep their results. If the producer needs to read changed inputs, use `--resume-from <producer>` to rerun it. An edited id-less value drops its previous child id. Dropped ids fail under the default `settings.on_manifest_drift: fail`; set `warn` to proceed.
 
 ## Failure kinds (JSONL `node_failed.kind`)
 
@@ -193,11 +199,11 @@ worse, the node name). `workflow_end` also carries a `failed_kinds` map
 | kind | meaning | disposition |
 |---|---|---|
 | `overload` | API 529/overloaded; the opus→sonnet→haiku downgrade chain and `backend_max_retries` were both exhausted before output. | **transient** |
-| `backend_error` | Backend `send_prompt` raised a non-overload exception surviving `backend_max_retries` (e.g. a `claude exited 1` blip) — in a prompt node or in a `.md` LLM gate dispatch (the gate fails its node; no evaluation record, no node retry). | **transient** |
-| `timeout` | `TimeoutError` on node execution or on a gate/evaluation await. | **transient** |
-| `infra` | A worktree/setup abort during dispatch — `git worktree add`, a `worktree_share` path, or a `worktree_setup` command failed. Caught at the foreman (or, for an isolated subgraph fan-out branch, the fan-out invoker) and returned as this node's failure instead of a raw traceback. | **transient** |
-| `gate_failure` | A route failed the node or exhausted a matching case — a real quality verdict on work that ran. | **deterministic** |
-| `node_error` | The node (or its dispatch/config/manifest/output-contract) definitively failed; re-running unchanged reproduces it. Also the **fail-safe default** for any unclassified failure. | **deterministic** |
+| `backend_error` | A non-overload prompt backend error exhausted its retry budget in a node or prompt eval. | **transient** |
+| `timeout` | Node execution or an eval reached its deadline. | **transient** |
+| `infra` | Worktree creation or setup failed, including a failed `worktree_share` link or `worktree_setup` command. | **transient** |
+| `gate_failure` | A route selected `fail` or exhausted a matching case. This kind also covers an eval result that failed schema validation. | **deterministic** |
+| `node_error` | A node failed to execute, read a manifest, satisfy an output contract, or evaluate a route predicate. This kind also covers unclassified node failures. | **deterministic** |
 | `upstream_failed` | This node did **not** do the failing work: a `depends_on` id already failed, or an inner subgraph/fan-out branch node failed. The real failure is elsewhere in the same JSONL stream (a bare sibling id, or a `parent::child`-prefixed inner id). | **not-this-node** |
 
 **Guidance, not policy.** The `disposition` column is advice, and the
@@ -212,28 +218,15 @@ policy into the wire contract; the
 consumer maps `kind` → retry over this stable vocabulary.
 
 **Fan-out granularity.** `failed_kinds` keys a fan-out child at
-`<parent>::<item>` and reports *that child's* kind. For a subgraph-template
-fan-out, a failure **inside** the branch surfaces here as `upstream_failed` —
-the child collapses the inner outcome — and the inner root-cause kind survives
-only in the `node_failed` stream, under a `<parent>::<item>::<inner>` id. A
-branch-acquisition abort (an `infra` worktree/setup failure, caught *before*
-the branch subgraph runs) is the exception: it never enters the branch, so it
-surfaces its true `infra` kind here.
+`<parent>::<item>` and reports that child's kind. If an inner node of a
+repeated workflow fails, its child reports `upstream_failed`. Look for the
+inner failure in the `node_failed` event under `<parent>::<item>::<inner>`.
 
-**`--resume` accumulates the log, not the state.** A reused `--log <path>`
-opens append, so `node_failed` lines from every `--resume` attempt — each a
-separate `sqrlly run` process emitting its own `workflow_start` /
-`workflow_end` — pile up in one file, and a naive whole-file scan double-counts
-a stale earlier-attempt kind. Read the **last** `workflow_end.failed_kinds`:
-run *state* does not accumulate (each resume reseeds `errors` / `failed_nodes`
-and wipes the checkpoint — `cli/main.py::_seed_state`), so the final
-`workflow_end` is a self-contained per-node resolution of that attempt.
+A reused `--log <path>` appends a separate `workflow_start` and
+`workflow_end` for each invocation. Read the last `workflow_end.failed_kinds`
+for the current invocation's failures. Resume clears prior failures while
+restoring checkpointed outputs, attempt counts, and evaluation history.
 
-**Known coverage boundary.** A `kind` only rides failures that reach
-`node_failed`. The main escape is a broken validator / unevaluable route
-predicate: it raises and aborts the run as a clean `ClickException`, with no
-`node_failed` event, and a genuinely unexpected exception can likewise abort
-with a raw traceback and a `0/0` `workflow_end`. (Worktree/setup aborts are
-**not** in this class — they surface as `infra`; see the table above.)
-Distinguish a halted run from a clean one by the CLI exit code, not by
-`workflow_end` counts.
+Use the CLI exit code to detect a failed invocation. A run-level error can
+abort execution before any `node_failed` event and leave zero counts in
+`workflow_end`.

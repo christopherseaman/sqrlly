@@ -42,7 +42,7 @@ EXAMPLES: dict[str, dict] = {
         "files": {"workflow.yaml": "examples/explicit_join.yaml"},
     },
     "pipeline_style": {
-        "description": "Forward-edge `route: goto` authoring (pure script — no backend).",
+        "description": "Linear pipeline connected by `route` cases with `then` (no backend).",
         "files": {"workflow.yaml": "examples/pipeline_style/workflow.yaml"},
     },
     "absurd-paper": {

@@ -5,6 +5,9 @@ description: Author workflow YAML for the sqrlly 1.0 schema spike and check it w
 
 # Author a sqrlly 1.0 workflow
 
+This draft records the initial authoring trial for issue #36.
+Use [SKILLS.md](../../SKILLS.md) for current guidance.
+
 Start with a `nodes` list. Give each node a unique `id`.
 Use `depends_on` to order work and reference an ancestor's text by its ID.
 
@@ -84,5 +87,3 @@ The default `last` passes the latest measurement and attempt number.
 ```bash
 uv run sqrlly validate path/to/workflow.yaml
 ```
-
-This guide was used for the initial authoring trial. The maintained guide is [SKILLS.md](../../SKILLS.md).

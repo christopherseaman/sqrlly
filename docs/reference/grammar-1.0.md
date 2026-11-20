@@ -62,7 +62,7 @@ nodes:
 - An `agent`, `llm` or `workflow` scalar is a file, checked at load. The not-found error names the inline form `{text: "..."}`.
 - A `run` scalar is shlex-split and runs without a shell. A scalar containing `{{` or a shell metacharacter (`&&`, `|`, `;`, `>`, `$`) is a load error naming the list form: `run: [echo, "{{ plan.title }}"]`. Each list item is one Jinja-rendered argv token.
 - Mapping forms: `agent: {prompt, text, model, provider, tools, cli_args}`, `llm: {prompt, text, model, provider}`, `run: {cmd, env}`, `workflow: {file, with}`.
-- `agent.tools` is `read`, `edit` or `full`. The levels map to Codex `--sandbox` modes and Claude `--permission-mode` values. A tool-name list needs `provider: anthropic`, as `LlmPreset._tool_fields_require_anthropic` enforces today. MCP servers come from each CLI's own config.
+- `agent.tools` is `read`, `edit` or `full`. The levels map to Codex `--sandbox` modes and Claude `--permission-mode` values. A tool-name list needs `provider: anthropic`. MCP servers come from each CLI's own config.
 - Prompt names resolve under `settings.prompts`, default `prompts/` beside the workflow file. Other paths resolve from the workflow file.
 
 Envelope by kind. Each `no` is a load error.
@@ -87,7 +87,7 @@ Envelope by kind. Each `no` is a load error.
 | `promote` | `true` on isolated nodes, applied at settle (0.10: `false`) |
 | `on_promote_conflict` | `fail` (0.10: `warn`) |
 | `route` on a node with a `run` eval | retry on nonzero exit, 3 attempts, then the node fails (0.10: non-blocking gate, threshold `0.0`) |
-| `route` on a node with an `llm` eval | none: a load error, because no criterion exists |
+| `route` on a node with an `agent` or `llm` eval | required, because no default criterion exists |
 | `context` on a route case | `last`: the latest eval output plus the attempt number |
 | `settings.prompts` | `prompts/` beside the workflow file |
 | `backend_max_retries` | 2 for `agent` and `llm`, 0 for `run` (0.10: 0), rerun in the node's tree |
@@ -105,7 +105,7 @@ outputs:
 ```
 
 - Text is always present and undeclared: `{{plan}}`.
-- `schema` exposes `{{plan.field}}` to templates, `route` and `for_each`. The engine passes it to `claude --json-schema` or `codex exec --output-schema`. A `run` node must print one JSON document. `cli.py` never sets `structured_output` today.
+- `schema` exposes `{{plan.field}}` to templates, `route` and `for_each`. The engine passes it to `claude --json-schema` or `codex exec --output-schema`. The backend populates `structured_output` for both providers. A `run` node must print one JSON document.
 - `files` globs are relative to the node's tree and narrow the promote footprint.
 - A failed `files` or `schema` check reruns the node with the miss as context, 3 attempts, then fails it. 0.10 fails the node at once.
 - A `for_each` node's output is a JSON list of child results in manifest order. `{{build.field}}` is a load error.

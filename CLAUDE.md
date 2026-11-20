@@ -18,8 +18,8 @@ repo. Narrative documentation lives elsewhere:
   decision. No backlog lives in a file.
 - **`CHANGELOG.md`** — release history.
 - **`docs/reference/grammar-1.0.md`** — the spec for the 1.0 line (node
-  grammar, eval and route, outputs, worktrees). Issues that build 1.0 cite
-  its sections; the remaining 1.0 stages are tracked by issue.
+  grammar, eval and route, outputs, worktrees). Issues cite the relevant
+  sections when they change the grammar.
 
 Read those when narrative context is needed; this file stays focused on
 day-to-day operator concerns (build, test, layout, limitations,
@@ -63,21 +63,15 @@ Read this before starting any work. The full rules are in
 ## Architecture (30-second sketch)
 
 ```
-YAML → Pydantic Graph → build_workflow_graph() → compiled LangGraph
-                                                         │
-                                                         ▼
-                              Execution Node → ForemanExecutor → DispatchExecutor
-                                    │         (queue +              │
-                                    │          worktree             │
-                                    │          pool)        ┌───────┼───────┐
-                                    │                       ▼       ▼       ▼
-                                    │                    Prompt  Script  Binary
-                                    ▼                                Subgraph
-                              Gate node (script or LLM)
-                                    │        (one Command: record + outcome)
-                                  ┌─┼─┐
-                                  ▼ ▼ ▼
-                                pass retry fail   (gate classifies + gotos in one node)
+Workflow YAML → Pydantic Graph → build_workflow_graph() → LangGraph
+  agent / llm → provider CLI via DispatchExecutor
+  run         → command via DispatchExecutor
+  workflow    → recursively compiled subgraph
+  for_each    → Send workers → join outputs in manifest order
+
+Top-level eval or route → _eval_<id> runs any measurement and settles the route.
+for_each workers run their eval and retry loop before the join.
+ForemanExecutor manages worktrees and settles Git snapshots for promotion.
 ```
 
 The three-layer breakdown is in "Project Layout" below; layer rules are
@@ -86,12 +80,12 @@ enforced by `tests/architecture/test_layers.py`.
 ## Build & Test
 
 ```bash
-uv sync                                      # core deps
-# `codex` and `claude` CLIs on PATH          # for cli tests
-
-uv run pytest tests/ --ignore=tests/cli -v   # ~1k tests, ~50s
-uv run pytest tests/cli -v                   # CLI tests, requires `codex` and `claude` on PATH
-uv run pytest -m live -v                     # restored live-roundtrip (cli-only)
+uv sync
+# Put Node.js on PATH for JavaScript eval tests.
+uv run pytest tests/ --ignore=tests/cli -m 'not live' -v
+# Install and authenticate Codex and Claude before running tests/cli.
+uv run pytest tests/cli -v
+uv run pytest tests/e2e/test_live_backend_roundtrip.py -m live -v  # authenticated Codex on PATH
 uv run pytest tests/architecture/test_layers.py  # layer rule enforcement
 
 uv run sqrlly validate config.yaml
@@ -138,13 +132,13 @@ default; `minor` and `major` need explicit operator approval.
 Three-layer split (enforced by `tests/architecture/test_layers.py`):
 
 **`src/sqrlly/schema/`** — Pydantic models (no langgraph imports).
-- `models.py` defines the graph, nodes, settings, gates, routing and fan-out.
-- `v1.py` defines the agent, llm, run and workflow payloads.
+- `models.py` defines the graph, nodes, settings and fan-out constraints.
+- `v1.py` defines kind payloads, defaults, output contracts, eval and route cases.
 
 **`src/sqrlly/compile/`** — YAML → LangGraph (no cli imports).
 - `graph.py` wires execution nodes to a settlement node (`_eval_<id>`) for eval and route. The repeating node dispatches its items to a worker. A join collects completed children in manifest order.
 - `nodes.py` builds execution context and settles ordered route cases. The settlement update records the attempt, measurement, destination and forwarded context.
-- `dynamic.py` — fan-out via Send, inline retry loop.
+- `dynamic.py` runs fan-out workers, retries items and joins their outputs.
 - `subgraph.py` — recursive composition, cycle detection, depth cap.
 - `route.py` — simpleeval namespace + predicate evaluation
   (langgraph-free).
@@ -162,21 +156,16 @@ Three-layer split (enforced by `tests/architecture/test_layers.py`):
 - `terminal.py` — `TerminalRenderer`, `TeeLogger` — live TTY event
   renderer (JsonlLogger-shaped `emit`/`log_update`/`close`).
 - `gates.py` runs command and prompt evals, builds route context and checks output files.
-- `foreman.py` — `ForemanExecutor` (worktree pool + worktree-CREATION
-  throttle; the dispatch concurrency cap moved to `DispatchExecutor` so it
-  applies off-git too — foreman gates only creation, no double-count).
+- `foreman.py` manages isolated worktrees, throttles creation and settles snapshots.
 - `memory_gate.py` — `wait_for_memory` (optional, default-off host-memory
   back-pressure; isolates the sole `psutil` dependency).
 - `snapshots.py` and `promote.py` capture Git refs through a temporary index, compare base blobs and apply the settled delta.
 - `settings_merge.py` — `merge_settings(parent, child)` for
   scope-aware inheritance.
 - `worktree_share.py` prepares dependency links and runs setup commands in new worktrees.
-- `executor/dispatch.py` — `DispatchExecutor` (node kind dispatch; owns
-  the `max_parallel_jobs` dispatch semaphore — always applied, foreman or
-  not, so a non-git fan-out is still throttled).
-- `executor/prompt.py` — module functions `apply_preamble` +
-  `execute_with_downgrade` (template render, eval preamble, model
-  downgrade); flattened from the former `PromptExecutor` class.
+- `executor/dispatch.py` dispatches commands and prompts. Its `max_parallel_jobs`
+  semaphore applies in both Git and non-Git directories.
+- `executor/prompt.py` renders templates and handles prompt retries and model downgrades.
 - `executor/backends/cli.py` invokes Codex or Claude as a local subprocess.
 - `executor/backends/_overload.py` — `maybe_raise_overload` +
   `OVERLOAD_SUBSTRINGS` (transient-error text mapped to
@@ -187,12 +176,10 @@ Three-layer split (enforced by `tests/architecture/test_layers.py`):
   wires `AsyncSqliteSaver`, `ForemanExecutor`, `thread_id`,
   `JsonlLogger`.
 - `view.py` — `view` command: self-contained HTML workflow viewer.
-- `init.py` — `init` command: scaffolds a minimal workflow
-  (`workflow.yaml` with a greeting command) for `pipx`-installed users
-  with no repo on disk. `init --skill` instead installs the agent
-  skill doc (repo-root `SKILLS.md`, `force-include`d into the wheel as
-  `sqrlly/_skill.md`) into a working repo at
-  `.agents/skills/sqrlly/SKILL.md` (repo-aware via git toplevel).
+- `init.py` scaffolds a minimal `workflow.yaml` or a bundled example
+  (`init --example NAME`, `init --list-examples`). `init --skill` installs
+  `SKILLS.md`, bundled as `sqrlly/_skill.md`, into the working repository
+  at `.agents/skills/sqrlly/SKILL.md`.
 
 ## Testing principles
 
@@ -224,41 +211,28 @@ These guide all new tests; violations should be flagged in review.
 9. **Layer boundary tests** (`tests/architecture/test_layers.py`)
    enforce the three-layer split via AST walking. New source files
    must respect the import rules.
-10. **Live-backend tests use `pytest.mark.live` + `pytest.mark.skipif(
-    KEY is None, ...)`.** Self-skipping when the matching API key is
-    absent on disk; opt-in for isolation via `pytest -m live`. Never
-    fail loudly without a key — silent skip is the contract. The
-    round-trip suite at `tests/e2e/test_live_backend_roundtrip.py`
-    exercises the full CLI pipeline against `examples/jokes/` per
-    backend.
+10. **Provider tests use authenticated local CLIs.** Tests in `tests/cli/`
+    require both `codex` and `claude` on PATH. The `live` round-trip in
+    `tests/e2e/test_live_backend_roundtrip.py` runs `examples/jokes/` through
+    Codex and skips if `codex` is missing from PATH. Use `-m 'not live'`
+    to exclude the round-trip from ordinary test runs.
 
-The `feedback_no_fake_backends.md` memory expands on (1): no fake
-`PromptBackend` doubles; real subprocess only. The one
-sanctioned exception is orchestration instrumentation (e.g. patching
-`factory.shutil.which` to choose which environment-shape branch the
-resolver sees) — distinct from faking what an external system returns.
+The `feedback_no_fake_backends.md` memory expands on (1). Use real
+subprocesses for provider responses. Tests may instrument orchestration
+without supplying fake provider responses.
 
 ## Known limitations
 
-- **`--entry <node>` is a COLD start, not a resume** — `sqrlly run
-  --entry <node>` seeds FRESH state (no checkpoint read), freezes everything
-  upstream of `<node>`, and runs `<node>` + its downstream
-  (`cli/main.py::_execute_workflow` reuses `compile/resume.py::compute_skip_set`
-  with `prior_completed = {all node ids}`, `prior_failed = set()`,
-  `rerun_targets = {entry}`). Mutually exclusive with `--resume` /
-  `--resume-from` / `--rerun-all`. **The entry node trusts ON-DISK inputs:**
-  upstream never ran this session, so `node_outputs` is empty and a `{{upstream}}`
-  Jinja var resolves to nothing — an `--entry` node must READ FILES, not
-  interpolate upstream output. Rejects `::` fan-out child ids (name the
-  top-level parent). v1: like `--resume`, subgraph inner nodes are not
-  individually addressable as the entry.
-- **CLI backend kills the whole process group on timeout** — the CLI backend
-  spawns the provider CLI with `start_new_session=True` (own process group) and, on
-  timeout/cancel, SIGTERM→SIGKILLs the process GROUP
-  (`runtime/executor/backends/cli.py::_kill_process_group`), so descendants
-  (MCP servers, test runners, headless browsers) are reaped too. The CLI
-  parent is still alive (the group leader) when we signal, so a single
-  `killpg` reaches the whole tree.
+- **`--entry <node>` starts from fresh state.** `cli/main.py::_seed_state`
+  uses `compile/resume.py::compute_skip_set` to freeze nodes outside the entry's
+  downstream closure. The entry runs with empty upstream template bindings.
+  It can read upstream artifacts already on disk. `--entry` is mutually
+  exclusive with `--resume`, `--resume-from` and `--rerun-all`. Name a
+  top-level node, including the parent of fan-out children or subgraph nodes.
+- **CLI backend timeout and cancellation signal the process group.** The backend
+  starts each provider CLI in its own session with `start_new_session=True`.
+  `runtime/executor/backends/cli.py::_kill_process_group` sends SIGTERM,
+  waits briefly, then sends SIGKILL if the group still exists.
 - **Hyphenated node IDs in Jinja templates** — `{{research-phase}}`
   parses as subtraction; use underscores. `validate`/`run` emit an
   advisory warning (`compile/lint.py`).
@@ -268,14 +242,12 @@ resolver sees) — distinct from faking what an external system returns.
   the prior checkpoint and skips nodes that completed cleanly and aren't
   downstream of a failure (`compile/resume.py::compute_skip_set` → the
   `_resume_skip` frozen snapshot channel; guards in `compile/nodes.py` /
-  `compile/dynamic.py` read it, never the live `completed_nodes`).
+  `compile/graph.py` read the frozen set).
   `--rerun-all` forces the pre-0.6 full replay; `--resume-from <node>`
   re-runs a node + its downstream. For a fan-out parent target: only
   non-completed children re-run (completed siblings are frozen, not
-  re-billed); failed children always re-run regardless. **v1 limitation:**
-  subgraph *inner*
-  nodes aren't individually skippable — a subgraph re-runs in full unless
-  its reference node completed cleanly.
+  re-billed); failed children always re-run. Resume skips or re-runs a subgraph as a
+  unit using its top-level reference node.
 - **Subgraph event prefix nests hierarchically** — child events are prefixed
   with their parent's id (`parent::child`), and nested subgraphs compose
   naturally into deeper hierarchies (`parent::child::grandchild`). No
@@ -285,37 +257,31 @@ resolver sees) — distinct from faking what an external system returns.
 - Route context is keyed by destination. A selected case forwards its measurement according to `context`.
 - Promote compares the current base blob with the input snapshot before applying the result. The default conflict policy fails the node. `promote: false` retains the output ref and leaves the base alone.
 - A malformed item collection or duplicate explicit id fails the repeating node before children run.
-- **JSONL `gate_evaluated` precedes `node_completed`/`node_failed`** — the collapsed gate emits its EvaluationRecord and its outcome (completed / failed) in ONE super-step update, so `runtime/logging.py::_emit_update_events` orders `gate_evaluated` BEFORE both `node_completed` and `node_failed` ("gate ran, then the node settled"). For the pre-collapse split top-level pair the record already landed a super-step earlier, so this preserves that order; it is a VISIBLE JSONL order change for fan-out children and dynamic gated parents (whose single merged update previously emitted `node_completed` first). In-repo consumers (`terminal.py`, `view.py`) are order-insensitive.
-- `settings.defaults.agent.backend_max_retries` and `settings.defaults.llm.backend_max_retries`
-  (default `2`) control retries of the SAME backend dispatch on a backend exception
-  (a `claude exited 1` blip) up to N times with `retry_backoff` between
-  attempts, wrapped around the `OverloadError`→downgrade loop in
-  `runtime/executor/prompt.py::execute_with_downgrade`. Distinct from the
-  route case’s `max_attempts`. An overload walks the model-downgrade
-  chain first (no retry consumed); an exhausted chain (immediate for a
-  model outside it, e.g. every Codex model) then consumes a retry and
-  re-dispatches from the original model. `0` = terminal on first backend
-  error or exhausted chain. `.md` LLM gates dispatch through the same
-  function (`runtime/gates.py::run_evaluation`); a gate dispatch that
-  still fails raises `EvaluationBackendError`, which
-  `compile/nodes.py::settle` turns into a node failure carrying the
-  dispatch's kind (no evaluation record, no node retry).
-- **`settings:` rejects unknown keys (`extra=forbid`, 0.7.6)** — a typo'd or stale `settings` key now raises a `ValidationError` at load (previously silently ignored). Every other schema model already enforced this; `settings` was the last to adopt it. Run `sqrlly validate` to surface the offending key.
+- **JSONL `gate_evaluated` precedes `node_completed` or `node_failed`.**
+  `runtime/logging.py::_emit_update_events` emits the measurement before
+  the outcome when the settlement update contains both.
+- `settings.defaults.agent.backend_max_retries` and
+  `settings.defaults.llm.backend_max_retries` default to `2`.
+  `runtime/executor/prompt.py::execute_with_downgrade` tries model downgrades
+  on overload before spending a backend retry. Each backend retry restarts
+  from the original model after a delay from `settings.retry_backoff`.
+  A route case with `max_attempts` stops matching once the node reaches that attempt.
+  Prompt evals also use the dispatch retry budget. An exhausted eval dispatch
+  raises `EvaluationBackendError`, and `compile/nodes.py::settle` records
+  the dispatch failure kind.
+- Commands default to zero backend retries. Set
+  `settings.defaults.run.backend_max_retries` to change that budget.
+- **`settings:` rejects unknown keys.** `sqrlly validate` reports the offending key.
 - A repeating node reconstructs its ordered output on resume. Stable explicit ids or value hashes with duplicate ordinals preserve completed children when new items appear. Dropped ids trigger `settings.on_manifest_drift`; an edited id-less item counts as dropped.
-- **No first-class managed-team / oversight node** — there is no supervised
-  coordinator primitive, and none is planned near-term. The supported approach
-  is an authoring pattern: a prompt node granted the `Task` tool
-  (`agent.tools: [Task]` with `provider: anthropic`) runs a coordinator prompt and spawns/supervises
-  sub-agent members via Claude's own agent loop (oversight inside one node).
-  Members are sub-agents within that single node, NOT isolated sqrlly nodes
-  (no per-member worktree/gate/promote). See `SKILLS.md` for the full pattern.
+- A Claude agent node can coordinate subagents with
+  `agent: {prompt: coordinator.md, provider: anthropic, tools: [Task]}`.
+  The coordinator and its subagents share one sqrlly node's worktree and
+  settlement. See `SKILLS.md` for the pattern.
 
 ## Environment quirks
 
-- **Python 3.14**: `pydantic.v1` deprecation warning from
-  `langchain_core` is harmless. The system runs on 3.14.2 in this
-  env; `python` binary is unavailable — use `sys.executable` for
-  subprocess calls in tests.
+- **Python 3.14** emits a Pydantic V1 compatibility warning from
+  `langchain_core`. Tests use `sys.executable` for Python subprocesses.
 - **`tests/__init__.py` must NOT exist** — its presence breaks
   `from helpers import ...` and `from mock_executor import ...` in
   tests. Removing it is the supported state.
@@ -324,11 +290,11 @@ resolver sees) — distinct from faking what an external system returns.
 
 | Task | Where to look |
 |---|---|
-| New schema field | `src/sqrlly/schema/models.py` (mind layer rules) |
+| New schema field | `src/sqrlly/schema/models.py` or the payload in `src/sqrlly/schema/v1.py` |
 | New backend | `src/sqrlly/runtime/executor/backends/` + factory case |
 | New CLI flag | `src/sqrlly/cli/main.py` `@click.option` decorators |
 | New node type | `src/sqrlly/compile/graph.py` (registration) + `src/sqrlly/compile/nodes.py` (factory) |
-| New gate validator shape | `src/sqrlly/runtime/gates.py::run_evaluation` |
+| New eval payload or execution | `src/sqrlly/schema/v1.py::Eval`, `src/sqrlly/runtime/gates.py::run_evaluation` |
 | New WorkflowState field | `src/sqrlly/runtime/state.py` (TypedDict + REDUCERS) — beware of parity invariant in `compile/dynamic.py::_merge_updates` |
 | Inline routing (route block, sender bindings, case context) | `src/sqrlly/schema/v1.py::Case`, `src/sqrlly/compile/nodes.py::settle`, `src/sqrlly/runtime/gates.py::build_eval_preamble` |
 | Layer rule violation | `tests/architecture/test_layers.py` errors point to the offending file |

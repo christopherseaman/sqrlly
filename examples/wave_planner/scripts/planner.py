@@ -1,8 +1,7 @@
 """Wave-planner: seed initial research questions into state.json.
 
-Runs once at the start of the workflow. Subsequent waves never re-fire
-this script (planner has no incoming goto); only `dispatcher` and
-`reconcile` mutate state.json after the seeding.
+Runs once at the start of the workflow. Subsequent waves route back to
+`dispatcher`. Workers and `reconcile` update state.json after seeding.
 """
 import json
 import sys

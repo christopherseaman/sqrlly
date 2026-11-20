@@ -1,3 +1,5 @@
+# Run the examples that share this workflow's workdir. Run wave_planner
+# separately in a fresh workdir because it writes its own state.json.
 name: Run All Examples (parallel)
 nodes:
   - id: smoke

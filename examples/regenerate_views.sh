@@ -2,9 +2,8 @@
 # Regenerate local HTML views + reference JSONL logs for the shipped
 # examples (all gitignored — regenerate on demand). Run from the repo root.
 #
-# Authoring views are generated for all example workflows that have a
-# directory (jokes, route_classify, pipeline_style, wave_planner,
-# absurd-paper) and saved as `<example_dir>/view.html`.
+# Authoring views for the five examples listed below are saved as
+# `<example_dir>/view.html`.
 #
 # Debug views are generated only for fully-deterministic script-only
 # examples (pipeline_style, wave_planner). For each:
@@ -13,8 +12,7 @@
 #   2. Render `<example_dir>/view-debug.html` from that log.
 #
 # LLM-driven examples (jokes, route_classify, absurd-paper) get only authoring views;
-# debug views require the appropriate API key + live API call and
-# would produce a different output every time.
+# debug views require an authenticated provider CLI and a live model run.
 #
 # These files are point-in-time local snapshots (untracked): the JSONL
 # has timestamps that change per run, so output differs every time.

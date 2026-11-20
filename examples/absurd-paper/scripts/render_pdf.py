@@ -6,9 +6,8 @@
 """Render a markdown paper to a journal-styled PDF.
 
 Deterministic: Markdown → HTML (python-markdown) → PDF (WeasyPrint).
-Styling is two-column body with a single-column title block, serif
-body text, small-caps section headers. PEP 723 inline deps mean no
-project-wide dependency install — `uv run --script` resolves on demand.
+The single-column layout uses serif body text, numbered sections, and
+page numbers. `uv run --script` resolves the PEP 723 dependencies on demand.
 
 Usage: render_pdf.py <input.md> <output.pdf>
 """

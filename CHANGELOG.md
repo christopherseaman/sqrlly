@@ -5,6 +5,11 @@ All notable changes to sqrlly are documented here. Format follows
 
 ## [Unreleased]
 
+### Migration
+
+- The 1.0 YAML grammar requires migrating 0.10 workflows. Use [SCHEMA.md](SCHEMA.md) for the new field names and value shapes.
+- Start a new run after migrating. The 1.0 CLI cannot resume a 0.10 checkpoint.
+
 ### Changed
 
 - Put `for_each` on the node that repeats. Children keep stable identities across resume, and dependents receive their results in manifest order.
@@ -15,6 +20,11 @@ All notable changes to sqrlly are documented here. Format follows
   Prompt filenames resolve under the YAML file's prompts directory.
   Commands take argv, and joins need only dependencies.
   Model selection moves to node options, `settings.model` and per-kind defaults.
+
+### Removed
+
+- `execute`, named presets, `evaluation`, the previous `route` mapping, and `fan_out`.
+- Remote prompt URLs. Prompt files default to `prompts/` beside the workflow. Set `settings.prompts: .` for prompts stored directly beside the YAML.
 
 ## [0.10.0] - 2026-11-14
 

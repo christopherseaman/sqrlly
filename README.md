@@ -2,7 +2,7 @@
 
 **A high-level interface to and extension of [LangGraph](https://github.com/langchain-ai/langgraph) for agents in local environments.** Declare a workflow in YAML; sqrlly compiles it to a runnable `StateGraph` and adds the runtime extensions agent workflows need:
 
-- **Nodes** execute one of: an LLM prompt (agent-with-tools or text-only), an interpreted script (`.py` / `.js` / `.ts` / `.sh`), a binary, or a recursive subgraph.
+- **Nodes** use `agent` for a prompt with tools, `llm` for text, `run` for a command, or `workflow` for a child workflow. To run a script, include its interpreter in the command.
 - **Local context** — agents in a Git repository start from the current files, including uncommitted changes.
 - **Evaluation** measures command output or prompts an agent. Ordered route cases decide when to retry, escalate or fail.
 - **Branching** — `route:` sends flow conditionally; `for_each` runs a node once per item and collects results in manifest order.
@@ -10,7 +10,11 @@
 
 ## Install
 
-For CLI use (recommended — isolated venv, doesn't touch your project's environment):
+This checkout documents the unreleased 1.0 grammar. Run the commands in
+this guide from the checkout with `uv run sqrlly`. For the PyPI release,
+use the [0.10.0 guide](https://github.com/christopherseaman/sqrlly/blob/v0.10.0/README.md).
+
+To install the published CLI in an isolated environment:
 
 ```bash
 pipx install sqrlly             # or: uv tool install sqrlly
@@ -36,14 +40,12 @@ with that CLI's normal login flow; sqrlly never reads or stores API keys.
 
 Python 3.11+. From source: `git clone` then `uv sync`.
 
-**Using sqrlly from a coding agent?** `sqrlly init --skill` installs the
-agent skill into your repo at `.agents/skills/sqrlly/SKILL.md`
-(repo-aware) so the agent auto-discovers how to author and run
-workflows.
+**Using sqrlly from a coding agent?** Use
+`uv run sqrlly init --skill /path/to/your-repo` from this checkout.
+The command installs the skill at `.agents/skills/sqrlly/SKILL.md` in the
+target repository.
 
 ## Quickstart
-
-This checkout documents the unreleased 1.0 workflow grammar. PyPI 0.10 uses the earlier YAML grammar. Run these examples from the checkout with `uv run sqrlly`.
 
 Create and run a workflow with one command node:
 
@@ -87,7 +89,7 @@ uv run sqrlly run examples/jokes/workflow.yaml --log run.jsonl
 - Route cases can retry the node, escalate to another node, or fail. Each attempt records the eval output for the next prompt.
 - **Worktree isolation** — agents and repeated commands run in their own Git worktrees. Their changes reach the base when the node or fan-out settles, before its dependents run.
 - **Checkpointed state** — runs persist to `<workdir>/.sqrlly-checkpoint.db` (LangGraph `AsyncSqliteSaver`); `--resume` re-runs seeded with that state, clearing failed nodes to retry. Completed nodes skip by default (fault-recovery re-run, not full replay) unless `--rerun-all` is set. For fan-out branches: failed children re-run, but completed siblings stay frozen (no re-billing).
-- **Recursive subgraphs** — a `.yaml` URL runs another sqrlly workflow; the same file works standalone or as a subgraph reference.
+- **Recursive subgraphs** let `workflow: path/to/child.yaml` run another sqrlly workflow.
 - Child workflow paths resolve beside the declaring YAML. Prompt filenames resolve under its `prompts/` directory.
 
 ## Models and defaults
@@ -113,7 +115,7 @@ nodes:
 | Command | Purpose |
 |---|---|
 | `sqrlly init [<dir>]` | Scaffold a minimal runnable workflow into `<dir>` (default `.`). |
-| `sqrlly init --example <name>` | Scaffold a bundled example into `./<name>` (`--list-examples` to see them). |
+| `sqrlly init [<dir>] --example <name>` | Scaffold a bundled example into `<dir>` (default `./<name>`). Use `sqrlly init --list-examples` to see the catalog. |
 | `sqrlly validate <config>` | Compile the workflow; report node count and lint warnings. |
 | `sqrlly run <config>` | Execute the workflow. |
 | `sqrlly graph <config>` | Print the topology as a Mermaid diagram. |
@@ -122,8 +124,10 @@ nodes:
 `run` flags:
 
 - `--workdir / -w <dir>` — working directory (default `.`).
-- `--dry-run` — trace topology without executing.
-- `--resume` — re-run seeded with the prior run's state, clearing failures to retry. Completed nodes skip by default; use `--rerun-all` to re-execute every node.
+- `--dry-run` traces topology without running commands or prompts. Items from producer nodes are unavailable during a dry run.
+- `--resume` seeds from the prior run's state and retries failures. It skips completed nodes by default.
+- `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
+- `--rerun-all` with `--resume` replays every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
 - `--log <path>` — write a JSONL event log.
 - `--quiet / -q` — suppress the live terminal renderer (use in CI / piped runs).
@@ -131,19 +135,22 @@ nodes:
 
 `run` shows a live per-node status grid + a clock-driven aliveness spinner when stdout is a TTY. Non-TTY runs (piped, redirected, CI) fall through to the plain summary output automatically. Workflow events only — no LLM-token streaming. On completion `run` prints a `where to find things` summary — the produced output files, the log path (or how to capture one with `--log`), and run artifacts (checkpoint DB + worktree pool); `--quiet` suppresses it.
 
-`init --example <name>` scaffolds a runnable bundled example (`jokes`, `route_classify`, `explicit_join`, `pipeline_style`, `absurd-paper`) — handy after `uv tool install sqrlly` when you have no repo checkout. `init --list-examples` lists them.
-
 ## Examples
 
-Render any example's interactive view with `sqrlly view <workflow.yaml>`; `examples/regenerate_views.sh` rebuilds views (and, for the deterministic script-only examples, debug views from a captured log) locally.
+Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an example.
+`examples/regenerate_views.sh` rebuilds selected views and captures logs for two deterministic debug views.
 
 | Workflow | What it shows |
 |---|---|
 | [`examples/jokes/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/jokes/workflow.yaml) | Minimal: prompt + script gate + select. Start here. |
 | [`examples/route_classify/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/route_classify/workflow.yaml) | An LLM classifies a ticket against a JSON schema; route cases read its category. |
+| [`examples/explicit_join.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/explicit_join.yaml) | A join waits for three parallel commands. |
+| [`examples/run_command/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/run_command/workflow.yaml) | A command runs a Python script through `uv` without a prompt backend. |
 | [`examples/pipeline_style/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/pipeline_style/workflow.yaml) | `route: [{then: <next>}]` forward-edge authoring; a linear pipeline. |
-| [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Full pipeline: prompts, multi-dim quality gates, a subgraph, and a rendered PDF. Try `sqrlly init --example absurd-paper`. |
+| [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Prompts, multi-dimension evals, a child workflow, and a rendered PDF. Scaffold it with `uv run sqrlly init --example absurd-paper`. |
 | [`examples/wave_planner/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/wave_planner/workflow.yaml) | Wave-driven dynamic-task pattern — a bounded route back to a producer that discovers more items. |
+| [`examples/smoke_test.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/smoke_test.yaml) | One prompt checks the local provider connection. |
+| [`examples/run_all_examples.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/run_all_examples.yaml) | Runs seven examples as child workflows. Run the wave planner separately in a fresh directory. |
 
 ## Documentation
 
@@ -152,12 +159,12 @@ Render any example's interactive view with `sqrlly view <workflow.yaml>`; `examp
 
 ## Contributing
 
-- **Three-layer split** — `schema/` (Pydantic models) → `compile/` (YAML → LangGraph) → `runtime/` (executors, backends). Layer rules enforced at CI time by an AST import check.
-- **No mocks of external systems** — tests run real subprocesses, real `git worktree`, and real backends.
+- **Three-layer split** — `schema/` (Pydantic models) → `compile/` (YAML → LangGraph) → `runtime/` (executors, backends).
+- Integration tests exercise real subprocesses, Git worktrees, and the Codex and Claude CLIs. Prompt unit tests also use backend doubles to exercise retry behavior.
 - **Layer rules** — `tests/architecture/test_layers.py` enforces the import boundaries; `CLAUDE.md` has the architecture sketch + contributor reading order.
 
 ```bash
-uv run pytest tests/ --ignore=tests/cli     # ~1k tests
+uv run pytest tests/ --ignore=tests/cli
 uv run pytest tests/cli                     # CLI backend integration (needs `codex` and `claude` on PATH)
 ```
 
