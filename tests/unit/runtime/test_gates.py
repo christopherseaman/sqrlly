@@ -2,12 +2,14 @@
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
+from sqrlly.runtime import gates
 from sqrlly.runtime.gates import build_eval_preamble, run_evaluation
-from sqrlly.runtime.result import EvaluationBackendError, EvaluationError
-from sqrlly.schema.models import Node, Settings
+from sqrlly.runtime.result import EvaluationBackendError, EvaluationError, ExecutionResult
+from sqrlly.schema.models import Node, Outputs, Settings
 
 
 @pytest.mark.parametrize("stdout", ['{"quality": 4, "exit_code": 0}', "[3]", "plain text"])
@@ -63,6 +65,15 @@ async def test_prompt_measurement_exposes_score_and_explanation(tmp_path, monkey
     assert result["score"] == 0.75
     assert result["explanation"] == "tested"
     assert '"score": 0.75' in result["text"]
+
+
+def test_malformed_prompt_eval_reply_names_schema():
+    schema = Path(gates.__file__).with_name("eval-score.schema.json")
+    outputs = Outputs(schema=str(schema))
+    outputs.load_schema(schema)
+    with pytest.raises(EvaluationError, match=r"eval.outputs.schema eval-score\.schema\.json: Expecting value"):
+        gates._validated_eval_output(outputs, ExecutionResult(output="not json at all"))
+
 
 @pytest.mark.parametrize("value", ['{"quality": 4}', '{"quality": "four"}', "invalid json"])
 async def test_run_eval_validates_declared_schema(tmp_path, value):
