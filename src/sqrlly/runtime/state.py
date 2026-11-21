@@ -149,7 +149,6 @@ def make_initial_state(
         "node_worktrees": {},
         "node_models": {},
         "errors": [],
-        "run_vars": {},
         "workdir": workdir,
         "dry_run": dry_run,
     }
