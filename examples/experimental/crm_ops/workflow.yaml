@@ -1,0 +1,26 @@
+name: experimental-crm-operations
+settings:
+  max_parallel_jobs: 1
+nodes:
+  - id: seed
+    run: [python3, "{{workflow_dir}}/scripts/seed_target.py"]
+  - id: intake
+    depends_on: [seed]
+    run: [python3, "{{workflow_dir}}/scripts/intake.py", "{{workflow_dir}}/data/intake.json"]
+    outputs: {files: [artifacts/intake.json]}
+  - id: normalize
+    depends_on: [intake]
+    run: [python3, "{{workflow_dir}}/scripts/normalize.py"]
+    outputs: {files: [artifacts/normalized.json]}
+  - id: enrich
+    depends_on: [normalize]
+    run: [python3, "{{workflow_dir}}/scripts/enrich.py"]
+    outputs: {files: [artifacts/enrichment.json]}
+  - id: propose
+    depends_on: [enrich]
+    run: [python3, "{{workflow_dir}}/scripts/propose.py"]
+    outputs: {files: [artifacts/proposal.json]}
+  - id: apply
+    depends_on: [propose]
+    run: [python3, "{{workflow_dir}}/scripts/apply.py"]
+    outputs: {files: [artifacts/apply-report.json]}

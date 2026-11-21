@@ -1,0 +1,4 @@
+county_fips,county_name,population_adults,diabetes_pct,mental_health_not_good_pct
+01001,Autauga County,100,8.0,12.0
+01003,Baldwin County,100,10.0,15.0
+01005,Barbour County,100,12.0,18.0

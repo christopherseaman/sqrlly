@@ -1,0 +1,32 @@
+name: smb-browser-agent-builder
+
+settings:
+  max_parallel_jobs: 1
+  default_timeout: 300
+
+nodes:
+  - id: generate
+    name: Generate the browser quote app
+    agent:
+      prompt: generate.md
+      tools: edit
+    outputs:
+      files:
+        - app/package.json
+        - app/index.html
+        - app/app.js
+        - app/test/app.test.js
+
+  - id: accept
+    name: Run generated app acceptance checks
+    depends_on: [generate]
+    run: [node, "{{workflow_dir}}/scripts/check_generated.mjs"]
+    outputs:
+      files: [app/acceptance.json]
+
+  - id: preview
+    name: Handoff generated app preview
+    depends_on: [accept]
+    run: [python3, "{{workflow_dir}}/scripts/render_generated_preview.py"]
+    outputs:
+      files: [preview/index.html, artifact-manifest.json]

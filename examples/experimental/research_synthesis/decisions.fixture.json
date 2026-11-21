@@ -1,0 +1,30 @@
+{
+  "r1": {
+    "decision": "include",
+    "reason": "Matches population, intervention, comparator, outcome, and design.",
+    "sample": 40,
+    "mean_difference": 4.0,
+    "standard_error": 1.0,
+    "source_url": "https://example.org/toy-001",
+    "outcome_measure": "Wellbeing scale points"
+  },
+  "r2": {
+    "decision": "duplicate",
+    "reason": "Same report as r1, matched by DOI.",
+    "source_url": "https://example.org/toy-001-abstract"
+  },
+  "r3": {
+    "decision": "include",
+    "reason": "Matches all prespecified eligibility criteria.",
+    "sample": 36,
+    "mean_difference": 2.0,
+    "standard_error": 1.0,
+    "source_url": "https://example.org/toy-002",
+    "outcome_measure": "Wellbeing scale points"
+  },
+  "r4": {
+    "decision": "exclude",
+    "reason": "No randomized comparator was reported.",
+    "source_url": "https://example.org/toy-003"
+  }
+}

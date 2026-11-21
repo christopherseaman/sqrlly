@@ -1,0 +1,35 @@
+{
+  "source": "frozen_synthetic_search",
+  "retrieved_at": "2026-01-15T00:00:00Z",
+  "query": "(exercise OR physical activity) AND wellbeing AND randomized",
+  "records": [
+    {
+      "id": "r1",
+      "doi": "10.0000/toy.001",
+      "title": "Walking and wellbeing",
+      "year": 2020,
+      "source_url": "https://example.org/toy-001"
+    },
+    {
+      "id": "r2",
+      "doi": "10.0000/toy.001",
+      "title": "Walking and wellbeing, conference record",
+      "year": 2020,
+      "source_url": "https://example.org/toy-001-abstract"
+    },
+    {
+      "id": "r3",
+      "doi": "10.0000/toy.002",
+      "title": "Resistance training and wellbeing",
+      "year": 2021,
+      "source_url": "https://example.org/toy-002"
+    },
+    {
+      "id": "r4",
+      "doi": "10.0000/toy.003",
+      "title": "Exercise adherence diary",
+      "year": 2022,
+      "source_url": "https://example.org/toy-003"
+    }
+  ]
+}

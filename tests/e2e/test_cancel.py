@@ -1,5 +1,6 @@
 """Interrupt and resume a workflow through the installed CLI."""
 
+import json
 import os
 import signal
 import subprocess
@@ -46,7 +47,8 @@ printf '%s\\n' "$1"
             "sh", "-ec", 'printf "finished %s" "$1" > result', "finish", "{{worker}}",
         ]},
     ]}))
-    cli = [str(Path(sys.executable).with_name("sqrlly")), "run", str(config)]
+    run_log = tmp_path / "run.jsonl"
+    cli = [str(Path(sys.executable).with_name("sqrlly")), "run", str(config), "--log", str(run_log)]
     started = tmp_path / "started"
     started.touch()
     worker = sleeper = None
@@ -109,3 +111,8 @@ printf '%s\\n' "$1"
     assert "skipping 1 completed nodes" in resumed.stdout
     assert (tmp_path / "calls").read_text() == "first\n"
     assert (tmp_path / "result").read_text() == "finished seed\n"
+    events = [json.loads(line) for line in run_log.read_text().splitlines()]
+    starts = [event["invocation_id"] for event in events if event["event"] == "workflow_start"]
+    ends = [(event["invocation_id"], event["status"]) for event in events if event["event"] == "workflow_end"]
+    assert len(set(starts)) == 2
+    assert ends == [(starts[0], "interrupted"), (starts[1], "succeeded")]

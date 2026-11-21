@@ -277,6 +277,7 @@ async def _run_async(
     quiet: bool = False,
     entry: str | None = None,
     safe_mode: bool | None = None,
+    run_vars: dict[str, str] | None = None,
 ) -> dict:
     """Inner async runner — wires checkpointer, executor, and state.
 
@@ -301,7 +302,7 @@ async def _run_async(
     subs: list[Any] = []
     jsonl: JsonlLogger | None = None
     if log_file is not None:
-        jsonl = JsonlLogger(log_file)
+        jsonl = JsonlLogger(log_file, invocation_id=uuid.uuid4().hex)
         subs.append(jsonl)
     if not quiet and not dry_run and sys.stdout.isatty():
         subs.append(TerminalRenderer(config))
@@ -318,23 +319,28 @@ async def _run_async(
         logger.emit({
             "event": "workflow_start",
             "workflow": config.name,
+            "dry_run": dry_run,
         })
 
     result: dict = {}
+    status = "failed"
     try:
         result = await _execute_workflow(
             config, workdir, dry_run, resume, resume_from, rerun_all,
             thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode, log_file=log_file,
+            run_vars=run_vars,
         )
+        status = "failed" if result.get("failed_nodes") else "succeeded"
         return result
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        status = "interrupted"
+        raise
     finally:
         if logger is not None:
-            # `result` stays {} if _execute_workflow raised before
-            # returning; workflow_end then logs zeros. The detailed
-            # error surfaces via Click already.
             from sqrlly.runtime.logging import failed_kinds_map
             logger.emit({
                 "event": "workflow_end",
+                "status": status,
                 "completed": len(result.get("completed_nodes", set())),
                 "failed": len(result.get("failed_nodes", set())),
                 "failed_kinds": failed_kinds_map(
@@ -355,6 +361,7 @@ async def _seed_state(
     rerun_all: bool,
     entry: str | None,
     thread_id: str,
+    run_vars: dict[str, str] | None = None,
 ) -> dict:
     """Seed the initial WorkflowState for a run and wipe the checkpoint
     thread (so reducers don't merge with stale state). Three modes:
@@ -418,6 +425,10 @@ async def _seed_state(
         await cp.adelete_thread(thread_id)
         return state
 
+    await cp.adelete_thread(thread_id)
+    state = make_initial_state(
+        workflow_name=config.name, workdir=workdir, dry_run=False, run_vars=run_vars or {},
+    )
     if entry is not None:
         # Cold start at `entry`: NO checkpoint read. Seed FRESH state, then
         # compute the skip set as if every top-level node had already
@@ -432,10 +443,6 @@ async def _seed_state(
         from sqrlly.compile.resume import compute_skip_set
         all_ids = {n.id for n in config.nodes}
         skip = compute_skip_set(config, all_ids, set(), {entry})
-        await cp.adelete_thread(thread_id)
-        state = make_initial_state(
-            workflow_name=config.name, workdir=workdir, dry_run=False,
-        )
         state["completed_nodes"] = set(skip)
         state["_resume_skip"] = set(skip)
         state["_cold_entry"] = entry
@@ -444,12 +451,7 @@ async def _seed_state(
             f"{len(all_ids - skip)} node(s) ({entry} + downstream); "
             f"freezing {len(skip)} upstream (trusting on-disk artifacts)."
         )
-        return state
-
-    await cp.adelete_thread(thread_id)
-    return make_initial_state(
-        workflow_name=config.name, workdir=workdir, dry_run=False,
-    )
+    return state
 
 
 async def _execute_workflow(
@@ -465,11 +467,12 @@ async def _execute_workflow(
     entry: str | None = None,
     safe_mode: bool | None = None,
     log_file: str | None = None,
+    run_vars: dict[str, str] | None = None,
 ) -> dict:
     if dry_run:
         compiled = build_workflow_graph(config, None, logger=logger, entry=entry)
         state = make_initial_state(
-            workflow_name=config.name, workdir=workdir, dry_run=True,
+            workflow_name=config.name, workdir=workdir, dry_run=True, run_vars=run_vars or {},
         )
         if entry is not None:
             from sqrlly.compile.resume import compute_skip_set
@@ -534,7 +537,7 @@ async def _execute_workflow(
             state = await _seed_state(
                 cp, config, workdir,
                 resume=resume, resume_from=resume_from, rerun_all=rerun_all,
-                entry=entry, thread_id=thread_id,
+                entry=entry, thread_id=thread_id, run_vars=run_vars,
             )
 
             if isinstance(executor_obj, ForemanExecutor):
@@ -556,6 +559,18 @@ async def _execute_workflow(
                 await executor_obj.close()
 
         return result
+
+
+def _parse_run_vars(values: tuple[str, ...]) -> dict[str, str]:
+    variables = {}
+    for value in values:
+        name, separator, text = value.partition("=")
+        if not separator or not name.isidentifier():
+            raise click.BadParameter("expected NAME=VALUE with an identifier as NAME", param_hint="--var")
+        if name in variables:
+            raise click.BadParameter(f"duplicate variable {name!r}", param_hint="--var")
+        variables[name] = text
+    return variables
 
 
 @cli.command()
@@ -588,6 +603,10 @@ async def _execute_workflow(
 )
 @click.option("--log", "log_file", type=click.Path(), help="JSONL log output file")
 @click.option(
+    "--var", "variables", multiple=True, metavar="NAME=VALUE",
+    help="Set a top-level template variable (repeatable). Resumes use saved values.",
+)
+@click.option(
     "--quiet", "-q", is_flag=True,
     help="Suppress the live terminal renderer (useful in CI/piped runs).",
 )
@@ -609,11 +628,15 @@ def run(
     log_file: str | None,
     quiet: bool,
     safe_mode: bool | None,
+    variables: tuple[str, ...],
 ):
     """Run a workflow from a configuration file."""
     config = load_config(config_file)
 
     resume = resume or bool(resume_from)
+    if resume and variables:
+        raise click.UsageError("--var cannot be used with --resume or --resume-from. Start a fresh run to change inputs.")
+    run_vars = _parse_run_vars(variables)
     if rerun_all and resume_from:
         raise click.ClickException(
             "--rerun-all and --resume-from are mutually exclusive"
@@ -654,7 +677,8 @@ def run(
     from sqrlly.runtime.result import EvaluationError, ManifestError, RouteError
     try:
         result = asyncio.run(
-            _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file, quiet, entry, safe_mode)
+            _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file,
+                       quiet, entry, safe_mode, run_vars=run_vars)
         )
     except KeyboardInterrupt:
         click.echo("Interrupted.", err=True)

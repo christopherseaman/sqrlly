@@ -130,7 +130,8 @@ nodes:
 - `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
 - `--rerun-all` with `--resume` replays every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
-- `--log <path>` — write a JSONL event log.
+- `--var NAME=VALUE` binds a string as `{{vars.NAME}}` in top-level templates. Repeat for multiple inputs. Resumes use the saved inputs.
+- `--log <path>` appends JSONL events. Group records by `invocation_id` and read `workflow_end.status` for each outcome.
 - `--quiet / -q` — suppress the live terminal renderer (use in CI / piped runs).
 - `--safe-mode / --no-safe-mode` — run Anthropic's CLI provider with Claude operator customizations (output styles, CLAUDE.md, skills, MCP, hooks) disabled. It has no effect on Codex. Overrides `settings.safe_mode`; absent, the setting applies.
 
@@ -140,6 +141,7 @@ nodes:
 
 Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an example.
 `examples/regenerate_views.sh` rebuilds selected views and captures logs for two deterministic debug views.
+The [applied workflow experiment](docs/reference/workflow-use-case-experiment.md) covers app building, CRM imports, public health analysis, and research synthesis.
 
 | Workflow | What it shows |
 |---|---|

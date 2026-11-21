@@ -261,7 +261,7 @@ class TerminalRenderer:
         # Workflow-level
         self._started_at: float | None = None
         self._ended_at: float | None = None
-        self._end_state: str | None = None  # None | "done" | "failed"
+        self._end_state: str | None = None
 
         # Render state
         self._spinner_idx = 0           # per-node braille tick (running indicator)
@@ -288,7 +288,8 @@ class TerminalRenderer:
             self._render()
         elif et == "workflow_end":
             self._ended_at = time.monotonic()
-            self._end_state = "failed" if event.get("failed", 0) > 0 else "done"
+            status = event.get("status", "failed" if event.get("failed", 0) else "succeeded")
+            self._end_state = "done" if status == "succeeded" else status
             self._stop_tick()
             self._render()
         elif et == "node_completed":
@@ -380,8 +381,8 @@ class TerminalRenderer:
         if self._end_state == "done":
             elapsed = (self._ended_at or 0) - (self._started_at or 0)
             return f"sqrlly · {self._config.name}  done in {elapsed:.1f}s"
-        if self._end_state == "failed":
-            return f"sqrlly · {self._config.name}  failed"
+        if self._end_state is not None:
+            return f"sqrlly · {self._config.name}  {self._end_state}"
         return f"sqrlly · {self._config.name}"
 
     def _scene_line(self) -> str:

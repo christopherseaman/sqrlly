@@ -104,7 +104,8 @@ def _emit_update_events(emitter: Any, update: dict[str, Any]) -> None:
 class JsonlLogger:
     """Emits structured JSONL events to a file, one JSON object per line."""
 
-    def __init__(self, dest: str | Path | IO[str]) -> None:
+    def __init__(self, dest: str | Path | IO[str], *, invocation_id: str | None = None) -> None:
+        self._invocation_id = invocation_id
         if isinstance(dest, (str, Path)):
             self._file: IO[str] = open(dest, "a")
             self._owns_file = True
@@ -119,6 +120,8 @@ class JsonlLogger:
     def emit(self, event: dict[str, Any]) -> None:
         """Write a single event as a JSON line with a timestamp."""
         record = {"ts": datetime.now(timezone.utc).isoformat(), **event}
+        if self._invocation_id is not None:
+            record["invocation_id"] = self._invocation_id
         self._file.write(json.dumps(record) + "\n")
         self._file.flush()
 

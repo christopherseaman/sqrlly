@@ -1,0 +1,5 @@
+[
+  {"id": "import-001", "email": " Alice@Example.com ", "name": "Alice Smith", "company": "Acme, Inc.", "domain": "https://www.acme.com/"},
+  {"id": "import-002", "email": "alice@example.com", "name": "Alice Smith", "company": "Acme Incorporated", "domain": "acme.com"},
+  {"id": "import-003", "email": "bob@beta.test", "name": "Bob Jones", "company": "Beta Systems", "domain": "beta.test"}
+]

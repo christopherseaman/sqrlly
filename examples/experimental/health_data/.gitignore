@@ -1,0 +1,6 @@
+data/
+reports/
+site/index.md
+site/plot.svg
+site/_site/
+site/node_modules/

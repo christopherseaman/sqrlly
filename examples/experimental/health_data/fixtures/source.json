@@ -1,0 +1,7 @@
+{
+  "source_kind": "frozen synthetic aggregate fixture",
+  "release": "fixture-1",
+  "official_reference": "https://data.cdc.gov/500-Cities-Places/PLACES-County-Data-GIS-Friendly-Format-2025-releas/i46a-9kgh",
+  "methodology_reference": "https://www.cdc.gov/places/methodology/index.html",
+  "note": "Values are synthetic and demonstrate pipeline mechanics, not CDC estimates."
+}

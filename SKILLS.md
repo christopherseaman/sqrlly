@@ -139,6 +139,7 @@ executing),
 `--resume` (skip completed nodes, retry failed ones — see Debug),
 `--rerun-all` (full replay of every node), `--resume-from <node>`
 (re-run node + downstream; implies `--resume`),
+`--var NAME=VALUE` (repeatable string inputs for `{{vars.NAME}}`),
 `--entry <node>` (cold-start: run `<node>` + downstream, no checkpoint —
 see below), `--log <path>`.
 

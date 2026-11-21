@@ -1,0 +1,43 @@
+name: Synthetic Exercise Wellbeing Review
+nodes:
+  - id: question
+    run: [cat, '{{workflow_dir}}/question.md']
+  - id: scout
+    depends_on: [question]
+    outputs: {files: [output/scout.json]}
+    run: [python3, '{{workflow_dir}}/scripts/scout.py', '{{workflow_dir}}/search_response.json']
+  - id: protocol
+    depends_on: [scout]
+    run: [cat, '{{workflow_dir}}/protocol.yaml']
+  - id: search
+    depends_on: [protocol]
+    outputs: {files: [output/search.json, output/provenance.json]}
+    run: [python3, '{{workflow_dir}}/scripts/search_fixture.py', '{{workflow_dir}}/search_response.json', '{{workflow_dir}}/protocol.yaml']
+  - id: deduplicate
+    depends_on: [search]
+    outputs: {files: [output/deduplicated.json]}
+    run: [python3, '{{workflow_dir}}/scripts/deduplicate.py', output/search.json, output/deduplicated.json]
+  - id: screen
+    depends_on: [deduplicate]
+    outputs: {files: [output/included.json, output/prisma.json]}
+    run: [python3, '{{workflow_dir}}/scripts/screen.py', output/search.json, output/deduplicated.json, decisions.reviewed.json, output/included.json, output/prisma.json]
+  - id: extract
+    depends_on: [screen]
+    outputs: {files: [output/extraction.json]}
+    run: [python3, '{{workflow_dir}}/scripts/extract.py', output/included.json, output/extraction.json]
+  - id: synthesize
+    depends_on: [extract]
+    outputs: {files: [output/synthesis.json, output/forest.svg]}
+    run: [python3, '{{workflow_dir}}/scripts/synthesize.py', output/extraction.json, output/synthesis.json, output/forest.svg]
+  - id: manuscript
+    depends_on: [synthesize, screen]
+    outputs: {files: [output/manuscript.md]}
+    run: [python3, '{{workflow_dir}}/scripts/manuscript.py', output/prisma.json, output/synthesis.json, output/manuscript.md]
+  - id: verify
+    depends_on: [manuscript]
+    eval: {run: [python3, '{{workflow_dir}}/gates/verify.py']}
+    route:
+      - when: eval.exit_code != 0
+        then: fail
+      - else: done
+  - id: done

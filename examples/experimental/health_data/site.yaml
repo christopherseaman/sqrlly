@@ -1,0 +1,5 @@
+name: Build the public health report site
+nodes:
+  - id: site
+    run: [npm, --prefix, site, run, build]
+    outputs: {files: [site/_site/index.html, site/_site/plot.svg]}

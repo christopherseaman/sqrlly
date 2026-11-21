@@ -1,0 +1,18 @@
+question: Does structured exercise improve self-reported wellbeing in generally healthy adults?
+population: Generally healthy adults aged 18 years or older
+intervention: Structured exercise programme lasting at least 8 weeks
+comparator: Usual activity or inactive control
+outcome: Change in validated self-reported wellbeing score
+designs: Randomized controlled trials
+search:
+  sources: Frozen synthetic response only
+  date: '2026-01-15'
+  query: (exercise OR physical activity) AND wellbeing AND randomized
+  registration: Not registered, because this is a synthetic demonstration
+analysis:
+  effect: Mean difference in change scores
+  model: Inverse-variance fixed effect for the toy records
+  limitation: Values are invented and cannot support health advice
+sources:
+  - https://www.cochrane.org/authors/handbooks-and-manuals/handbook/current/chapter-01
+  - https://www.bmj.com/content/372/bmj.n71

@@ -1,0 +1,39 @@
+name: Public health aggregate analysis
+nodes:
+  - id: intake
+    name: Stage the aggregate input
+    run: [python3, '{{workflow_dir}}/scripts/intake.py', "{{vars.input | default('')}}", "{{vars.source_query | default('')}}"]
+    outputs: {files: [data/raw/places.csv, data/raw/source.json]}
+  - id: source_digest
+    name: Record source digest and release metadata
+    depends_on: [intake]
+    run: [python3, '{{workflow_dir}}/scripts/source_digest.py']
+    outputs: {files: [data/raw/digest.json]}
+  - id: etl
+    name: Stream CSV into staged JSONL
+    depends_on: [source_digest]
+    run: [python3, '{{workflow_dir}}/scripts/etl.py']
+    outputs: {files: [data/staged/places.jsonl]}
+  - id: eda
+    name: Summarize ranges and missingness
+    depends_on: [etl]
+    run: [python3, '{{workflow_dir}}/scripts/eda.py']
+    outputs: {files: [reports/eda.json]}
+  - id: clean
+    name: Clean county identifiers and percentages
+    depends_on: [eda]
+    run: [python3, '{{workflow_dir}}/scripts/clean.py']
+    outputs: {files: [data/clean/places.jsonl]}
+  - id: analysis
+    name: Summarize county estimates and plot both measures
+    depends_on: [clean]
+    run: [python3, '{{workflow_dir}}/scripts/analysis.py']
+    outputs: {files: [reports/analysis.json, reports/prevalence.svg, site/plot.svg]}
+  - id: manuscript
+    name: Write Markdown report
+    depends_on: [analysis]
+    run: [python3, '{{workflow_dir}}/scripts/manuscript.py']
+    outputs: {files: [site/index.md]}
+settings:
+  max_parallel_jobs: 2
+  default_timeout: 120.0

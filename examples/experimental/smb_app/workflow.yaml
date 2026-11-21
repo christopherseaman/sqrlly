@@ -1,0 +1,35 @@
+name: smb-quote-builder
+
+settings:
+  max_parallel_jobs: 2
+  default_timeout: 120
+
+nodes:
+  - id: plan
+    name: Plan quote items
+    run: [python3, "{{workflow_dir}}/scripts/plan.py", "{{vars.customer}}", "{{vars.currency}}"]
+    outputs:
+      files: [build/plan.json]
+      schema: schemas/plan.schema.json
+
+  - id: quotes
+    name: Build one quote per item
+    depends_on: [plan]
+    for_each: plan.items
+    run: [python3, "{{workflow_dir}}/scripts/quote.py", "{{vars.customer}}", "{{item.id}}", "{{item.name}}", "{{item.amount_cents}}", "{{item.currency}}"]
+    outputs:
+      files: [build/quotes/*.json]
+
+  - id: verify
+    name: Verify totals and manifest coverage
+    depends_on: [quotes]
+    run: [python3, "{{workflow_dir}}/scripts/verify.py"]
+    outputs:
+      files: [build/check.json]
+
+  - id: preview
+    name: Render local preview and artifact handoff
+    depends_on: [verify]
+    run: [python3, "{{workflow_dir}}/scripts/preview.py", "{{vars.customer}}"]
+    outputs:
+      files: [preview/index.html, artifact-manifest.json]
