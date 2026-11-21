@@ -44,7 +44,9 @@ def build_route_namespace(
     defaults for nodes that haven't been evaluated keeps predicates
     from blowing up on missing-key errors.
     """
-    ns = dict(state["node_inputs"]) if "node_inputs" in state else {"vars": state.get("run_vars", {})}
+    ns = dict(state.get("node_inputs", {}))
+    if "run_vars" in state and "node_inputs" not in state:
+        ns["vars"] = state["run_vars"]
     structured = state.get("node_structured_outputs", {}) or {}
     outputs = state.get("node_outputs", {}) or {}
     for dep in deps:

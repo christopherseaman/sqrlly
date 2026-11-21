@@ -117,8 +117,8 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     import json as _json
 
     context: dict[str, Any] = {}
-    if "node_inputs" not in state:
-        context["vars"] = RunVariables(state.get("run_vars", {}))
+    if "run_vars" in state and "node_inputs" not in state:
+        context["vars"] = RunVariables(state["run_vars"])
     outputs = state.get("node_outputs", {})
     structured = state.get("node_structured_outputs", {})
     worktrees = state.get("node_worktrees", {})

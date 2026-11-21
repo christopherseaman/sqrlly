@@ -15,7 +15,7 @@ cp "$example/decisions.fixture.json" "$scratch/decisions.reviewed.json"
 uv run sqrlly run "$example/workflow.yaml" --workdir "$scratch" --resume --log "$scratch/run.jsonl" --quiet
 ```
 
-The workflow reads `question.md` and writes a synthetic search preview at `output/scout.json`. It then checks the frozen search against `protocol.yaml` and records both digests in `output/provenance.json`. Screening removes the duplicate DOI and applies `decisions.reviewed.json` from the runtime directory. The remaining nodes extract toy effects, plot the estimates and confidence intervals, and verify `output/manuscript.md`.
+The workflow reads `question.md` and writes a synthetic search preview at `output/scout.json`. It then checks the frozen search against `protocol.json` and records both digests in `output/provenance.json`. Screening removes the duplicate DOI and applies `decisions.reviewed.json` from the runtime directory. The remaining nodes extract toy effects, plot the estimates and confidence intervals, and verify `output/manuscript.md`.
 
 The fixture identifies four records, removes one duplicate, excludes one record, and includes two studies. The pooled result is 3.00 wellbeing points with a 95% interval from 1.61 to 4.39.
 

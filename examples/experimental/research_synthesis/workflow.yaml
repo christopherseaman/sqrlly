@@ -8,11 +8,11 @@ nodes:
     run: [python3, '{{workflow_dir}}/scripts/scout.py', '{{workflow_dir}}/search_response.json']
   - id: protocol
     depends_on: [scout]
-    run: [cat, '{{workflow_dir}}/protocol.yaml']
+    run: [cat, '{{workflow_dir}}/protocol.json']
   - id: search
     depends_on: [protocol]
     outputs: {files: [output/search.json, output/provenance.json]}
-    run: [python3, '{{workflow_dir}}/scripts/search_fixture.py', '{{workflow_dir}}/search_response.json', '{{workflow_dir}}/protocol.yaml']
+    run: [python3, '{{workflow_dir}}/scripts/search_fixture.py', '{{workflow_dir}}/search_response.json', '{{workflow_dir}}/protocol.json']
   - id: deduplicate
     depends_on: [search]
     outputs: {files: [output/deduplicated.json]}

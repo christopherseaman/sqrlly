@@ -3,13 +3,11 @@ import json
 import sys
 from pathlib import Path
 
-import yaml
-
 fixture_path, protocol_path = map(Path, sys.argv[1:])
 fixture_bytes = fixture_path.read_bytes()
 protocol_bytes = protocol_path.read_bytes()
 fixture = json.loads(fixture_bytes)
-protocol = yaml.safe_load(protocol_bytes)
+protocol = json.loads(protocol_bytes)
 if fixture["source"] != "frozen_synthetic_search" or not fixture["records"]:
     raise SystemExit("expected a nonempty frozen synthetic search response")
 if fixture["query"] != protocol["search"]["query"]:

@@ -413,6 +413,7 @@ async def _seed_state(
             "completed_nodes": skip,
             "failed_nodes": set(), "retries": {}, "errors": [],
             "workdir": workdir, "dry_run": False, "_resume_skip": skip,
+            "run_vars": old.get("run_vars", {}),
             "_fan_prior_children": fan_prior,
             "_fan_resume_attempts": {node.id: old.get("attempts", {}).get(node.id, 0)
                                      for node in config.nodes if node.for_each},
