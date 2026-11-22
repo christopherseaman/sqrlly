@@ -1,0 +1,14 @@
+name: Library member replay and decision
+nodes:
+  - id: member_decision
+    run:
+      - python3
+      - '{{workflow_dir}}/conference.py'
+      - member
+      - '--member={{vars.member}}'
+      - '--dataset={{vars.dataset}}'
+      - '--candidate={{vars.candidate}}'
+      - '--rehearsal={{vars.rehearsal}}'
+      - '--position={{vars.position}}'
+      - "--policies={{vars.policies | default(workflow_dir + '/policies.json')}}"
+    outputs: {files: [replay-report.json, member-decision.json]}

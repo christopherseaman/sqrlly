@@ -70,6 +70,8 @@ Screening and extraction can repeat by stable publication ID. Multiple reports m
 
 The first two changes are shared across all four cases. Domain experiments should drive their interface. A shared web service or deployment layer would need an actual caller, an authorization model, and a target environment.
 
+The [long-term product study](long-horizon-products.md) explores five additional directions, starting with a member-owned capacity exchange and a runnable test of how members would evaluate a shared rule.
+
 ## Verification
 
 | Check | Observed result |

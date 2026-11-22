@@ -1,0 +1,13 @@
+[
+  {"id": "P01", "limited_local_access": true,  "estimated_transfer_days": 1, "source_copy_available": true},
+  {"id": "P02", "limited_local_access": true,  "estimated_transfer_days": 2, "source_copy_available": true},
+  {"id": "P03", "limited_local_access": true,  "estimated_transfer_days": 3, "source_copy_available": true},
+  {"id": "P04", "limited_local_access": true,  "estimated_transfer_days": 2, "source_copy_available": true},
+  {"id": "S01", "limited_local_access": false, "estimated_transfer_days": 1, "source_copy_available": true},
+  {"id": "S02", "limited_local_access": false, "estimated_transfer_days": 2, "source_copy_available": true},
+  {"id": "S03", "limited_local_access": false, "estimated_transfer_days": 3, "source_copy_available": true},
+  {"id": "S04", "limited_local_access": false, "estimated_transfer_days": 4, "source_copy_available": true},
+  {"id": "S05", "limited_local_access": false, "estimated_transfer_days": 4, "source_copy_available": true},
+  {"id": "S06", "limited_local_access": false, "estimated_transfer_days": 5, "source_copy_available": true},
+  {"id": "S07", "limited_local_access": false, "estimated_transfer_days": 4, "source_copy_available": true}
+]

@@ -1,0 +1,5 @@
+{
+  "baseline": {"standard_max_days": 2, "limited_access_max_days": 2},
+  "favor_standard": {"standard_max_days": 4, "limited_access_max_days": 1},
+  "protect_access": {"standard_max_days": 4, "limited_access_max_days": 3}
+}

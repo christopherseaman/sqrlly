@@ -1,0 +1,21 @@
+name: Library conference consent rehearsal
+nodes:
+  - id: collect
+    run:
+      - python3
+      - '{{workflow_dir}}/conference.py'
+      - conference
+      - '--candidate={{vars.candidate}}'
+      - '--rehearsal={{vars.rehearsal}}'
+      - "--east-decision={{vars.east_decision | default('')}}"
+      - "--west-decision={{vars.west_decision | default('')}}"
+      - "--policies={{vars.policies | default(workflow_dir + '/policies.json')}}"
+    outputs: {files: [conference-report.json]}
+  - id: consent_gate
+    depends_on: [collect]
+    eval: {run: [cat, conference-report.json]}
+    route:
+      - when: eval.exit_code == 0 and eval.verdict == 'go'
+        then: unanimous
+      - else: fail
+  - id: unanimous

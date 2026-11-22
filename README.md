@@ -143,6 +143,8 @@ Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an exa
 `examples/regenerate_views.sh` rebuilds selected views and captures logs for two deterministic debug views.
 The [applied workflow experiment](docs/reference/workflow-use-case-experiment.md) covers app building, CRM imports, public health analysis, and research synthesis.
 
+The [long-term product study](docs/reference/long-horizon-products.md) includes a [two-library rehearsal](examples/experimental/policy_replay/README.md) that compares proposed lending rules and lets either library withhold consent.
+
 | Workflow | What it shows |
 |---|---|
 | [`examples/jokes/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/jokes/workflow.yaml) | Minimal: prompt + script gate + select. Start here. |

@@ -1,0 +1,13 @@
+name: Library transfer policy replay
+nodes:
+  - id: replay
+    run: [python3, '{{workflow_dir}}/replay.py', "{{vars.candidate | default('favor_standard')}}"]
+    outputs: {files: [replay-report.json]}
+  - id: release_gate
+    depends_on: [replay]
+    eval: {run: [cat, replay-report.json]}
+    route:
+      - when: eval.exit_code == 0 and eval.verdict == 'go'
+        then: passed
+      - else: fail
+  - id: passed
