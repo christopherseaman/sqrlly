@@ -152,6 +152,8 @@ The JSONL event `gate_evaluated` carries `node`, `attempt` and a nested `result`
 
 A missing file or invalid result reruns the node with the validation error as feedback. After three unsuccessful attempts the node fails. Each execution counts toward the node’s persisted attempt number. Its eval runs after output validation succeeds, so the first measurement can record attempt two or three. Commands can include `{{_output_retry_reason}}` in an argv token to receive the feedback.
 
+Output validation can repeat a command even when `settings.defaults.run.backend_max_retries` is zero. A database commit or API write can survive a failed output check. For commands with external effects, use a key enforced by the destination or reconcile the prior outcome before issuing another write. A missing or ambiguous match alone leaves the outcome unknown. Without a destination-enforced key, replay requires evidence that the prior write had no effect. Bare resume skips eligible completed nodes using saved state. To check that their artifacts still exist after moving or replacing a worker, run a read-only verification step.
+
 Templates can use ancestor results. `{{plan}}` renders its text, and `{{plan.count}}` reads a field when the ancestor declares a schema. Validation rejects references to a node outside the dependency or route path, field access on a node without a schema, and a route that compares a schema-less prompt node's entire text.
 
 ## Route
