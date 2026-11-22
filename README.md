@@ -128,6 +128,7 @@ nodes:
 - `--resume` seeds from the prior run's state and retries failures. It skips completed nodes by default.
   If an isolated node stops before sqrlly records its result, inspect its retained worktree before starting a fresh run.
 - `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
+- `--refresh-items` resumes a checkpoint and reruns children whose top-level manifest values changed. Unchanged completed siblings keep their results. For a manifest generated from changed files, use `--refresh-items --resume-from <producer>` to reread those files. Include external file hashes in the items when their contents affect a worker. A child workflow reruns as a unit.
 - `--rerun-all` with `--resume` replays every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
 - `--var NAME=VALUE` binds a string as `{{vars.NAME}}` in top-level templates. Repeat for multiple inputs. Resumes use the saved inputs.
@@ -144,6 +145,8 @@ Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an exa
 The [applied workflow experiment](docs/reference/workflow-use-case-experiment.md) covers app building, CRM imports, public health analysis, and research synthesis.
 
 The [long-term product study](docs/reference/long-horizon-products.md) includes a [two-library rehearsal](examples/experimental/policy_replay/README.md) that compares proposed lending rules and lets either library withhold consent.
+
+The [engine research program](docs/reference/engine-research-program.md) tests what sqrlly can recover across API requests, database transactions, local worktrees, and remote execution environments.
 
 | Workflow | What it shows |
 |---|---|

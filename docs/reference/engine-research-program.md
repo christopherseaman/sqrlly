@@ -1,0 +1,42 @@
+# Developing sqrlly across execution environments
+
+This experimental program runs November 22 through November 24, 2026 (UTC). Its deliverable is a better workflow engine. The [four application scenarios](workflow-use-case-experiment.md) and [longer term thought experiments](long-horizon-products.md) provide requirements and counterexamples. The member exchange, CRM, laboratory, and publishing systems each have their own owners. No such product is part of this program.
+
+Three questions govern the work. Which completed calculations still apply when the input changes? What can a worker safely repeat if it lost the reply? What evidence can another system verify after the original workspace disappears? A branch change should answer at least one question through the public CLI, and demonstrate a case where the existing interface falls short.
+
+## The boundary between a tool and an execution environment
+
+A workflow can run `gh` in a local worktree, call Jira from a hosted worker, or submit a cloud job through a local process. Two choices are independent. **Where the code executes** determines what it can read and what survives its exit. **Which system owns the result** determines how to identify, verify, retry, or undo the external action. Moving the checkout to another machine solves neither a lost reply nor an ambiguous write.
+
+| System | Identity the caller should retain | What the engine can establish |
+| --- | --- | --- |
+| Local script or agent in Git | Worktree, base revision and settled output revision | Git can record a file change and detect conflicting promotion. A Git commit proves nothing about an earlier HTTP request. |
+| SQL database | Database scope, business key and transaction result | A cooperating sink can enforce uniqueness inside the same transaction as the change. Filesystem rollback cannot reverse a committed transaction. |
+| Clarify | Workspace, object type, resource ID and an applicable match field | The adapter chooses the matching rule. Clarify documents upsert for certain objects, while tasks and meetings have no matching field. Retrying a create therefore needs different handling by object type. [Clarify import contract](https://developer.clarify.ai/docs/guides/import-crm-data) |
+| GitHub | Repository, resource ID, delivery ID where relevant, and action | A webhook redelivery retains its delivery ID. A subsequent issue read can verify a resource. A delivery ID alone cannot prove whether a downstream write committed. [GitHub webhook guidance](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks) |
+| Jira Cloud | Site, issue ID, issue key and action | Creation, editing and transitions have distinct contracts. Available create fields depend on project metadata and permissions. The adapter can retrieve an issue by ID or key. A lost create reply requires a reconciliation strategy suited to that installation. [Jira issue operations](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/) |
+| Long running remote job | Provider, account or project, opaque operation ID and output location | A replacement worker can query a saved handle if its credential still has access. Losing the handle between acceptance and persistence creates a separate recovery case. Google Cloud Run returns an Operation for a job launch. [Cloud Run jobs.run](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.jobs/run) |
+
+A workbook step can return a checked file. An API adapter can return a schema-validated object with a resource ID. A remote launcher might initially return only a job handle. The current `run`, `outputs.schema`, and `workflow.with` already carry these values. Keep access tokens in the execution environment. Pass identifiers through workflow state. A URL, object ID or checksum does not grant access. Treat a provider's acceptance response, remote completion, and successful collection of outputs as different observations.
+
+The important interface decision is what sqrlly promises between those steps. A universal connector that retries failed HTTP calls would replicate library code and could duplicate business operations. Conversely, asking every adapter to reverse engineer checkpoint internals would make crash recovery untestable. Exposing a logical operation identity, an explicit waiting state, or a verifiable output receipt is worth the public API cost only when a real failure distinguishes it from an ordinary command and a caller-supplied key.
+
+## Experiments and checkpoints
+
+| UTC | Engineering question | Acceptance evidence |
+| --- | --- | --- |
+| Nov 22, first checkpoint | Can stable fan-out children survive data revisions without preserving stale results or rebilling unchanged work? | Compare the original CLI, selective refresh, and a complete rebuild. Test a changed named item, original behavior, ordering, a failed worker, previous checkpoints and Git isolation. [Refresh investigation](https://github.com/christopherseaman/sqrlly/issues/56) |
+| Nov 22, 18:00 | Which recovery state belongs to an adapter, an execution host, or the runner? | Compare an API create with a lost reply, a database commit, and an already accepted job in a separate process. Replace the launcher and trace what survives. |
+| Nov 23, 06:00 | When should two dispatch attempts share a logical operation identity? | Compare an unkeyed sink, a caller-supplied key and an engine candidate across retries, fan-out, deliberate reruns and new runs. Count actual committed effects. [Dispatch investigation](https://github.com/christopherseaman/sqrlly/issues/57) |
+| Nov 23, 18:00 | Where do recovery assumptions break? | Interrupt the launcher, vary the working directory, and exercise older checkpoints, nested workflows, and Git settlement. Fix a reproducible engine regression in its owning layer. |
+| Nov 24, 06:00 | Can a different worker verify what actually completed? | Compare existing checksums and output contracts with a portable receipt. Move files, alter them, withhold them, and attempt verification independently. Distinguish external references from verified remote state. [Evidence investigation](https://github.com/christopherseaman/sqrlly/issues/58) |
+
+Each checkpoint can reject a proposed feature. A plain business key may be sufficient for a database import. A checksum file may be sufficient for a file handoff. A rejected design should record the command that settled the question, which guarantee the existing tool supplies, and the first case outside that guarantee.
+
+The fixed schedule uses this host's per-user systemd timer `sqrlly-engine-study-20261122.timer`. Each checkpoint works in a separate checkout, uses a second read-only review, and runs the offline suite before pushing any change to the experimental branch. A failed checkpoint retains its checkout and logs under `~/.local/state/sqrlly-engine-study-20261122/reports/`. The timer catches missed dates on the next user-manager start. The jobs require this host, an authenticated provider, and repository access. The project issue links the dated reports as they land. [Program checkpoints](https://github.com/christopherseaman/sqrlly/issues/55)
+
+## Scope of the architectural decision
+
+A Git worktree is a good boundary for editing files. A transaction is a good boundary for changing a database. Neither boundary provides exactly-once delivery across an unrelated API. Likewise an invocation ID answers which CLI process logged an event, while a business key answers which entity should change. Using one as the other confuses reruns with distinct work. The initial checkpoint measures both errors directly. [First checkpoint](checkpoints/2026-11-22-baseline.md)
+
+Durable execution, data versioning and publication already have mature implementations. Temporal distinguishes a workflow's progress from activity execution. DVC can reproduce data pipelines from declared dependencies. Quarto documents how to retain execution results for a publication. These are alternatives where their guarantees fit. The open question for sqrlly is which small contracts let existing commands, agents, and external systems participate together without requiring a shared scheduler, data store or cloud account. [Temporal activity execution](https://docs.temporal.io/activity-execution), [DVC repro](https://doc.dvc.org/command-reference/repro), [Quarto execution](https://quarto.org/docs/projects/code-execution.html)

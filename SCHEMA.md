@@ -198,7 +198,13 @@ nodes:
 
 Each child receives its value as `{{item}}`. For an object use `{{item.field}}`. The repeating node exposes a JSON list of child results in manifest order, including an empty list for zero items. A downstream node consumes the whole list. Accessing a field directly on that list (`{{build.field}}`) fails validation.
 
-An explicit object `id` identifies the child. An item without an id uses a hash of its value, with a duplicate ordinal to distinguish identical values. On resume, sqrlly compares the previous manifest with the static file or the producer's saved output. Newly inserted items run and completed children keep their results. If the producer needs to read changed inputs, use `--resume-from <producer>` to rerun it. An edited id-less value drops its previous child id. Dropped ids fail under the default `settings.on_manifest_drift: fail`; set `warn` to proceed.
+An explicit object `id` identifies the child. An item without an id uses a hash of its value, with a duplicate ordinal for identical values. Bare `--resume` compares the previous IDs with the static file or the producer's saved output. New items run, completed IDs keep their results, and the join follows the current item order. Editing an id-less value drops its previous ID. The default `settings.on_manifest_drift: fail` rejects removals. Set `warn` to accept them.
+
+Use `--refresh-items` to compare top-level fan-out values against the SHA-256 hash of each worker's producing input. JSON whitespace and object key order do not affect the hash. A plain resume keeps the hash of each frozen result. A missing hash triggers execution on the next explicit refresh. Older checkpoints lack hashes. Recovery can also leave an unknown hash if an interrupted Git dispatch could have replayed an older value.
+
+Use `--refresh-items --resume-from <producer>` when the producer must read new data. Include file hashes or other changing inputs in the item when they affect reuse. Changes to code, schemas or external files alone do not trigger refresh. A refreshed isolated worker gets a separate Git worktree when its input changes. Superseded unfinished trees remain available for inspection. A new route wave executes every child again under the existing route attempt limits.
+
+A repeated child workflow reruns as a unit. Its inner nodes have no individual checkpoints. If an inner isolated Git node already settled before the wrapper failed, recovery can stop at its output ref because the inner result is missing. Inspect the earlier side effects before deciding whether to start a fresh run.
 
 ## Failure kinds (JSONL `node_failed.kind`)
 

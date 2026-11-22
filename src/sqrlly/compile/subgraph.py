@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.compile._manifest import find_terminal_nodes
 from sqrlly.compile.nodes import (
+    assemble_success_update,
     count_attempts,
     run_with_timeout,
     all_deps_completed,
@@ -157,8 +158,9 @@ def make_subgraph_node(
             None if parent_state.get("dry_run") else parent_node.outputs,
             parent_state.get("workdir", "."),
         )
-        update = {"node_outputs": {parent_id: result.output},
-                  "attempts": {parent_id: parent_state.get("attempts", {}).get(parent_id, 0) + executions}}
+        update = (assemble_success_update(parent_node, result, parent_state) if result.success
+                  else {"node_outputs": {parent_id: result.output}})
+        update["attempts"] = {parent_id: parent_state.get("attempts", {}).get(parent_id, 0) + executions}
         if result.retained_refs:
             update["retained_refs"] = result.retained_refs
         if not result.success:

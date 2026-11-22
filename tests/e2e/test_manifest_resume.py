@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -46,7 +47,8 @@ def test_warn_shrink_prunes_checkpoint_and_readdition_runs_again(tmp_path):
     assert sorted((tmp_path / "calls").read_text().splitlines()) == ["a", "b", "b", "c"]
 
 
-def test_interrupt_repeated_child_id_keeps_current_wave_tree(tmp_path):
+@pytest.mark.parametrize("resume", ["--resume", "--refresh-items"])
+def test_interrupt_repeated_child_id_keeps_current_wave_tree(tmp_path, resume):
     base = tmp_path / "repo"
     base.mkdir()
     def git(*args):
@@ -76,7 +78,7 @@ def test_interrupt_repeated_child_id_keeps_current_wave_tree(tmp_path):
         proc.terminate()
         proc.wait(timeout=10)
         release.touch()
-    recovered = subprocess.run([*cli, "--resume"], capture_output=True, text=True)
+    recovered = subprocess.run([*cli, resume], capture_output=True, text=True)
     assert recovered.returncode == 1 and "Interrupted dispatch" in recovered.stderr
     assert (base / "results").read_text().splitlines() == ["a", "b"]
     trees = list((base / ".sqrlly").glob("wt-*/results"))

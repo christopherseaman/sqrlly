@@ -12,6 +12,13 @@ def _merge_dicts(left: dict, right: dict) -> dict:
     return merged
 
 
+def _merge_structured_outputs(left: dict, right: dict | set[str]) -> dict:
+    """A raw result removes its previous structured value, including JSON null."""
+    if isinstance(right, set):
+        return {key: value for key, value in left.items() if key not in right}
+    return left | right
+
+
 def _merge_worktrees(left: dict, right: dict) -> dict:
     """Remove settled paths after their worktrees are reclaimed."""
     return {key: path for key, path in (left | right).items() if path is not None}
@@ -55,12 +62,13 @@ REDUCERS: dict[str, Callable[[Any, Any], Any]] = {
     "completed_nodes": _merge_completed,
     "fan_children": _merge_dicts,
     "fan_child_attempts": _merge_dicts,
+    "fan_inputs": _merge_dicts,
     "fan_ready": _merge_dicts,
     "retained_refs": _merge_sets,
     "failed_nodes": _merge_sets,
     "errors": operator.add,
     "node_outputs": _merge_dicts,
-    "node_structured_outputs": _merge_dicts,
+    "node_structured_outputs": _merge_structured_outputs,
     "retries": _merge_dicts,
     "attempts": _merge_dicts,
     "settled_attempts": _merge_dicts,
@@ -77,6 +85,8 @@ class WorkflowState(TypedDict):
     workflow_name: str
     fan_ready: Annotated[dict[str, bool], REDUCERS["fan_ready"]]
     fan_children: Annotated[dict[str, list[str]], REDUCERS["fan_children"]]
+    # Each active child carries its producing value hash and Git worktree generation.
+    fan_inputs: Annotated[dict[str, dict[str, tuple[str | None, int]]], REDUCERS["fan_inputs"]]
     fan_child_attempts: Annotated[dict[str, int], REDUCERS["fan_child_attempts"]]
     retained_refs: Annotated[set[str], REDUCERS["retained_refs"]]
     completed_nodes: Annotated[set[str], REDUCERS["completed_nodes"]]
@@ -120,6 +130,7 @@ class WorkflowState(TypedDict):
     # dispatcher to detect a re-fan that DROPS a prior branch. Frozen,
     # last-write-wins (NO REDUCER). Absent => no drift check.
     _fan_prior_children: NotRequired[dict[str, set[str]]]
+    _refresh_items: NotRequired[bool]
     _fan_resume_attempts: NotRequired[dict[str, int]]
 
 

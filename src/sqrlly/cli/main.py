@@ -278,6 +278,7 @@ async def _run_async(
     entry: str | None = None,
     safe_mode: bool | None = None,
     run_vars: dict[str, str] | None = None,
+    refresh_items: bool = False,
 ) -> dict:
     """Inner async runner — wires checkpointer, executor, and state.
 
@@ -328,7 +329,7 @@ async def _run_async(
         result = await _execute_workflow(
             config, workdir, dry_run, resume, resume_from, rerun_all,
             thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode, log_file=log_file,
-            run_vars=run_vars,
+            run_vars=run_vars, refresh_items=refresh_items,
         )
         status = "failed" if result.get("failed_nodes") else "succeeded"
         return result
@@ -362,6 +363,7 @@ async def _seed_state(
     entry: str | None,
     thread_id: str,
     run_vars: dict[str, str] | None = None,
+    refresh_items: bool = False,
 ) -> dict:
     """Seed the initial WorkflowState for a run and wipe the checkpoint
     thread (so reducers don't merge with stale state). Three modes:
@@ -377,7 +379,7 @@ async def _seed_state(
         from sqrlly.compile.resume import compute_skip_set
         prior_completed = set(old.get("completed_nodes", set()))
         prior_failed = set(old.get("failed_nodes", set()))
-        from sqrlly.compile._manifest import _read_manifest
+        from sqrlly.compile._manifest import _read_manifest, item_hash
         from sqrlly.runtime.result import ManifestError
 
         prior_manifests = old.get("fan_children", {})
@@ -393,7 +395,11 @@ async def _seed_state(
                 fan_prior[node.id] = set(prior_order)
                 try:
                     branches = _read_manifest(old, node, workflow_dir=config.workflow_dir)
-                    if [child for child, item in branches] != prior_order:
+                    prior_inputs = old.get("fan_inputs", {}).get(node.id, {})
+                    values_changed = refresh_items and any(
+                        item_hash(item) != prior_inputs.get(child, (None, 0))[0] for child, item in branches
+                    )
+                    if values_changed or [child for child, item in branches] != prior_order:
                         changed.add(node.id)
                 except ManifestError:
                     # Dispatch records the error on the parent so a repaired manifest can resume.
@@ -414,14 +420,17 @@ async def _seed_state(
             "failed_nodes": set(), "retries": {}, "errors": [],
             "workdir": workdir, "dry_run": False, "_resume_skip": skip,
             "run_vars": old.get("run_vars", {}),
-            "_fan_prior_children": fan_prior,
+            "_fan_prior_children": fan_prior, "_refresh_items": refresh_items,
             "_fan_resume_attempts": {node.id: old.get("attempts", {}).get(node.id, 0)
                                      for node in config.nodes if node.for_each},
             "_snapshot_reexecute": prior_failed | (prior_completed - skip),
         }
         if rerun_all:
             state.pop("_cold_entry", None)
-        click.echo(f"Resuming: skipping {len(skip)} completed nodes from the checkpoint.")
+        if refresh_items:
+            click.echo(f"Resuming: {len(skip)} completed nodes eligible for reuse before item comparison.")
+        else:
+            click.echo(f"Resuming: skipping {len(skip)} completed nodes from the checkpoint.")
         # Wipe the thread so reducers don't merge with stale state
         await cp.adelete_thread(thread_id)
         return state
@@ -469,6 +478,7 @@ async def _execute_workflow(
     safe_mode: bool | None = None,
     log_file: str | None = None,
     run_vars: dict[str, str] | None = None,
+    refresh_items: bool = False,
 ) -> dict:
     if dry_run:
         compiled = build_workflow_graph(config, None, logger=logger, entry=entry)
@@ -538,7 +548,7 @@ async def _execute_workflow(
             state = await _seed_state(
                 cp, config, workdir,
                 resume=resume, resume_from=resume_from, rerun_all=rerun_all,
-                entry=entry, thread_id=thread_id, run_vars=run_vars,
+                entry=entry, thread_id=thread_id, run_vars=run_vars, refresh_items=refresh_items,
             )
 
             if isinstance(executor_obj, ForemanExecutor):
@@ -583,6 +593,8 @@ def _parse_run_vars(values: tuple[str, ...]) -> dict[str, str]:
 @click.option(
     "--resume", is_flag=True, help="Resume from the last checkpoint"
 )
+@click.option("--refresh-items", is_flag=True,
+              help="Resume and rerun children whose manifest values changed.")
 @click.option(
     "--resume-from", "resume_from", multiple=True,
     help="Re-run this node and everything downstream; freeze upstream. "
@@ -630,11 +642,14 @@ def run(
     quiet: bool,
     safe_mode: bool | None,
     variables: tuple[str, ...],
+    refresh_items: bool,
 ):
     """Run a workflow from a configuration file."""
     config = load_config(config_file)
 
-    resume = resume or bool(resume_from)
+    if refresh_items and (dry_run or rerun_all or entry is not None or variables):
+        raise click.UsageError("--refresh-items cannot be combined with --dry-run, --rerun-all, --entry, or --var.")
+    resume = resume or bool(resume_from) or refresh_items
     if resume and variables:
         raise click.UsageError("--var cannot be used with --resume or --resume-from. Start a fresh run to change inputs.")
     run_vars = _parse_run_vars(variables)
@@ -679,7 +694,7 @@ def run(
     try:
         result = asyncio.run(
             _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file,
-                       quiet, entry, safe_mode, run_vars=run_vars)
+                       quiet, entry, safe_mode, run_vars=run_vars, refresh_items=refresh_items)
         )
     except KeyboardInterrupt:
         click.echo("Interrupted.", err=True)

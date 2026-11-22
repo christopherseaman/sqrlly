@@ -48,7 +48,8 @@ class ForemanExecutor:
         self._creation = asyncio.Semaphore(max_parallel_jobs)
         self._locks: dict[str, asyncio.Lock] = {}
         self._worktrees: dict[str, str] = {}
-        self._names: tuple[str, ...] = ()
+        self._names: tuple[str | tuple[str, int], ...] = ()
+        self._fan_versions: dict[str, int] = {}
         self._recover = recover
         self.reexecute: set[str] = set()
         self._dispatched: set[str] = set()
@@ -66,17 +67,35 @@ class ForemanExecutor:
         """Share the run and its leases while qualifying nested node ids."""
         from copy import copy
         child = copy(self)
-        child._names = (*self._names, name)
+        child._names = (*self._names, self._component(name))
+        child._fan_versions = {}
         return child
 
+    def _component(self, node_id: str) -> str | tuple[str, int]:
+        version = self._fan_versions.get(node_id, 0)
+        return (node_id, version) if version else node_id
+
     def _key(self, node_id: str) -> str:
-        if not self._names and not node_id.startswith("["):
-            return node_id
-        return json.dumps([*self._names, node_id], separators=(",", ":"))
+        component = self._component(node_id)
+        if not self._names and isinstance(component, str) and not component.startswith("["):
+            return component
+        return json.dumps([*self._names, component], separators=(",", ":"))
+
+    def may_replay_child(self, child_id: str, node: Node, settings: Settings) -> bool:
+        if node.workflow:
+            return self._recover  # Inner nodes recover their own dispatch records.
+        return (self._recover and child_id not in self.reexecute
+                and node.effective_worktree(settings, fan_child=True) == "isolated")
+
+    def set_fan_versions(self, versions: dict[str, int]) -> None:
+        self._fan_versions.update(versions)
 
     def start_fan_child(self, child_id: str) -> None:
         # Only the join can remove these trees, after all child success stamps are checkpointed.
-        self._fan_children.add(self._key(child_id))
+        key = self._key(child_id)
+        self._fan_children.add(key)
+        if child_id in self.reexecute:
+            self.reexecute.add(key)
 
     def _tree(self, key: str) -> Path:
         digest = hashlib.sha256(self.snapshots.ref(key, "in").encode()).hexdigest()

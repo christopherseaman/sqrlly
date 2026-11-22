@@ -12,6 +12,7 @@ from langgraph.types import Command, Send
 
 from sqrlly.compile._manifest import (
     _read_manifest,
+    item_hash,
     manifest_drift,
 )
 from sqrlly.compile.lint import iter_route_edges
@@ -120,7 +121,35 @@ def _fan_drift_command(
     return None
 
 
-def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_dir=None):
+def _fan_inputs(items, state, node, generation, recovering, executor, settings):
+    parent = node.id
+    previous = state.get("fan_inputs", {}).get(parent, {})
+    prior_children = state.get("_fan_prior_children", {}).get(parent, ())
+    frozen = state.get("_resume_skip", set())
+    refresh = state.get("_refresh_items", False)
+    inputs = {}
+    inherited = set()
+    for child, value in items:
+        digest = item_hash(value)
+        prior = previous.get(child, (None, 0))
+        if recovering and child in prior_children:
+            reuse = child in frozen and (not refresh or digest == prior[0])
+            if reuse:
+                inherited.add(child)
+            # Preserve the input of a frozen result or a recoverable dispatch record.
+            if reuse or digest == prior[0]:
+                inputs[child] = prior
+                continue
+            if not refresh:
+                # A cached Git dispatch can predate this manifest edit.
+                ambiguous = hasattr(executor, "may_replay_child") and executor.may_replay_child(child, node, settings)
+                inputs[child] = (None if ambiguous else digest, prior[1])
+                continue
+        inputs[child] = (digest, generation if generation > 1 else 0)
+    return inputs, inherited
+
+
+def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_dir=None, executor=None):
     def dispatch(state: WorkflowState):
         if node.id in state.get("failed_nodes", set()):
             return Command(goto=END)
@@ -134,11 +163,13 @@ def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_di
         attempt = state.get("attempts", {}).get(node.id, 0)
         baseline = state.get("_fan_resume_attempts", {}).get(node.id)
         recovering = attempt == baseline and state.get("required_attempts", {}).get(node.id, 0) <= attempt
+        generation = attempt + 1
         try:
             if state.get("dry_run") and isinstance(node.for_each, str):
                 items = []
             else:
                 items = _read_manifest(state, node, workflow_dir=workflow_dir)
+            inputs, inherited = _fan_inputs(items, state, node, generation, recovering, executor, settings)
         except ManifestError as exc:
             failure = make_failure_update(node.id, str(exc))
             if not recovering:
@@ -150,10 +181,10 @@ def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_di
                                       set(children), frozen, settings)
             if drift:
                 return drift
-        generation = attempt + 1
-        inherited = set(children).intersection(frozen) if recovering else set()
+        if hasattr(executor, "set_fan_versions"):
+            executor.set_fan_versions({child: version for child, (_, version) in inputs.items()})
         update = {"fan_children": {node.id: children}, "fan_ready": {node.id: False},
-                  "attempts": {node.id: generation},
+                  "attempts": {node.id: generation}, "fan_inputs": {node.id: inputs},
                   "fan_child_attempts": dict.fromkeys(inherited, generation)}
         previous = state.get("fan_children", {}).get(node.id, ())
         # A resumed edit retires dropped children. A new loop wave keeps earlier, distinct completions.
@@ -250,7 +281,7 @@ def build_workflow_graph(
                 )
 
         if node.for_each:
-            builder.add_node(node.id, _make_fan_dispatcher(node, downstream, settings, config.workflow_dir))
+            builder.add_node(node.id, _make_fan_dispatcher(node, downstream, settings, config.workflow_dir, executor))
             worker = f"_sub_{node.id}"
             join = f"_settle_{node.id}"
             prototype = item_node(node, settings)
