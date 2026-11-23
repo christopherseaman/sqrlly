@@ -260,7 +260,7 @@ async def _read_saved_status(
                 """WITH recent AS (
                     SELECT thread_id, MAX(checkpoint_id) AS last_id
                     FROM checkpoints
-                    WHERE thread_id LIKE ? AND checkpoint_ns = ''
+                    WHERE thread_id GLOB ? AND checkpoint_ns = ''
                     GROUP BY thread_id
                     ORDER BY last_id DESC LIMIT ?
                 )
@@ -269,7 +269,7 @@ async def _read_saved_status(
                 JOIN checkpoints AS checkpoint ON checkpoint.thread_id = recent.thread_id
                     AND checkpoint.checkpoint_ns = '' AND checkpoint.checkpoint_id = recent.last_id
                 ORDER BY recent.last_id DESC""",
-                (f"{workflow_key}:%", history),
+                (f"{workflow_key}:*", history),
             )
         elif run_id is not None:
             # The saver runs schema setup before reading. Select its latest root checkpoint directly.
