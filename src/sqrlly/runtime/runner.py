@@ -32,6 +32,10 @@ async def run_workflow(
         {"configurable": {"thread_id": thread_id}} if thread_id else {}
     )
 
+    stream_modes = ["updates", "values"]
+    if logger is not None:
+        stream_modes.append("custom")
+
     # Tuple stream_mode: each chunk is ``(mode, payload)``.
     #   - ``("updates", {node_name: partial_update})`` per super-step;
     #     events derive from the partial update directly (no diffing).
@@ -41,7 +45,7 @@ async def run_workflow(
     # LangGraph's synchronous barrier requires an active checkpointer.
     async for chunk_type, payload in compiled_graph.astream(
         initial_state, config=run_config,
-        stream_mode=["updates", "values"],
+        stream_mode=stream_modes,
         durability="sync" if compiled_graph.checkpointer else None,
     ):
         if chunk_type == "values":
@@ -50,4 +54,6 @@ async def run_workflow(
             for _node_name, update in payload.items():
                 if update is None or isinstance(update, dict):
                     logger.log_update(update)
+        elif chunk_type == "custom" and logger is not None:
+            logger.emit(payload)
     return last_state

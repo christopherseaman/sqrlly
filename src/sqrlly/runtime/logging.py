@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
+
+
+def node_start_event(node: str) -> dict[str, Any]:
+    return {"event": "node_started", "node": node, "_started_at": time.monotonic()}
 
 
 def failed_kinds_map(
@@ -106,6 +111,7 @@ class JsonlLogger:
 
     def __init__(self, dest: str | Path | IO[str], *, invocation_id: str | None = None) -> None:
         self._invocation_id = invocation_id
+        self._node_starts: dict[str, float] = {}
         if isinstance(dest, (str, Path)):
             self._file: IO[str] = open(dest, "a")
             self._owns_file = True
@@ -120,6 +126,16 @@ class JsonlLogger:
     def emit(self, event: dict[str, Any]) -> None:
         """Write a single event as a JSON line with a timestamp."""
         record = {"ts": datetime.now(timezone.utc).isoformat(), **event}
+        kind = event.get("event")
+        if kind in ("workflow_start", "workflow_end"):
+            self._node_starts.clear()
+        elif kind == "node_started":
+            started_at = record.pop("_started_at", None)
+            self._node_starts[event["node"]] = time.monotonic() if started_at is None else started_at
+        elif kind in ("node_completed", "node_failed"):
+            started_at = self._node_starts.pop(event["node"], None)
+            if started_at is not None:
+                record["duration_s"] = time.monotonic() - started_at
         if self._invocation_id is not None:
             record["invocation_id"] = self._invocation_id
         self._file.write(json.dumps(record) + "\n")

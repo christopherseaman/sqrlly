@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from langgraph.graph import END
-from langgraph.types import Command
+from langgraph.types import Command, StreamWriter
 
 from sqrlly.compile.nodes import _make_execution_node, make_failure_update, settle, settle_nodes
 from sqrlly.runtime.state import REDUCERS, WorkflowState
@@ -30,7 +30,7 @@ def item_node(parent: Node, settings: Settings) -> Node:
 
 
 def make_item_worker(prototype: Node, config: Graph, executor, settings: Settings, build_subgraph):
-    async def worker(state: WorkflowState):
+    async def worker(state: WorkflowState, *, writer: StreamWriter):
         child_id = state["_fan_child_id"]
         if hasattr(executor, "start_fan_child"):
             executor.start_fan_child(child_id)
@@ -49,7 +49,7 @@ def make_item_worker(prototype: Node, config: Graph, executor, settings: Setting
         update = {}
         while True:
             current = _merge_updates(state, update)
-            execution = await body(current)
+            execution = await body(current, writer=writer)
             if "node_structured_outputs" in execution:
                 # One worker owns one output. Its last write must reach the checkpoint intact.
                 update.pop("node_structured_outputs", None)

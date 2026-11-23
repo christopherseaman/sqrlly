@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from langgraph.types import StreamWriter
 
 from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.compile._manifest import find_terminal_nodes, item_hash
@@ -20,7 +21,7 @@ from sqrlly.compile.nodes import (
     make_failure_update,
 )
 from sqrlly.runtime.executor.prompt import render_template
-from sqrlly.runtime.logging import SubgraphLogger
+from sqrlly.runtime.logging import SubgraphLogger, node_start_event
 from sqrlly.runtime.result import ExecutionResult
 from sqrlly.runtime.settings_merge import merge_settings
 from sqrlly.runtime.state import WorkflowState, make_initial_state
@@ -148,13 +149,15 @@ def make_subgraph_node(
         if sub_logger is not None:
             sub_result = sub_state
             async for chunk_type, payload in graph.astream(
-                sub_state, stream_mode=["updates", "values"],
+                sub_state, stream_mode=["updates", "values", "custom"],
             ):
                 if chunk_type == "values":
                     sub_result = payload
                 elif chunk_type == "updates":
                     for _name, update in payload.items():
                         sub_logger.log_update(update)
+                elif chunk_type == "custom":
+                    sub_logger.emit(payload)
         else:
             sub_result = await graph.ainvoke(sub_state)
 
@@ -165,7 +168,7 @@ def make_subgraph_node(
                                    error=f"subgraph '{sub_config.name}' had failed nodes: {failures}")
         return ExecutionResult(output=output, retained_refs=retained)
 
-    async def wrapper(parent_state: WorkflowState) -> dict[str, Any]:
+    async def wrapper(parent_state: WorkflowState, writer: StreamWriter | None) -> dict[str, Any]:
         if (is_frozen(parent_id, parent_state)
                 or parent_id in parent_state.get("failed_nodes", set())):
             return {}
@@ -180,6 +183,8 @@ def make_subgraph_node(
         ):
             return {}
 
+        if writer is not None and not parent_state.get("dry_run"):
+            writer(node_start_event(parent_id))
         result, executions, _ = await execute_with_outputs(
             lambda ctx: run_with_timeout(run_child(parent_state, ctx), timeout),
             build_context(parent_node, parent_state),

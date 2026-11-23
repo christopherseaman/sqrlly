@@ -26,6 +26,7 @@ from sqrlly.compile.nodes import (
     is_frozen,
     check_dep_failed,
 )
+from sqrlly.runtime.logging import node_start_event
 from sqrlly.runtime.result import EvaluationError, ManifestError
 from sqrlly.runtime.state import WorkflowState
 from sqrlly.schema.models import Graph, Node, Settings
@@ -159,7 +160,7 @@ def _fan_inputs(items, state, node, generation, recovering, executor, settings):
 
 
 def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_dir=None, executor=None):
-    def dispatch(state: WorkflowState):
+    def dispatch(state: WorkflowState, *, writer=None):
         if node.id in state.get("failed_nodes", set()):
             return Command(goto=END)
         if failure := check_dep_failed(node, state):
@@ -169,6 +170,8 @@ def _make_fan_dispatcher(node: Node, dependents, settings: Settings, workflow_di
         frozen = state.get("_resume_skip", set())
         if is_frozen(node.id, state):
             return Command(goto=dependents or END)
+        if writer is not None and not state.get("dry_run"):
+            writer(node_start_event(node.id))
         attempt = state.get("attempts", {}).get(node.id, 0)
         baseline = state.get("_fan_resume_attempts", {}).get(node.id)
         recovering = attempt == baseline and state.get("required_attempts", {}).get(node.id, 0) <= attempt
