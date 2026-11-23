@@ -63,6 +63,60 @@ def test_moved_base_retains_failed_tree(repo):
     assert (tree / "input").read_text() == "ours\n"
 
 
+@pytest.mark.parametrize("mode", ["ordinary", "repeated", "changed-tree"])
+def test_nested_resume_retries_conflicted_promotion_without_dispatch(repo, tmp_path, mode):
+    counts = tmp_path / "counts"
+    child = [
+        {"id": "edit", "worktree": "isolated", "run": [
+            "sh", "-ec", 'echo called >> "$1"; printf ours > input; '
+            'printf external > "$2/input"; printf worker-output',
+            "worker", str(counts), str(repo)]},
+        {"id": "read", "depends_on": ["edit"], "run": [
+            "sh", "-ec", 'printf "%s:%s" "$1" "$(cat input)" > seen',
+            "reader", "{{edit}}"]},
+    ]
+    (repo / "child.yaml").write_text(yaml.safe_dump({"nodes": child}))
+    nodes = [{"id": "nested", "workflow": {"file": "child.yaml"}}]
+
+    scope = "nested"
+    if mode != "ordinary":
+        (repo / "items.json").write_text('[{"id": "only"}]')
+        nodes[0]["for_each"] = {"file": "items.json"}
+        scope = "nested::only"
+
+    log = tmp_path / "conflict.jsonl"
+    result = invoke(repo, nodes, "--log", str(log))
+    assert result.returncode == 1, result.stdout + result.stderr
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    failure, = [event for event in events
+                if event["event"] == "node_failed" and event["node"] == f"{scope}::edit"]
+    assert "Promote conflict (1 path(s)): input <-" in failure["error"]
+    assert (repo / "input").read_text() == "external"
+    tree, = (repo / ".sqrlly").glob("wt-*")
+    assert (tree / "input").read_text() == "ours"
+    assert counts.read_text() == "called\n"
+    assert not (repo / "seen").exists()
+
+    (repo / "input").write_text("dirty")
+    if mode == "changed-tree":
+        (tree / "input").write_text("unverified")
+    resumed_log = tmp_path / "resumed.jsonl"
+    result = invoke(repo, nodes, "--resume", "--log", str(resumed_log))
+    if mode == "changed-tree":
+        assert result.returncode == 1
+        assert "settled receipt is unavailable or mismatched" in resumed_log.read_text()
+        assert (repo / "input").read_text() == "dirty"
+        assert (tree / "input").read_text() == "unverified"
+        assert counts.read_text() == "called\n"
+        assert not (repo / "seen").exists()
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (repo / "input").read_text() == "ours"
+    assert (repo / "seen").read_text() == "worker-output:ours"
+    assert counts.read_text() == "called\n"
+    assert not list((repo / ".sqrlly").glob("wt-*"))
+
+
 def test_fanout_resume_promotes_in_manifest_order_once(repo, tmp_path):
     (repo / "items.json").write_text(json.dumps([{"id": "z"}, {"id": "a"}]))
     gate = tmp_path / "allow"

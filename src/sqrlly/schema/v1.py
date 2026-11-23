@@ -99,8 +99,12 @@ class Workflow(File):
 
 
 def repository_root(directory: Path) -> Path | None:
-    # Linked worktrees have a .git file at their own root.
-    return next((p for p in (directory, *directory.parents) if (p / ".git").exists()), None)
+    for parent in (directory, *directory.parents):
+        marker = parent / ".git"
+        # Linked worktrees use a file. An empty .git directory is not a repository.
+        if marker.is_file() or (marker / "HEAD").is_file():
+            return parent
+    return None
 
 
 def require_reference(root: Path | None, path: Path, key: str, hint: str = "") -> None:

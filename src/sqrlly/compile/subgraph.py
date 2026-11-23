@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 
 from sqrlly.compile.outputs import execute_with_outputs
-from sqrlly.compile._manifest import find_terminal_nodes
+from sqrlly.compile._manifest import find_terminal_nodes, item_hash
 from sqrlly.compile.nodes import (
     assemble_success_update,
     count_attempts,
@@ -71,6 +71,7 @@ def make_subgraph_node(
     depth: int,
     logger: Any | None = None,
     timeout: float | None = None,
+    *, recover_settled: bool = False,
 ):
     """Create the wrapper async function added as the parent graph's node.
 
@@ -88,10 +89,28 @@ def make_subgraph_node(
 
     """
     sub_logger = SubgraphLogger(logger, parent_node.id) if logger else None
-    sub_graph = compile_fn(
-        sub_config, executor=executor.scoped(parent_node.id) if hasattr(executor, "scoped") else executor, _depth=depth + 1,
-        effective_settings=sub_config.settings, logger=sub_logger,
+    scoped = executor.scoped(parent_node.id) if hasattr(executor, "scoped") else executor
+
+    def compile_child(child_executor):
+        return compile_fn(
+            sub_config, executor=child_executor, _depth=depth + 1,
+            effective_settings=sub_config.settings, logger=sub_logger,
+        )
+
+    # Explicit routes can re-enter other nodes at the same address. An
+    # eval without routes can only retry its own body, which Foreman
+    # excludes from recovery. Use worktree-local receipts for ordinary nodes
+    # in that graph, without persisting or reconstructing any gate outcome.
+    # Wrapper output retries can re-enter the whole graph, so only the
+    # initial invocation can recover a retained tree.
+    recover_settled = (
+        recover_settled and hasattr(scoped, "for_settled_item")
+        and not (parent_node.eval or parent_node.route)
+        and all(not (node.route or node.for_each or node.workflow)
+                for node in sub_config.nodes)
     )
+    retained_only = parent_node.outputs is not None or any(node.eval for node in sub_config.nodes)
+    sub_graph = None if recover_settled else compile_child(scoped)
 
     parent_id = parent_node.id
     inputs_decl = parent_node.workflow.inputs
@@ -117,9 +136,18 @@ def make_subgraph_node(
             rendered_inputs["_output_retry_reason"] = reason
             rendered_inputs["_retry_reason"] = reason
 
+        graph = sub_graph
+        if recover_settled:
+            child_executor = scoped
+            if not parent_context.get("_output_retry_reason"):
+                child_executor = scoped.for_settled_item(
+                    item_hash(parent_state["_fan_out_item"]),
+                    retained_only=retained_only,
+                )
+            graph = compile_child(child_executor)
         if sub_logger is not None:
             sub_result = sub_state
-            async for chunk_type, payload in sub_graph.astream(
+            async for chunk_type, payload in graph.astream(
                 sub_state, stream_mode=["updates", "values"],
             ):
                 if chunk_type == "values":
@@ -128,7 +156,7 @@ def make_subgraph_node(
                     for _name, update in payload.items():
                         sub_logger.log_update(update)
         else:
-            sub_result = await sub_graph.ainvoke(sub_state)
+            sub_result = await graph.ainvoke(sub_state)
 
         output = _terminal_node_output(sub_result, sub_config)
         retained = sub_result.get("retained_refs", set())
@@ -152,7 +180,7 @@ def make_subgraph_node(
         ):
             return {}
 
-        result, executions = await execute_with_outputs(
+        result, executions, _ = await execute_with_outputs(
             lambda ctx: run_with_timeout(run_child(parent_state, ctx), timeout),
             build_context(parent_node, parent_state),
             None if parent_state.get("dry_run") else parent_node.outputs,

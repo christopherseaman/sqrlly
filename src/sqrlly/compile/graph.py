@@ -136,11 +136,13 @@ def _fan_inputs(items, state, node, generation, recovering, executor, settings):
             reuse = child in frozen and (not refresh or digest == prior[0])
             if reuse:
                 inherited.add(child)
-            # Preserve the input of a frozen result or a recoverable dispatch record.
-            if reuse or digest == prior[0]:
+            # An explicitly rerun completed wrapper needs a new nested scope.
+            rerun_workflow = (node.workflow and
+                              state.get("fan_child_attempts", {}).get(child) == generation - 1)
+            if reuse or (digest == prior[0] and not rerun_workflow):
                 inputs[child] = prior
                 continue
-            if not refresh:
+            if not refresh and digest != prior[0]:
                 # A cached Git dispatch can predate this manifest edit.
                 ambiguous = hasattr(executor, "may_replay_child") and executor.may_replay_child(child, node, settings)
                 inputs[child] = (None if ambiguous else digest, prior[1])
@@ -274,10 +276,11 @@ def build_workflow_graph(
                 detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings, inputs=inputs)
             child_config = load_graph(node.workflow.file, base_dir, settings, inputs=inputs)
 
-            def build_subgraph(reference, child=child_config):
+            def build_subgraph(reference, child=child_config, repeated=bool(node.for_each)):
                 return make_subgraph_node(
                     reference, child, compile_fn, executor, _depth, logger,
                     timeout=reference.effective_timeout(settings),
+                    recover_settled=(_depth == 0 and repeated),
                 )
 
         if node.for_each:

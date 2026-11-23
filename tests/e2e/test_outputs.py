@@ -96,6 +96,7 @@ def test_local_refs_resolve_across_documents_and_anchors(tmp_path):
 
 @pytest.mark.parametrize("ref", ["https://example.invalid/schema", "../../outside.json", "escape.json"])
 def test_nested_schema_reference_cannot_escape(tmp_path, ref):
+    (tmp_path / ".git").mkdir()
     root = tmp_path / "workflow"
     (root / "nested").mkdir(parents=True)
     (tmp_path / "outside.json").write_text("{}")

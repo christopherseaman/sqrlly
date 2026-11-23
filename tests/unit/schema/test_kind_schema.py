@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 from pydantic import ValidationError
 
@@ -99,7 +101,7 @@ def test_preamble_resolves_relative_to_declaring_workflow(tmp_path, in_repositor
     child = repo / "child"
     child.mkdir(parents=True)
     if in_repository:
-        (repo / ".git").mkdir()
+        subprocess.run(["git", "init", "-q", repo], check=True)
     (repo / "preamble.md").write_text("Parent")
     parent_path = repo / "workflow.yaml"
     parent_path.write_text("settings: {preamble_file: preamble.md}\nnodes: [{id: a}]")

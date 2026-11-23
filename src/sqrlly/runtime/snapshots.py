@@ -178,6 +178,14 @@ class SnapshotRun:
         key = hashlib.sha256((self.workflow + run).encode()).hexdigest()
         return self.locks / key
 
+    def receipt_path(self, node_id):
+        key = hashlib.sha256(self.ref(node_id, "out").encode()).hexdigest()
+        return self._lease_path(self.run).with_suffix(".receipts") / f"{key}.json"
+
+    def revision(self, node_id, phase, *, settled=False):
+        ref = self.ref(node_id, phase) + ("-settled" if settled else "")
+        return _git(self.base, "rev-parse", "--revs-only", ref + "^{commit}").decode().strip()
+
     def _lock(self):
         return closing(_lease(self.locks / "promotion.lock", 60))
 
@@ -195,7 +203,7 @@ class SnapshotRun:
         head = _git(root, "rev-parse", "--revs-only", "HEAD").strip()
         ref = self.ref(node_id, phase)
         prior = _git(root, "rev-parse", "--revs-only", ref).strip()
-        if prior and _git(root, "show", "-s", "--format=%T:%P", prior).strip() == tree.encode() + b":" + head:
+        if prior and self._matches_snapshot(root, prior, tree, head):
             return prior.decode()
         args = ["-p", head] if head else []
         sha = _git(root, "commit-tree", tree, *args, "-m", f"sqrlly {phase}").strip().decode()
@@ -213,6 +221,23 @@ class SnapshotRun:
     def capture_out(self, node_id, worktree, *, exclude_paths=()):
         self._capture(worktree, node_id, "out", exclude_paths)
         return self.ref(node_id, "out")
+
+    def matches_output(self, worktree, commit, *, exclude_paths=(), required_files=frozenset()):
+        """Verify the snapshot and coverage of files used by output validation."""
+        excluded = [*self.excluded, *(f":(exclude,literal){path}" for path in exclude_paths)]
+        tree = _tree(worktree, excluded)
+        head = _git(worktree, "rev-parse", "--revs-only", "HEAD").strip()
+        if not self._matches_snapshot(worktree, commit, tree, head):
+            return False
+        if not required_files:
+            return True
+        regular_files = {path for path, (mode, _) in _entries(worktree, tree).items()
+                         if mode in (b"100644", b"100755")}
+        return required_files <= regular_files
+
+    @staticmethod
+    def _matches_snapshot(root, commit, tree, head):
+        return _git(root, "show", "-s", "--format=%T:%P", commit).strip() == tree.encode() + b":" + head
 
     def promote(self, specs, mode, excludes=None, prefix=""):
         with self._lock():
@@ -308,6 +333,14 @@ class SnapshotRun:
                             refs = [r for r in self._refs(prefix)
                                     if re.fullmatch(re.escape(prefix) + r"[^/]+/(in|out|out-settled|out-pending)", r)]
                             if refs:
+                                receipts = path.with_suffix(".receipts")
+                                for ref in refs:
+                                    if ref.endswith("/out"):
+                                        name = hashlib.sha256(ref.encode()).hexdigest()
+                                        (receipts / f"{name}.json").unlink(missing_ok=True)
+                                        (receipts / f"{name}.tmp").unlink(missing_ok=True)
+                                if receipts.is_dir() and not any(receipts.iterdir()):
+                                    receipts.rmdir()
                                 _git(self.base, "update-ref", "--stdin",
                                      data="".join(f"delete {ref}\n" for ref in refs).encode())
                         path.unlink(missing_ok=True)

@@ -282,12 +282,32 @@ def _make_execution_node(
             if delay > 0:
                 await asyncio.sleep(delay)
 
-        exec_result, executions = await execute_with_outputs(
-            lambda ctx: run_with_timeout(
-                executor.execute(node, ctx, settings_override=effective_settings), timeout,
-            ),
-            context, node.outputs, state.get("workdir", "."),
-        )
+        try:
+            identity = (executor.settlement_identity(node, settings, context)
+                        if hasattr(executor, "settlement_identity") else None)
+            recovered = (executor.recover_settled(node, settings, identity)
+                         if hasattr(executor, "recover_settled") else None)
+        except (RuntimeError, OSError, ValueError, TypeError) as exc:
+            return make_failure_update(node.id, str(exc), "infra")
+        already_promoted = False
+        if recovered is not None:
+            exec_result, executions, already_promoted = recovered
+        else:
+            # Output validation can change the dispatch context inside one invocation.
+            dispatch_options = {"invocation_identity": identity} if identity is not None else {}
+            exec_result, executions, validation_exhausted = await execute_with_outputs(
+                lambda ctx: run_with_timeout(
+                    executor.execute(node, ctx, settings_override=effective_settings, **dispatch_options), timeout,
+                ),
+                context, node.outputs, state.get("workdir", "."),
+            )
+            if identity is not None and (
+                validation_exhausted or (exec_result.success and node.effective_promote(settings))
+            ):
+                try:
+                    executor.record_result_for_settlement(node, identity, exec_result, executions)
+                except (RuntimeError, OSError, ValueError) as exc:
+                    return make_failure_update(node.id, str(exc), "infra")
         attempts = {node.id: state.get("attempts", {}).get(node.id, 0) + executions}
         if not exec_result.success:
             # Carry the classification the executor set (overload / backend_error
@@ -304,7 +324,10 @@ def _make_execution_node(
             if wt:
                 update["node_worktrees"] = {node.id: wt}
         if not (node.eval or node.route):
-            promotion = {} if defer_promotion else settle_nodes(executor, node, settings, [node.id])
+            if already_promoted:
+                promotion = {"node_worktrees": {node.id: None}}
+            else:
+                promotion = {} if defer_promotion else settle_nodes(executor, node, settings, [node.id])
             update.update(promotion)
             if not promotion.get("failed_nodes"):
                 update["completed_nodes"] = {node.id}
