@@ -47,6 +47,12 @@ nodes:
     assert (tmp_path / "prepared").read_text().splitlines() == ["first", "second"]
     assert (tmp_path / "finished").read_text().splitlines() == ["second", "first"]
 
+    result = runner.invoke(cli, status + ["--history", "1"])
+    assert result.exit_code == 0, result.output
+    history = json.loads(result.output)
+    assert history["latest_run_id"] == latest
+    assert [item["run_id"] for item in history["runs"]] == [first]
+
     result = runner.invoke(cli, args + ["--resume-from", "finish"])
     assert result.exit_code == 0, result.output
     assert (tmp_path / "finished").read_text().splitlines() == ["second", "first", "second"]
@@ -57,6 +63,10 @@ nodes:
     assert result.exit_code == 1, result.output
     assert "No saved run" in result.output
     assert (tmp_path / "finished").read_text().splitlines() == ["second", "first", "second"]
+
+    foreign_history = ["status", str(unrelated), "--workdir", str(tmp_path), "--history", "2"]
+    result = runner.invoke(cli, foreign_history)
+    assert result.exit_code == 1 and "no checkpoint" in result.output
 
 
 def test_explicit_run_id_requires_resume_and_a_checkpoint(tmp_path):

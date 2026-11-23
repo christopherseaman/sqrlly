@@ -118,7 +118,7 @@ nodes:
 | `sqrlly init [<dir>] --example <name>` | Scaffold a bundled example into `<dir>` (default `./<name>`). Use `sqrlly init --list-examples` to see the catalog. |
 | `sqrlly validate <config>` | Compile the workflow; report node count and lint warnings. |
 | `sqrlly run <config>` | Execute the workflow. |
-| `sqrlly status <config>` | Read the checkpoint used by `run --resume`. |
+| `sqrlly status <config>` | Inspect the checkpoint used by `run --resume` or list recent runs with `--history <limit>`. |
 | `sqrlly graph <config>` | Print the topology as a Mermaid diagram. |
 | `sqrlly view <config>` | Render a self-contained interactive HTML viewer. |
 

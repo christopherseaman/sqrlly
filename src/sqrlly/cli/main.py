@@ -207,8 +207,34 @@ def validate(config_file: str):
     )
 
 
+def _checkpoint_status(run_id: str, checkpoint: dict, *, details: bool) -> dict[str, Any]:
+    channels = checkpoint["channel_values"]
+    if not isinstance(channels, dict):
+        raise ValueError("Invalid checkpoint state")
+    report = {
+        "run_id": run_id,
+        "checkpoint_id": checkpoint["id"],
+        "saved_at": checkpoint["ts"],
+        "completed_nodes": sorted(channels.get("completed_nodes", ())),
+        "failed_nodes": sorted(channels.get("failed_nodes", ())),
+    }
+    if details:
+        report.update(
+            retries=channels.get("retries", {}),
+            evaluations=channels.get("evaluations", {}),
+            errors=channels.get("errors", []),
+        )
+    if approval := channels.get("pending_approval"):
+        report["pending_approval"] = {
+            key: approval[key] for key in ("node", "message", "request_id") if key in approval
+        }
+        if decision := channels.get("approval_decision"):
+            report["pending_approval"]["decision"] = decision
+    return report
+
+
 async def _read_saved_status(
-    config: Graph, workdir: str, selected_run_id: str | None = None,
+    config: Graph, workdir: str, selected_run_id: str | None = None, history: int | None = None,
 ) -> dict[str, Any]:
     import aiosqlite
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -227,42 +253,45 @@ async def _read_saved_status(
         )
         if len(tables) != 2:
             raise click.ClickException(missing)
-        run_id = selected_run_id
-        if run_id is None:
-            run_id = await _latest_run_id(conn, workflow_key)
-        if run_id is None:
+        latest_run_id = await _latest_run_id(conn, workflow_key)
+        run_id = selected_run_id or latest_run_id
+        if history is not None:
+            rows = await conn.execute_fetchall(
+                """WITH recent AS (
+                    SELECT thread_id, MAX(checkpoint_id) AS last_id
+                    FROM checkpoints
+                    WHERE thread_id LIKE ? AND checkpoint_ns = ''
+                    GROUP BY thread_id
+                    ORDER BY last_id DESC LIMIT ?
+                )
+                SELECT checkpoint.thread_id, checkpoint.type, checkpoint.checkpoint
+                FROM recent
+                JOIN checkpoints AS checkpoint ON checkpoint.thread_id = recent.thread_id
+                    AND checkpoint.checkpoint_ns = '' AND checkpoint.checkpoint_id = recent.last_id
+                ORDER BY recent.last_id DESC""",
+                (f"{workflow_key}:%", history),
+            )
+        elif run_id is not None:
+            # The saver runs schema setup before reading. Select its latest root checkpoint directly.
+            rows = await conn.execute_fetchall(
+                "SELECT thread_id, type, checkpoint FROM checkpoints "
+                "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id DESC LIMIT 1",
+                (_run_thread_id(workflow_key, run_id),),
+            )
+        else:
             raise click.ClickException(missing)
-        # The saver runs schema setup before reading. Select its latest root checkpoint directly.
-        rows = await conn.execute_fetchall(
-            "SELECT type, checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' "
-            "ORDER BY checkpoint_id DESC LIMIT 1",
-            (_run_thread_id(workflow_key, run_id),),
-        )
     if not rows:
         raise click.ClickException(missing)
 
-    checkpoint = JsonPlusSerializer(allowed_msgpack_modules=None).loads_typed(rows[0])
-    channels = checkpoint["channel_values"]
-    if not isinstance(channels, dict):
-        raise click.ClickException(f"Invalid checkpoint state at {path}")
-    report = {
-        "workflow": config.name,
-        "run_id": run_id,
-        "checkpoint_id": checkpoint["id"],
-        "saved_at": checkpoint["ts"],
-        "completed_nodes": sorted(channels.get("completed_nodes", ())),
-        "failed_nodes": sorted(channels.get("failed_nodes", ())),
-        "retries": channels.get("retries", {}),
-        "evaluations": channels.get("evaluations", {}),
-        "errors": channels.get("errors", []),
-    }
-    if approval := channels.get("pending_approval"):
-        report["pending_approval"] = {
-            key: approval[key] for key in ("node", "message", "request_id") if key in approval
-        }
-        if decision := channels.get("approval_decision"):
-            report["pending_approval"]["decision"] = decision
-    return report
+    serializer = JsonPlusSerializer(allowed_msgpack_modules=None)
+    runs = [
+        _checkpoint_status(thread_id.partition(":")[2], serializer.loads_typed((kind, data)),
+                           details=history is None)
+        for thread_id, kind, data in rows
+    ]
+    if history is None:
+        return {"workflow": config.name, **runs[0]}
+    return {"workflow": config.name, "latest_run_id": latest_run_id, "runs": runs}
 
 
 @cli.command()
@@ -270,19 +299,36 @@ async def _read_saved_status(
 @click.option("--workdir", "-w", default=".", help="Working directory used by run.")
 @click.option("--json", "json_output", is_flag=True, help="Print the saved status as JSON.")
 @click.option("--run-id", "selected_run_id", type=click.UUID, help="Select an earlier saved run.")
+@click.option("--history", type=click.IntRange(1, 100), metavar="LIMIT", help="List recent saved runs.")
 def status(
-    config_file: str, workdir: str, json_output: bool, selected_run_id: uuid.UUID | None,
+    config_file: str, workdir: str, json_output: bool, selected_run_id: uuid.UUID | None, history: int | None,
 ) -> None:
-    """Show the saved checkpoint for a workflow."""
+    """Show saved checkpoints for a workflow."""
+    if history is not None and selected_run_id is not None:
+        raise click.UsageError("--history and --run-id cannot be combined.")
     config = load_config(config_file)
     try:
         run_id = selected_run_id.hex if selected_run_id is not None else None
-        report = asyncio.run(_read_saved_status(config, workdir, run_id))
+        report = asyncio.run(_read_saved_status(config, workdir, run_id, history))
     except (sqlite3.DatabaseError, ValueError, TypeError, KeyError, NotImplementedError) as exc:
         raise click.ClickException(f"Cannot read checkpoint at {_db_path(workdir)}: {exc}") from exc
 
     if json_output:
         click.echo(json.dumps(report, sort_keys=True))
+        return
+
+    if history is not None:
+        click.echo(f"Saved runs for {report['workflow']}")
+        if report["latest_run_id"]:
+            click.echo(f"Default resume target: {report['latest_run_id']}")
+        for item in report["runs"]:
+            complete = len(item["completed_nodes"])
+            failed = len(item["failed_nodes"])
+            click.echo(f"{item['run_id']}  {item['saved_at']}  {complete} completed, {failed} failed")
+            if approval := item.get("pending_approval"):
+                decision = approval.get("decision")
+                label = f"Saved decision {decision}" if decision else "Pending approval"
+                click.echo(f"  {label}: {approval.get('node')} ({approval.get('request_id')})")
         return
 
     click.echo(f"Saved checkpoint for {report['workflow']} (run {report['run_id']})")

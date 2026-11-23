@@ -236,6 +236,14 @@ def test_status_and_approval_can_address_an_earlier_pending_run(tmp_path):
     latest = json.loads(_cli(tmp_path, "status", "--json").stdout)
     assert latest["run_id"] == second[1]
     assert latest["pending_approval"]["request_id"] == second[2]
+    result = _cli(tmp_path, "status", "--json", "--history", "2")
+    assert result.returncode == 0, result.stderr
+    history = json.loads(result.stdout)
+    assert history["latest_run_id"] == second[1]
+    assert [(run["run_id"], run["pending_approval"]["request_id"]) for run in history["runs"]] == [
+        (second[1], second[2]), (first[1], first[2]),
+    ]
+
     result = _cli(tmp_path, "status", "--json", "--run-id", first[1])
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["pending_approval"]["request_id"] == first[2]
