@@ -94,11 +94,12 @@ uv run sqrlly run config.yaml --resume    # resume from checkpoint
 uv run sqrlly run config.yaml --entry <node>  # cold-start: run <node> + downstream, no checkpoint
 uv run sqrlly run config.yaml --safe-mode  # Claude-only clean mode; no effect on Codex
 uv run sqrlly run config.yaml --log out.jsonl
+uv run sqrlly status config.yaml         # inspect the saved checkpoint
 uv run sqrlly graph config.yaml           # Mermaid topology
 uv run sqrlly view config.yaml            # self-contained HTML viewer
 ```
 
-CLI commands: `init`, `validate`, `run`, `graph`, `view`. There is no
+CLI commands: `init`, `validate`, `run`, `status`, `graph`, `view`. There is no
 `migrate` subcommand — the pre-Stage-4 legacy-YAML migrator was removed
 entirely (no published release ever accepted the legacy shapes; recover
 via `git show <pre-cutover-sha>:src/sqrlly/cli/migrate.py` if ever needed).

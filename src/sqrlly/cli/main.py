@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import sqlite3
 import uuid
 from contextlib import AsyncExitStack, closing
 from pathlib import Path
@@ -64,6 +66,18 @@ def _thread_id_for(config: Graph, workdir: str) -> str:
 
 def _db_path(workdir: str) -> str:
     return str(Path(workdir) / CHECKPOINT_DB)
+
+
+async def _latest_run_id(conn: Any, workflow_key: str) -> str | None:
+    async with conn.execute(
+        "SELECT run FROM sqrlly_runs WHERE workflow = ?", (workflow_key,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def _run_thread_id(workflow_key: str, run_id: str) -> str:
+    return f"{workflow_key}:{run_id}"
 
 
 def _run_artifact_summary(
@@ -190,6 +204,91 @@ def validate(config_file: str):
     click.echo(
         f"Valid: {config.name} ({len(config.nodes)} nodes)"
     )
+
+
+async def _read_saved_status(config: Graph, workdir: str) -> dict[str, Any]:
+    import aiosqlite
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    path = Path(_db_path(workdir)).resolve()
+    missing = f"no checkpoint for this workflow at {path}"
+    if not path.exists():
+        raise click.ClickException(missing)
+
+    workflow_key = _thread_id_for(config, workdir)
+    async with aiosqlite.connect(f"{path.as_uri()}?mode=ro", uri=True) as conn:
+        await conn.execute("BEGIN")
+        tables = await conn.execute_fetchall(
+            "SELECT name FROM sqlite_schema "
+            "WHERE type = 'table' AND name IN ('sqrlly_runs', 'checkpoints')",
+        )
+        if len(tables) != 2:
+            raise click.ClickException(missing)
+        run_id = await _latest_run_id(conn, workflow_key)
+        if run_id is None:
+            raise click.ClickException(missing)
+        # The saver runs schema setup before reading. Select its latest root checkpoint directly.
+        rows = await conn.execute_fetchall(
+            "SELECT type, checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' "
+            "ORDER BY checkpoint_id DESC LIMIT 1",
+            (_run_thread_id(workflow_key, run_id),),
+        )
+    if not rows:
+        raise click.ClickException(missing)
+
+    checkpoint = JsonPlusSerializer(allowed_msgpack_modules=None).loads_typed(rows[0])
+    channels = checkpoint["channel_values"]
+    if not isinstance(channels, dict):
+        raise click.ClickException(f"Invalid checkpoint state at {path}")
+    report = {
+        "workflow": config.name,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint["id"],
+        "saved_at": checkpoint["ts"],
+        "completed_nodes": sorted(channels.get("completed_nodes", ())),
+        "failed_nodes": sorted(channels.get("failed_nodes", ())),
+        "retries": channels.get("retries", {}),
+        "evaluations": channels.get("evaluations", {}),
+        "errors": channels.get("errors", []),
+    }
+    if approval := channels.get("pending_approval"):
+        report["pending_approval"] = {
+            key: approval[key] for key in ("node", "message", "request_id") if key in approval
+        }
+    return report
+
+
+@cli.command()
+@click.argument("config_file", type=click.Path())
+@click.option("--workdir", "-w", default=".", help="Working directory used by run.")
+@click.option("--json", "json_output", is_flag=True, help="Print the saved status as JSON.")
+def status(config_file: str, workdir: str, json_output: bool) -> None:
+    """Show the saved checkpoint for a workflow."""
+    config = load_config(config_file)
+    try:
+        report = asyncio.run(_read_saved_status(config, workdir))
+    except (sqlite3.DatabaseError, ValueError, TypeError, KeyError, NotImplementedError) as exc:
+        raise click.ClickException(f"Cannot read checkpoint at {_db_path(workdir)}: {exc}") from exc
+
+    if json_output:
+        click.echo(json.dumps(report, sort_keys=True))
+        return
+
+    click.echo(f"Saved checkpoint for {report['workflow']} (run {report['run_id']})")
+    click.echo(f"Saved at {report['saved_at']}")
+    click.echo(f"Completed: {', '.join(report['completed_nodes']) or '(none)'}")
+    click.echo(f"Failed: {', '.join(report['failed_nodes']) or '(none)'}")
+    if approval := report.get("pending_approval"):
+        click.echo(f"Pending approval: {approval.get('node')} ({approval.get('request_id')})")
+        click.echo(f"  {approval.get('message')}")
+    for node, count in sorted(report["retries"].items()):
+        click.echo(f"Retries for {node}: {count}")
+    for node, records in sorted(report["evaluations"].items()):
+        for record in records:
+            result = json.dumps(record["result"], sort_keys=True)
+            click.echo(f"Gate for {node}, attempt {record['attempt']}: {result}")
+    for error in report["errors"]:
+        click.echo(f"Error in {error['node']} ({error.get('kind', 'node_error')}): {error['error']}")
 
 
 @cli.command()
@@ -508,16 +607,12 @@ async def _execute_workflow(
             "CREATE TABLE IF NOT EXISTS sqrlly_runs (workflow TEXT PRIMARY KEY, run TEXT NOT NULL)"
         )
         if resume:
-            async with cp.conn.execute(
-                "SELECT run FROM sqrlly_runs WHERE workflow = ?", (workflow_key,)
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row is None:
+            run_id = await _latest_run_id(cp.conn, workflow_key)
+            if run_id is None:
                 raise click.ClickException(f"No saved state for this workflow at {_db_path(workdir)}")
-            run_id = row[0]
         else:
             run_id = uuid.uuid4().hex
-        thread_id = f"{workflow_key}:{run_id}"
+        thread_id = _run_thread_id(workflow_key, run_id)
         lease_dir = Path(workdir) / ".sqrlly" / "run-locks"
         lease_dir.mkdir(parents=True, exist_ok=True)
         lease_key = hashlib.sha256(thread_id.encode()).hexdigest()
