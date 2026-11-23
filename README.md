@@ -127,6 +127,10 @@ nodes:
 - `--workdir / -w <dir>` — working directory (default `.`).
 - `--dry-run` traces topology without running commands or prompts. Items from producer nodes are unavailable during a dry run.
 - `--resume` seeds from the prior run's state and retries failures. It skips completed nodes by default.
+- `--resume --run-id <id>` resumes an earlier saved run in the same workflow and working directory.
+  Use `sqrlly status <config> --json` to record the ID. Inspect it later with `status <config> --run-id <id>`.
+  Bare resume still selects the latest run. An explicit resume keeps other runs' snapshots.
+  Git recovery requires any snapshots needed by the selected run.
   If an isolated node stops before sqrlly records its result, inspect its retained worktree before starting a fresh run.
 - `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
 - `--refresh-items` resumes a checkpoint and reruns children whose top-level manifest values changed. Unchanged completed siblings keep their results. For a manifest generated from changed files, use `--refresh-items --resume-from <producer>` to reread those files. Include external file hashes in the items when their contents affect a worker. A child workflow reruns as a unit.

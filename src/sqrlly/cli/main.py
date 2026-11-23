@@ -206,7 +206,9 @@ def validate(config_file: str):
     )
 
 
-async def _read_saved_status(config: Graph, workdir: str) -> dict[str, Any]:
+async def _read_saved_status(
+    config: Graph, workdir: str, selected_run_id: str | None = None,
+) -> dict[str, Any]:
     import aiosqlite
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -224,7 +226,9 @@ async def _read_saved_status(config: Graph, workdir: str) -> dict[str, Any]:
         )
         if len(tables) != 2:
             raise click.ClickException(missing)
-        run_id = await _latest_run_id(conn, workflow_key)
+        run_id = selected_run_id
+        if run_id is None:
+            run_id = await _latest_run_id(conn, workflow_key)
         if run_id is None:
             raise click.ClickException(missing)
         # The saver runs schema setup before reading. Select its latest root checkpoint directly.
@@ -262,11 +266,15 @@ async def _read_saved_status(config: Graph, workdir: str) -> dict[str, Any]:
 @click.argument("config_file", type=click.Path())
 @click.option("--workdir", "-w", default=".", help="Working directory used by run.")
 @click.option("--json", "json_output", is_flag=True, help="Print the saved status as JSON.")
-def status(config_file: str, workdir: str, json_output: bool) -> None:
+@click.option("--run-id", "selected_run_id", type=click.UUID, help="Select an earlier saved run.")
+def status(
+    config_file: str, workdir: str, json_output: bool, selected_run_id: uuid.UUID | None,
+) -> None:
     """Show the saved checkpoint for a workflow."""
     config = load_config(config_file)
     try:
-        report = asyncio.run(_read_saved_status(config, workdir))
+        run_id = selected_run_id.hex if selected_run_id is not None else None
+        report = asyncio.run(_read_saved_status(config, workdir, run_id))
     except (sqlite3.DatabaseError, ValueError, TypeError, KeyError, NotImplementedError) as exc:
         raise click.ClickException(f"Cannot read checkpoint at {_db_path(workdir)}: {exc}") from exc
 
@@ -379,6 +387,7 @@ async def _run_async(
     safe_mode: bool | None = None,
     run_vars: dict[str, str] | None = None,
     refresh_items: bool = False,
+    selected_run_id: str | None = None,
 ) -> dict:
     """Inner async runner — wires checkpointer, executor, and state.
 
@@ -429,7 +438,7 @@ async def _run_async(
         result = await _execute_workflow(
             config, workdir, dry_run, resume, resume_from, rerun_all,
             thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode, log_file=log_file,
-            run_vars=run_vars, refresh_items=refresh_items,
+            run_vars=run_vars, refresh_items=refresh_items, selected_run_id=selected_run_id,
         )
         status = "failed" if result.get("failed_nodes") else "succeeded"
         return result
@@ -579,6 +588,7 @@ async def _execute_workflow(
     log_file: str | None = None,
     run_vars: dict[str, str] | None = None,
     refresh_items: bool = False,
+    selected_run_id: str | None = None,
 ) -> dict:
     if dry_run:
         compiled = build_workflow_graph(config, None, logger=logger, entry=entry)
@@ -599,6 +609,9 @@ async def _execute_workflow(
         safe_mode=_effective_safe_mode(safe_mode, config.settings),
     )
 
+    if selected_run_id is not None and not Path(_db_path(workdir)).exists():
+        raise click.ClickException(f"No saved run {selected_run_id} at {_db_path(workdir)}")
+
     async with AsyncExitStack() as resources, AsyncSqliteSaver.from_conn_string(_db_path(workdir)) as cp:
         await cp.setup()
         # Fresh invocations have independent checkpoints even when their workflow and workdir match.
@@ -606,7 +619,9 @@ async def _execute_workflow(
         await cp.conn.execute(
             "CREATE TABLE IF NOT EXISTS sqrlly_runs (workflow TEXT PRIMARY KEY, run TEXT NOT NULL)"
         )
-        if resume:
+        if selected_run_id is not None:
+            run_id = selected_run_id
+        elif resume:
             run_id = await _latest_run_id(cp.conn, workflow_key)
             if run_id is None:
                 raise click.ClickException(f"No saved state for this workflow at {_db_path(workdir)}")
@@ -623,6 +638,11 @@ async def _execute_workflow(
                 "INSERT OR REPLACE INTO sqrlly_runs VALUES (?, ?)", (workflow_key, run_id)
             )
             await cp.conn.commit()
+        if selected_run_id is not None:
+            checkpoint = await cp.aget_tuple({"configurable": {"thread_id": thread_id}})
+            if checkpoint is None:
+                raise click.ClickException(f"No saved run {selected_run_id} for this workflow and workdir")
+
         if _is_git_repo(workdir):
             executor_obj = ForemanExecutor(
                 inner=dispatch,
@@ -667,7 +687,7 @@ async def _execute_workflow(
             clean = not result.get("failed_nodes")
         finally:
             if isinstance(executor_obj, ForemanExecutor):
-                await executor_obj.close(clean=clean)
+                await executor_obj.close(clean=clean and selected_run_id is None)
             else:
                 await executor_obj.close()
 
@@ -695,6 +715,8 @@ def _parse_run_vars(values: tuple[str, ...]) -> dict[str, str]:
 @click.option(
     "--resume", is_flag=True, help="Resume from the last checkpoint"
 )
+@click.option("--run-id", "selected_run_id", type=click.UUID,
+              help="Select a saved run to resume by ID.")
 @click.option("--refresh-items", is_flag=True,
               help="Resume and rerun children whose manifest values changed.")
 @click.option(
@@ -745,6 +767,7 @@ def run(
     safe_mode: bool | None,
     variables: tuple[str, ...],
     refresh_items: bool,
+    selected_run_id: uuid.UUID | None,
 ):
     """Run a workflow from a configuration file."""
     config = load_config(config_file)
@@ -752,6 +775,8 @@ def run(
     if refresh_items and (dry_run or rerun_all or entry is not None or variables):
         raise click.UsageError("--refresh-items cannot be combined with --dry-run, --rerun-all, --entry, or --var.")
     resume = resume or bool(resume_from) or refresh_items
+    if selected_run_id is not None and (not resume or dry_run):
+        raise click.UsageError("--run-id requires --resume, --resume-from, or --refresh-items and cannot trace a dry run.")
     if resume and variables:
         raise click.UsageError("--var cannot be used with --resume or --resume-from. Start a fresh run to change inputs.")
     run_vars = _parse_run_vars(variables)
@@ -796,7 +821,8 @@ def run(
     try:
         result = asyncio.run(
             _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file,
-                       quiet, entry, safe_mode, run_vars=run_vars, refresh_items=refresh_items)
+                       quiet, entry, safe_mode, run_vars=run_vars, refresh_items=refresh_items,
+                       selected_run_id=selected_run_id.hex if selected_run_id is not None else None)
         )
     except KeyboardInterrupt:
         click.echo("Interrupted.", err=True)
