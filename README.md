@@ -136,7 +136,9 @@ nodes:
 - `--quiet / -q` — suppress the live terminal renderer (use in CI / piped runs).
 - `--safe-mode / --no-safe-mode` — run Anthropic's CLI provider with Claude operator customizations (output styles, CLAUDE.md, skills, MCP, hooks) disabled. It has no effect on Codex. Overrides `settings.safe_mode`; absent, the setting applies.
 
-`run` shows a live per-node status grid + a clock-driven aliveness spinner when stdout is a TTY. Non-TTY runs (piped, redirected, CI) fall through to the plain summary output automatically. Workflow events only — no LLM-token streaming. On completion `run` prints a `where to find things` summary — the produced output files, the log path (or how to capture one with `--log`), and run artifacts (checkpoint DB + worktree pool); `--quiet` suppresses it.
+A resume fails while another process holds the same run's lease in that working directory. Fresh runs get independent leases. Checkpoint copies in separate working directories have independent leases. For checkpointed runs, the runner persists each outer graph step before starting the next. An interrupted launcher can leave external work running after its lease releases. A crash during checkpoint reseeding can erase saved state before its replacement is written.
+
+`run` shows a live per-node status grid + a clock-driven aliveness spinner when stdout is a TTY. Non-TTY runs (piped, redirected, CI) fall through to the plain summary output automatically. The display streams workflow events. On completion, `run` lists the produced files, the log path or capture flag, and run artifacts such as the checkpoint and `.sqrlly` directory. `--quiet` suppresses the summary.
 
 ## Examples
 

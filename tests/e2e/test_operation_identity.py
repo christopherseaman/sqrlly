@@ -103,6 +103,15 @@ def test_rejection_lost_ack_and_deliberate_replay(experiment, sink, key):
     if key == "@run":
         original_token = thread.rsplit(":", 1)[-1] + "/write"
         assert rows(database, "select key from calls order by rowid limit 4") == [(original_token,)] * 4
+    if key == "order-7/charge-1":
+        document = yaml.safe_load(config.read_text())
+        document["nodes"][0]["run"][-1] = "revised payload"
+        config.write_text(yaml.safe_dump(document))
+        output = run(config, worker, 1, "--var", f"key={next_key}")
+        assert "key reused with a different payload" in output
+        assert rows(database, "select key, value from effects order by key") == [
+            (key, "payload"), (next_key, "payload"),
+        ]
 
 
 @pytest.mark.parametrize("keyed", [False, True])

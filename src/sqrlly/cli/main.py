@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+from contextlib import AsyncExitStack, closing
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from sqrlly.compile.lint import collect_warnings
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.gates import matching_output_files
 from sqrlly.runtime.foreman import ForemanExecutor
+from sqrlly.runtime.lease import acquire_sqlite_lease
 from sqrlly.runtime.runner import run_workflow
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import Graph, Settings, load_workflow
@@ -74,8 +76,7 @@ def _run_artifact_summary(
     - output: promoted files declared via top-level `outputs`s that
       actually exist on disk; otherwise a pointer to run state + `--log`.
     - log: the resolved `--log` path, or how to capture one.
-    - artifacts: the checkpoint DB and the foreman worktree pool, each
-      listed only when present (a pure non-git script run has neither).
+    - artifacts: the checkpoint DB and the run files directory, when present.
     """
     wd = Path(workdir)
     label_w = 12
@@ -110,14 +111,14 @@ def _run_artifact_summary(
     else:
         lines.append(row("log:", "not captured — re-run with --log run.jsonl"))
 
-    # artifacts — checkpoint DB + worktree pool, only if present
+    # Artifacts include the checkpoint and any run files on disk.
     artifacts: list[str] = []
     db = (wd / CHECKPOINT_DB).resolve()
     if db.exists():
         artifacts.append(f"checkpoint {db}")
-    pool = (wd / ".sqrlly").resolve()
-    if pool.exists():
-        artifacts.append(f"worktrees {pool}/")
+    run_files = (wd / ".sqrlly").resolve()
+    if run_files.exists():
+        artifacts.append(f"run files {run_files}/")
     if artifacts:
         lines.append(row("artifacts:", "; ".join(artifacts)))
     return lines
@@ -499,7 +500,7 @@ async def _execute_workflow(
         safe_mode=_effective_safe_mode(safe_mode, config.settings),
     )
 
-    async with AsyncSqliteSaver.from_conn_string(_db_path(workdir)) as cp:
+    async with AsyncExitStack() as resources, AsyncSqliteSaver.from_conn_string(_db_path(workdir)) as cp:
         await cp.setup()
         # Fresh invocations have independent checkpoints even when their workflow and workdir match.
         workflow_key = thread_id
@@ -516,11 +517,17 @@ async def _execute_workflow(
             run_id = row[0]
         else:
             run_id = uuid.uuid4().hex
+        thread_id = f"{workflow_key}:{run_id}"
+        lease_dir = Path(workdir) / ".sqrlly" / "run-locks"
+        lease_dir.mkdir(parents=True, exist_ok=True)
+        lease_key = hashlib.sha256(thread_id.encode()).hexdigest()
+        # Claim the run before publishing it or touching its checkpoints.
+        resources.enter_context(closing(acquire_sqlite_lease(lease_dir / lease_key, timeout=0)))
+        if not resume:
             await cp.conn.execute(
                 "INSERT OR REPLACE INTO sqrlly_runs VALUES (?, ?)", (workflow_key, run_id)
             )
             await cp.conn.commit()
-        thread_id = f"{workflow_key}:{run_id}"
         if _is_git_repo(workdir):
             executor_obj = ForemanExecutor(
                 inner=dispatch,

@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 
+from langgraph.checkpoint.sqlite import SqliteSaver
 import pytest
 import yaml
 
@@ -78,6 +79,12 @@ def test_interrupt_repeated_child_id_keeps_current_wave_tree(tmp_path, resume):
         proc.terminate()
         proc.wait(timeout=10)
         release.touch()
+    with SqliteSaver.from_conn_string(str(base / ".sqrlly-checkpoint.db")) as saver:
+        saved = next(saver.list(None, limit=1)).checkpoint["channel_values"]
+    assert saved["attempts"]["work"] == 3
+    assert saved["fan_children"]["work"] == ["work::a"]
+    assert saved["fan_ready"]["work"] is False
+    assert "work::a" not in saved["completed_nodes"]
     recovered = subprocess.run([*cli, resume], capture_output=True, text=True)
     assert recovered.returncode == 1 and "Interrupted dispatch" in recovered.stderr
     assert (base / "results").read_text().splitlines() == ["a", "b"]

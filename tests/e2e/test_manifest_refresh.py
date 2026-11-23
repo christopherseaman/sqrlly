@@ -16,6 +16,7 @@ from sqrlly.runtime import foreman
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.foreman import ForemanExecutor
 from sqrlly.runtime.snapshots import SnapshotRun
+from test_transport_recovery import experiment, run
 
 
 def workflow(directory, *, producer=False, worker=None):
@@ -1176,3 +1177,54 @@ def test_refresh_rejects_conflicting_modes(work, flags):
     write_items(work)
     assert "--refresh-items cannot be combined" in invoke(args, "--refresh-items", *flags, success=False)
     assert not (work / ".sqrlly-checkpoint.db").exists()
+
+
+@pytest.mark.parametrize("git", [False, True], ids=["plain", "git"])
+def test_nested_cli_refresh_across_workflow_editions(experiment, git):
+    directory = experiment / "work"
+    directory.mkdir()
+    if git:
+        init_git(directory)
+    marker = directory.parent / "calls"
+    child = directory / "child.yaml"
+    child.write_text(yaml.safe_dump({"nodes": [{
+        "id": "worker", "worktree": "isolated", "outputs": {"files": ["artifact-*"]},
+        "run": ["sh", "-ec",
+                'echo "$1:$2:$4" >> "$3"; printf %s "$2"; echo "$4:$2" > "artifact-$1"',
+                "worker", "{{key}}", "{{value}}", str(marker), "{{edition}}"],
+    }]}))
+    config = directory / "workflow.yaml"
+    bindings = {"key": "{{item.id}}", "value": "{{item.value}}", "edition": "v1"}
+    flow = {"nodes": [{
+        "id": "batch", "for_each": {"file": "items.json"},
+        "workflow": {"file": child.name, "with": bindings},
+    }, {
+        "id": "join", "depends_on": ["batch"], "worktree": "off",
+        "run": ["sh", "-ec", 'echo "$1" >> summaries', "join", "{{batch}}"],
+    }]}
+    config.write_text(yaml.safe_dump(flow))
+    a, b = row("a", 1), row("b", 2)
+    write_items(directory, a, b)
+    run(config, directory, 0)
+
+    write_items(directory, b, a)
+    run(config, directory, 0, "--refresh-items")
+    assert calls(directory) == {"a:1:v1": 1, "b:2:v1": 1}
+
+    write_items(directory, b, row("a", 11))
+    run(config, directory, 0, "--refresh-items")
+    assert calls(directory) == {"a:1:v1": 1, "b:2:v1": 1, "a:11:v1": 1}
+
+    bindings["edition"] = "v2"
+    config.write_text(yaml.safe_dump(flow))
+    run(config, directory, 0, "--refresh-items")
+    assert calls(directory) == {"a:1:v1": 1, "b:2:v1": 1, "a:11:v1": 1}
+    assert (directory / "artifact-a").read_text() == "v1:11\n"
+
+    run(config, directory, 0)
+    assert calls(directory) == {
+        "a:1:v1": 1, "b:2:v1": 1, "a:11:v1": 1, "a:11:v2": 1, "b:2:v2": 1,
+    }
+    assert summaries(directory) == [["1", "2"], ["2", "1"], ["2", "11"], ["2", "11"]]
+    assert (directory / "artifact-a").read_text() == "v2:11\n"
+    assert (directory / "artifact-b").read_text() == "v2:2\n"
