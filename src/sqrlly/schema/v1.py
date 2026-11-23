@@ -154,6 +154,7 @@ class Eval(Record):
     run: Run | None = None
     llm: Prompt | None = None
     agent: Agent | None = None
+    human: Name | None = None
     model: Name | None = None
     timeout: PositiveFloat | None = None
     outputs: Outputs | None = None
@@ -167,8 +168,10 @@ class Eval(Record):
 
     @model_validator(mode="after")
     def _kind(self) -> Self:
-        if len(self.model_fields_set.intersection(KINDS)) != 1:
-            raise ValueError("eval requires exactly one of run, llm, agent")
+        if len(self.model_fields_set.intersection({"run", "llm", "agent", "human"})) != 1:
+            raise ValueError("eval requires exactly one of run, llm, agent, human")
+        if self.human and self.model_fields_set != {"human"}:
+            raise ValueError("a human eval accepts only its review message")
         if self.run and self.model:
             raise ValueError("a run eval cannot set model")
         return self

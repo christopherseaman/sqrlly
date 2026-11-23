@@ -15,7 +15,7 @@ from sqrlly.schema.models import Graph
 
 async def run_workflow(
     compiled_graph: Any,
-    initial_state: dict[str, Any],
+    initial_state: Any,
     config: Graph,
     thread_id: str | None = None,
     logger: Any | None = None,
@@ -27,7 +27,7 @@ async def run_workflow(
     subgraph-internal events surface here, prefixed by their parent
     node id (`paper::reconcile`).
     """
-    last_state = initial_state
+    last_state = initial_state if isinstance(initial_state, dict) else {}
     run_config = (
         {"configurable": {"thread_id": thread_id}} if thread_id else {}
     )
@@ -48,5 +48,6 @@ async def run_workflow(
             last_state = payload
         elif chunk_type == "updates" and logger is not None:
             for _node_name, update in payload.items():
-                logger.log_update(update)
+                if update is None or isinstance(update, dict):
+                    logger.log_update(update)
     return last_state

@@ -133,6 +133,8 @@ nodes:
   Git recovery requires any snapshots needed by the selected run.
   If an isolated node stops before sqrlly records its result, inspect its retained worktree before starting a fresh run.
 - `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
+- `--resume --approval <node> <run-id> <request-id> approve|reject` answers a saved review request.
+  [Human approvals](SCHEMA.md#human-approval) show how to pause a workflow for review.
 - `--refresh-items` resumes a checkpoint and reruns children whose top-level manifest values changed. Unchanged completed siblings keep their results. For a manifest generated from changed files, use `--refresh-items --resume-from <producer>` to reread those files. Include external file hashes in the items when their contents affect a worker. A child workflow reruns as a unit.
 - `--rerun-all` with `--resume` replays every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.

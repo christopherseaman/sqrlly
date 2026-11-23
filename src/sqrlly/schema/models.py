@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from difflib import get_close_matches
 from graphlib import CycleError, TopologicalSorter
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -201,6 +202,14 @@ class Graph(BaseModel):
     def workflow_dir(self) -> Path | None:
         return self.settings.workflow_dir
 
+    @property
+    def has_human_approval(self) -> bool:
+        return any(node.eval and node.eval.human for node in self.nodes)
+
+    @property
+    def approval_digest(self) -> str:
+        return sha256(self.model_dump_json(exclude_unset=True).encode()).hexdigest()
+
     @model_validator(mode="after")
     def _validate_steps(self, info: ValidationInfo) -> Self:
         context = info.context or {}
@@ -278,6 +287,14 @@ class Graph(BaseModel):
             TopologicalSorter({node.id: node.depends_on for node in self.nodes}).prepare()
         except CycleError as exc:
             raise ValueError(f"depends_on cycle: {exc.args[1]}") from exc
+        if self.has_human_approval:
+            if any(node.for_each or node.route or node.workflow for node in self.nodes):
+                raise ValueError("human approvals require a workflow without routes, repeats, or child workflows")
+            if (
+                any(len(node.depends_on) > 1 for node in self.nodes)
+                or len({dep for node in self.nodes for dep in node.depends_on}) != len(self.nodes) - 1
+            ):
+                raise ValueError("human approvals require a single dependency chain")
         assign_ancestors(self)
         return self
 

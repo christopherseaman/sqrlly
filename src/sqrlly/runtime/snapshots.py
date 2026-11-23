@@ -165,6 +165,13 @@ class SnapshotRun:
         key = hashlib.sha256((self.workflow + run).encode()).hexdigest()
         return self.locks / key
 
+    def set_approval_pending(self, pending: bool):
+        marker = self._lease_path(self.run).with_suffix(".awaiting-approval")
+        if pending:
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+
     def receipt_path(self, node_id):
         key = hashlib.sha256(self.ref(node_id, "out").encode()).hexdigest()
         return self._lease_path(self.run).with_suffix(".receipts") / f"{key}.json"
@@ -316,6 +323,8 @@ class SnapshotRun:
                         except BlockingIOError:
                             continue
                         with closing(lease):
+                            if path.with_suffix(".awaiting-approval").exists():
+                                continue
                             prefix = self.workflow + run + "/"
                             refs = [r for r in self._refs(prefix)
                                     if re.fullmatch(re.escape(prefix) + r"[^/]+/(in|out|out-settled|out-pending)", r)]

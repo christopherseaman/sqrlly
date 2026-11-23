@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from sqrlly.compile.evaluation import select_case
 from sqrlly.compile.lint import iter_route_edges
@@ -315,6 +316,13 @@ def _make_execution_node(
             failure = make_failure_update(node.id, exec_result.error, kind=exec_result.error_kind or "node_error")
             return {**failure, "attempts": attempts}
 
+        if node.eval and node.eval.human and hasattr(executor, "set_approval_pending"):
+            try:
+                executor.set_approval_pending(True)
+            except OSError as exc:
+                failure = make_failure_update(node.id, f"Cannot preserve approval snapshots: {exc}", "infra")
+                return {**failure, "attempts": attempts}
+
         update = assemble_success_update(node, exec_result, state)
         update["attempts"] = attempts
         if exec_result.worktree:
@@ -344,18 +352,36 @@ def count_attempts(node, body):
     """Count executed bodies, including failures resumed before measurement."""
     async def counted(state):
         update = await body(state)
+        has_output = node.id in update.get("node_outputs", {})
         failed = node.id in update.get("failed_nodes", set())
-        if node.id in update.get("node_outputs", {}) or (failed and all_deps_completed(node, state)):
+        if has_output or (failed and all_deps_completed(node, state)):
             attempt = state.get("attempts", {}).get(node.id, 0) + 1
             attempts = update.setdefault("attempts", {node.id: attempt})
             if node.id in update.get("completed_nodes", set()):
                 update["settled_attempts"] = attempts
+        if node.eval and node.eval.human and has_output and not state.get("dry_run"):
+            update["pending_approval"] = {
+                "node": node.id,
+                "message": node.eval.human,
+                "request_id": uuid.uuid4().hex,
+            }
         return update
 
     return counted
 
 
-async def settle(node, state, settings, executor, context=None, *, authored_id=None):
+def record_approval(state: WorkflowState) -> dict:
+    pending = state.get("pending_approval")
+    if not pending:
+        return {}
+    answer = interrupt(pending)
+    decision = None
+    if isinstance(answer, dict) and answer.get("request_id") == pending["request_id"]:
+        decision = answer.get("decision")
+    return {"approval_decision": decision}
+
+
+async def settle(node, state, settings, executor, context=None, *, authored_id=None, approval=None):
     key = node.id
     attempt = state.get("attempts", {}).get(key, 1)
     history = list(state.get("evaluations", {}).get(key, []))
@@ -367,11 +393,17 @@ async def settle(node, state, settings, executor, context=None, *, authored_id=N
     try:
         if node.eval:
             cwd = state.get("node_worktrees", {}).get(key) or state.get("workdir", ".")
-            payload = await run_evaluation(node, variables, cwd, settings, executor)
+            if node.eval.human:
+                payload = {"decision": approval}
+            else:
+                payload = await run_evaluation(node, variables, cwd, settings, executor)
             record = {"attempt": attempt, "result": payload,
                       "timestamp": datetime.now(timezone.utc).isoformat()}
             history.append(record)
             update["evaluations"] = {key: [record]}
+            if node.eval.human:
+                if approval != "approve":
+                    raise EvaluationError("Approval rejected" if approval == "reject" else "Invalid approval decision")
         case, exhausted = select_case(node, state, attempt, history)
         if exhausted:
             description = exhausted.model_dump(by_alias=True, exclude_none=True)
@@ -413,6 +445,7 @@ async def settle(node, state, settings, executor, context=None, *, authored_id=N
 def _make_gate_node(node, config, executor=None, *, exec_id, pass_targets, effective_settings=None):
     settings = effective_settings or config.settings
     fallback = pass_targets[0] if len(pass_targets) == 1 else pass_targets
+    human = node.eval and node.eval.human
 
     routes = list(iter_route_edges(config)) if node.route else []
     forward = {
@@ -455,7 +488,11 @@ def _make_gate_node(node, config, executor=None, *, exec_id, pass_targets, effec
             targets = list(dict.fromkeys([*pass_targets, *sorted(forward)]))
             return Command(update={"completed_nodes": {node.id}},
                            goto=targets[0] if len(targets) == 1 else targets)
-        update, target = await settle(node, state, settings, executor)
+        approval = state.get("approval_decision") if human else None
+        update, target = await settle(node, state, settings, executor, approval=approval)
+        if human:
+            update["pending_approval"] = None
+            update["approval_decision"] = None
         if target == "fail":
             return Command(update=update, goto=END)
         if target == "retry":

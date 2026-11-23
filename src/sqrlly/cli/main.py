@@ -25,6 +25,7 @@ from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import Graph, Settings, load_workflow
 
 CHECKPOINT_DB = ".sqrlly-checkpoint.db"
+APPROVAL_PENDING = 3
 
 
 def _is_git_repo(workdir: str) -> bool:
@@ -259,6 +260,8 @@ async def _read_saved_status(
         report["pending_approval"] = {
             key: approval[key] for key in ("node", "message", "request_id") if key in approval
         }
+        if decision := channels.get("approval_decision"):
+            report["pending_approval"]["decision"] = decision
     return report
 
 
@@ -388,6 +391,7 @@ async def _run_async(
     run_vars: dict[str, str] | None = None,
     refresh_items: bool = False,
     selected_run_id: str | None = None,
+    approval: tuple[str, str, str, str] | None = None,
 ) -> dict:
     """Inner async runner — wires checkpointer, executor, and state.
 
@@ -438,9 +442,12 @@ async def _run_async(
         result = await _execute_workflow(
             config, workdir, dry_run, resume, resume_from, rerun_all,
             thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode, log_file=log_file,
-            run_vars=run_vars, refresh_items=refresh_items, selected_run_id=selected_run_id,
+            run_vars=run_vars, refresh_items=refresh_items, selected_run_id=selected_run_id, approval=approval,
         )
-        status = "failed" if result.get("failed_nodes") else "succeeded"
+        if result.get("pending_approval"):
+            status = "pending_approval"
+        else:
+            status = "failed" if result.get("failed_nodes") else "succeeded"
         return result
     except (asyncio.CancelledError, KeyboardInterrupt):
         status = "interrupted"
@@ -457,6 +464,7 @@ async def _run_async(
                     result.get("failed_nodes", set()),
                     result.get("errors", []),
                 ),
+                **({"pending_approval": result["pending_approval"]} if status == "pending_approval" else {}),
             })
             logger.close()
 
@@ -485,6 +493,8 @@ async def _seed_state(
                 f"No saved state for this workflow at {_db_path(workdir)}"
             )
         old = dict(prev.checkpoint.get("channel_values", {}))
+        if old.get("pending_approval"):
+            raise click.ClickException("Pending approval must continue from its saved checkpoint.")
         from sqrlly.compile.resume import compute_skip_set
         prior_completed = set(old.get("completed_nodes", set()))
         prior_failed = set(old.get("failed_nodes", set()))
@@ -589,7 +599,10 @@ async def _execute_workflow(
     run_vars: dict[str, str] | None = None,
     refresh_items: bool = False,
     selected_run_id: str | None = None,
+    approval: tuple[str, str, str, str] | None = None,
 ) -> dict:
+    if config.has_human_approval:
+        workdir = str(Path(workdir).resolve())
     if dry_run:
         compiled = build_workflow_graph(config, None, logger=logger, entry=entry)
         state = make_initial_state(
@@ -603,6 +616,7 @@ async def _execute_workflow(
         return await run_workflow(compiled, state, config, logger=logger)
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.types import Command
 
     dispatch = DispatchExecutor(
         workdir=workdir, settings=config.settings,
@@ -633,16 +647,31 @@ async def _execute_workflow(
         lease_key = hashlib.sha256(thread_id.encode()).hexdigest()
         # Claim the run before publishing it or touching its checkpoints.
         resources.enter_context(closing(acquire_sqlite_lease(lease_dir / lease_key, timeout=0)))
+        run_config = {"configurable": {"thread_id": thread_id}}
+        previous = await cp.aget_tuple(run_config) if resume else None
+        if selected_run_id is not None and previous is None:
+            raise click.ClickException(f"No saved run {selected_run_id} for this workflow and workdir")
+        saved = previous.checkpoint["channel_values"] if previous else {}
+        saved_approval_digest = saved.get("approval_workflow_digest")
+        if previous and (config.has_human_approval or saved_approval_digest is not None):
+            if saved_approval_digest != config.approval_digest:
+                raise click.ClickException("Workflow definition changed for a run with approvals. Restore it or start a fresh run.")
+        pending = saved.get("pending_approval")
+        if pending:
+            if resume_from or rerun_all or refresh_items:
+                raise click.ClickException("Pending approval requires plain --resume or --resume with --approval.")
+        if approval is not None and (
+            not pending or approval[:3] != (pending["node"], run_id, pending["request_id"])
+        ):
+            raise click.ClickException("Approval does not match the pending node, run ID, and request ID.")
+        recorded_decision = saved.get("approval_decision") if pending else None
+        if approval is not None and recorded_decision is not None and approval[3] != recorded_decision:
+            raise click.ClickException(f"The {recorded_decision} decision is already saved for this request.")
         if not resume:
             await cp.conn.execute(
                 "INSERT OR REPLACE INTO sqrlly_runs VALUES (?, ?)", (workflow_key, run_id)
             )
             await cp.conn.commit()
-        if selected_run_id is not None:
-            checkpoint = await cp.aget_tuple({"configurable": {"thread_id": thread_id}})
-            if checkpoint is None:
-                raise click.ClickException(f"No saved run {selected_run_id} for this workflow and workdir")
-
         if _is_git_repo(workdir):
             executor_obj = ForemanExecutor(
                 inner=dispatch,
@@ -653,6 +682,8 @@ async def _execute_workflow(
                 settings=config.settings,
             )
         else:
+            if pending and saved.get("node_worktrees", {}).get(pending["node"]):
+                raise click.ClickException("Approval requires its original Git working directory.")
             # Only surface in non-interactive contexts. When the live
             # renderer owns stdout, any mid-run write (even on stderr)
             # collides with the cursor-managed grid.
@@ -667,24 +698,45 @@ async def _execute_workflow(
 
         clean = False
         try:
-            state = await _seed_state(
-                cp, config, workdir,
-                resume=resume, resume_from=resume_from, rerun_all=rerun_all,
-                entry=entry, thread_id=thread_id, run_vars=run_vars, refresh_items=refresh_items,
-            )
-
-            if isinstance(executor_obj, ForemanExecutor):
-                executor_obj.reexecute.update(state.pop("_snapshot_reexecute", set()))
+            state: Any = None
+            if not pending:
+                state = await _seed_state(
+                    cp, config, workdir,
+                    resume=resume, resume_from=resume_from, rerun_all=rerun_all,
+                    entry=entry, thread_id=thread_id, run_vars=run_vars, refresh_items=refresh_items,
+                )
+                if config.has_human_approval:
+                    state["approval_workflow_digest"] = config.approval_digest
+                if isinstance(executor_obj, ForemanExecutor):
+                    executor_obj.reexecute.update(state.pop("_snapshot_reexecute", set()))
             compiled = build_workflow_graph(
-                config, executor_obj, checkpointer=cp, logger=logger, entry=entry or state.get("_cold_entry"),
+                config, executor_obj, checkpointer=cp, logger=logger, entry=entry or (state or {}).get("_cold_entry"),
             )
-            result = await run_workflow(
-                compiled, state, config,
-                thread_id=thread_id, logger=logger,
-            )
+            result = None
+            if pending and recorded_decision is None:
+                snapshot = await compiled.aget_state(run_config)
+                if approval is not None:
+                    interrupts = snapshot.interrupts
+                    if len(interrupts) != 1 or interrupts[0].value != pending:
+                        raise click.ClickException("No matching approval interrupt. Run --resume to recover the checkpoint.")
+                    state = Command(resume={interrupts[0].id: {
+                        "request_id": pending["request_id"],
+                        "decision": approval[3],
+                    }})
+                elif snapshot.interrupts:
+                    result = snapshot.values
+            if result is None:
+                result = await run_workflow(compiled, state, config, thread_id=thread_id, logger=logger)
+            if waiting := result.get("pending_approval"):
+                result["pending_approval"] = {
+                    "node": waiting["node"], "message": waiting["message"],
+                    "request_id": waiting["request_id"], "run_id": run_id,
+                }
+            elif config.has_human_approval and isinstance(executor_obj, ForemanExecutor):
+                executor_obj.set_approval_pending(False)
             for ref in sorted(result.get("retained_refs", set())):
                 click.echo(f"Retained snapshot: {ref}")
-            clean = not result.get("failed_nodes")
+            clean = not (result.get("failed_nodes") or result.get("pending_approval"))
         finally:
             if isinstance(executor_obj, ForemanExecutor):
                 await executor_obj.close(clean=clean and selected_run_id is None)
@@ -717,6 +769,11 @@ def _parse_run_vars(values: tuple[str, ...]) -> dict[str, str]:
 )
 @click.option("--run-id", "selected_run_id", type=click.UUID,
               help="Select a saved run to resume by ID.")
+@click.option(
+    "--approval", type=(str, click.UUID, str, click.Choice(["approve", "reject"])),
+    metavar="NODE RUN_ID REQUEST_ID DECISION",
+    help="With --resume, decide the named human approval request.",
+)
 @click.option("--refresh-items", is_flag=True,
               help="Resume and rerun children whose manifest values changed.")
 @click.option(
@@ -768,10 +825,22 @@ def run(
     variables: tuple[str, ...],
     refresh_items: bool,
     selected_run_id: uuid.UUID | None,
+    approval: tuple[str, uuid.UUID, str, str] | None,
 ):
     """Run a workflow from a configuration file."""
     config = load_config(config_file)
 
+    decision = None
+    if approval is not None:
+        if not resume or dry_run or resume_from or rerun_all or refresh_items or entry is not None:
+            raise click.UsageError("--approval requires --resume and cannot be combined with dry-run or replay options.")
+        node_id, approval_run_id, request_id, choice = approval
+        if selected_run_id is not None and selected_run_id != approval_run_id:
+            raise click.UsageError("--run-id must match the approval run ID.")
+        selected_run_id = approval_run_id
+        decision = (node_id, approval_run_id.hex, request_id, choice)
+    if entry is not None and config.has_human_approval:
+        raise click.UsageError("--entry cannot be used in a workflow with human approvals.")
     if refresh_items and (dry_run or rerun_all or entry is not None or variables):
         raise click.UsageError("--refresh-items cannot be combined with --dry-run, --rerun-all, --entry, or --var.")
     resume = resume or bool(resume_from) or refresh_items
@@ -822,7 +891,8 @@ def run(
         result = asyncio.run(
             _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file,
                        quiet, entry, safe_mode, run_vars=run_vars, refresh_items=refresh_items,
-                       selected_run_id=selected_run_id.hex if selected_run_id is not None else None)
+                       selected_run_id=selected_run_id.hex if selected_run_id is not None else None,
+                       approval=decision)
         )
     except KeyboardInterrupt:
         click.echo("Interrupted.", err=True)
@@ -838,6 +908,15 @@ def run(
     completed = result.get("completed_nodes", set())
     failed = result.get("failed_nodes", set())
     errors = result.get("errors", [])
+
+    if waiting := result.get("pending_approval"):
+        click.echo(f"waiting for approval: {waiting['node']}")
+        click.echo(waiting["message"])
+        click.echo(f"run id: {waiting['run_id']}")
+        click.echo(f"request id: {waiting['request_id']}")
+        if worktree := result.get("node_worktrees", {}).get(waiting["node"]):
+            click.echo(f"worktree: {worktree}")
+        raise click.exceptions.Exit(APPROVAL_PENDING)
 
     # When the live renderer was active, it already shows per-node
     # status + a "done in Xs" header — skip the redundant summary

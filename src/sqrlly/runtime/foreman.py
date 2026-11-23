@@ -507,9 +507,22 @@ class ForemanExecutor:
             return set()
         keys = [self._key(node_id) for node_id in ids]
         trees = [(key, self._tree(key)) for key in keys if self._tree(key).exists()]
+        human = node.eval is not None and node.eval.human is not None
+        if human:
+            present = {key for key, _ in trees}
+            for key in set(keys) - present:
+                revision = self.snapshots.revision(key, "out")
+                settled = self.snapshots.revision(key, "out", settled=True)
+                if not (node.effective_promote(settings) and revision and revision == settled):
+                    raise RuntimeError("Approval worktree is missing and its promotion could not be confirmed")
         for key, tree in trees:
             self._check_removable(key, tree)
-            self.snapshots.capture_out(key, str(tree), exclude_paths=self._shares(settings))
+            if human:
+                revision = self.snapshots.revision(key, "out")
+                if not revision or not self._matches_retained_output(node, settings, tree, revision):
+                    raise RuntimeError(f"Approval worktree changed while waiting: {tree}")
+            else:
+                self.snapshots.capture_out(key, str(tree), exclude_paths=self._shares(settings))
         retained = set()
         if trees and node.effective_promote(settings):
             globs = node.outputs.files if node.outputs else None
@@ -550,6 +563,9 @@ class ForemanExecutor:
         if hasattr(self._inner, "get_backend"):
             return self._inner.get_backend(settings)
         return None
+
+    def set_approval_pending(self, pending: bool) -> None:
+        self.snapshots.set_approval_pending(pending)
 
     async def close(self, clean: bool = False) -> None:
         self.snapshots.close(clean=clean)

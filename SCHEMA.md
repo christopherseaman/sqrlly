@@ -134,7 +134,7 @@ A node with only an id and dependencies joins its predecessors without launching
 
 ## Eval
 
-An eval has exactly one of `run`, `llm` and `agent`. The command or prompt runs in the node's worktree. Pass the output explicitly to a command argument with `{{output}}`. A command exposes `eval.exit_code`, `eval.text` and fields of a single JSON object printed to stdout.
+An eval has exactly one of `run`, `llm`, `agent` and `human`. The command or prompt runs in the node's worktree. Pass the output explicitly to a command argument with `{{output}}`. A command exposes `eval.exit_code`, `eval.text` and fields of a single JSON object printed to stdout.
 
 An eval accepts `timeout` in seconds and `outputs.schema` as a workflow-relative JSON Schema file.
 An `agent` or `llm` eval accepts the usual prompt options and an optional eval-level `model` override.
@@ -143,6 +143,33 @@ If a successful prompt backend returns invalid JSON or a result that fails the e
 The error names the eval schema and reports the parse or validation problem.
 Every measurement appends its attempt number and result to the node's history.
 The JSONL event `gate_evaluated` carries `node`, `attempt` and a nested `result`. For a command, read `result.exit_code`, `result.text` and any JSON fields. A prompt measurement carries `result.text` and its schema fields.
+
+### Human approval
+
+`eval.human` takes a review message. Sqrlly saves the node's output and pauses before promotion and before any dependent node can start. A node with no executable kind can pause between two steps.
+
+```yaml
+nodes:
+  - {id: draft, run: [echo, "Ready for review"]}
+  - id: review
+    depends_on: [draft]
+    eval: {human: "Approve publication of the draft?"}
+  - {id: publish, depends_on: [review], run: [echo, "{{draft}}"]}
+```
+
+Save this as `workflow.yaml` and run `sqrlly run workflow.yaml`. A pause exits with code 3 and prints the node, run ID, request ID, and isolated worktree path if present. Copy the IDs into the approval command.
+
+```bash
+sqrlly run workflow.yaml --resume --approval review "$RUN_ID" "$REQUEST_ID" approve
+```
+
+`approve` completes the node and continues from the saved checkpoint. `reject` records `gate_failure` and exits with code 1. Earlier execution stays saved in both cases. A bare `--resume` reports an unanswered request again. The decision is saved before settlement, so a resume after interruption continues that decision. The node and both IDs must match the pending request. The workflow definition must match the saved version on every resume. Start a fresh run when introducing, removing, or editing an approval gate. The run ID in `--approval` selects the checkpoint even after a newer run starts.
+
+An isolated Git step keeps its worktree available for review. Approval promotes the captured snapshot and fails if the worktree changed while waiting. A newer run preserves snapshots with pending approval. For a step without isolation, the gate controls continuation after execution. The decision does not undo effects from earlier steps.
+
+A workflow with human approvals must be a single top-level dependency chain. Routes, repeats, child workflows and `--entry` are unavailable in the chain. A human eval accepts only its review message. Dry runs trace through the approval. While an approval is pending, replay options such as `--rerun-all` and `--resume-from` cannot replace the checkpoint.
+
+`workflow_end.status` is `pending_approval` while waiting. Its `pending_approval` field contains `node`, `message`, `run_id`, and `request_id`. The eventual `gate_evaluated.result.decision` records `approve` or `reject`.
 
 ## Outputs
 
@@ -246,7 +273,7 @@ When the CLI opens `--log`, it tags every record with a new `invocation_id`.
 Group records by that ID when a file contains several runs or resumes.
 Use a separate log file for each concurrently executing process.
 `workflow_start.dry_run` distinguishes a trace from actual execution.
-`workflow_end.status` is `succeeded`, `failed`, or `interrupted`.
+`workflow_end.status` is `succeeded`, `failed`, `interrupted`, or `pending_approval`.
 Read `workflow_end.failed_kinds` for failures recorded on individual nodes.
 A run can fail before any node executes and still emit `status: failed`.
 Check the process exit code when validation fails before the log opens.

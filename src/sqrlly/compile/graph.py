@@ -20,12 +20,13 @@ from sqrlly.compile.dynamic import item_node, make_item_worker, make_item_join
 from sqrlly.compile.nodes import (
     _make_execution_node,
     _make_gate_node,
+    record_approval,
     make_failure_update,
     all_deps_completed,
     is_frozen,
     check_dep_failed,
 )
-from sqrlly.runtime.result import ManifestError
+from sqrlly.runtime.result import EvaluationError, ManifestError
 from sqrlly.runtime.state import WorkflowState
 from sqrlly.schema.models import Graph, Node, Settings
 
@@ -65,7 +66,13 @@ def _wire_evaluation_pair(
 ) -> None:
     """Measure and route after the execution update reaches the checkpoint."""
     gate_id = f"_eval_{exec_id}"
-    builder.add_edge(exec_id, gate_id)
+    if node.eval and node.eval.human:
+        decision_id = f"_approval_{exec_id}"
+        builder.add_node(decision_id, record_approval)
+        builder.add_edge(exec_id, decision_id)
+        builder.add_edge(decision_id, gate_id)
+    else:
+        builder.add_edge(exec_id, gate_id)
     builder.add_node(
         gate_id,
         _make_gate_node(
@@ -245,6 +252,9 @@ def build_workflow_graph(
 
     _detect_cycles(config)
 
+    if config.has_human_approval and (_depth or entry is not None):
+        raise EvaluationError("human approvals require a top-level workflow without a cold entry")
+
     if _depth > MAX_SUBGRAPH_DEPTH:
         raise SubgraphDepthError(
             f"Subgraph nesting exceeded MAX_SUBGRAPH_DEPTH={MAX_SUBGRAPH_DEPTH}"
@@ -275,6 +285,8 @@ def build_workflow_graph(
             if _depth == 0:
                 detect_config_cycle(node.workflow.file, base_dir=base_dir, parent_settings=settings, inputs=inputs)
             child_config = load_graph(node.workflow.file, base_dir, settings, inputs=inputs)
+            if child_config.has_human_approval:
+                raise EvaluationError("human approvals require a top-level workflow")
 
             def build_subgraph(reference, child=child_config, repeated=bool(node.for_each)):
                 return make_subgraph_node(
