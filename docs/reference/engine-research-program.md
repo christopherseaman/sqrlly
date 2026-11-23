@@ -1,6 +1,6 @@
 # Developing sqrlly across execution environments
 
-This experimental program runs November 22 through November 24, 2026 (UTC). Its deliverable is a better workflow engine. The [four application scenarios](workflow-use-case-experiment.md) and [longer term thought experiments](long-horizon-products.md) provide requirements and counterexamples. The member exchange, CRM, laboratory, and publishing systems each have their own owners. No such product is part of this program.
+This experimental program began on November 22, 2026. Its deliverable is a better workflow engine. The [four application scenarios](workflow-use-case-experiment.md) and [longer term thought experiments](long-horizon-products.md) provide requirements and counterexamples. The member exchange, CRM, laboratory, and publishing systems each have their own owners. No such product is part of this program.
 
 Three questions govern the work. Which completed calculations still apply when the input changes? What can a worker safely repeat if it lost the reply? What evidence can another system verify after the original workspace disappears? A branch change should answer at least one question through the public CLI, and demonstrate a case where the existing interface falls short.
 
@@ -21,7 +21,7 @@ A workbook step can return a checked file. An API adapter can return a schema-va
 
 The important interface decision is what sqrlly promises between those steps. A universal connector that retries failed HTTP calls would replicate library code and could duplicate business operations. Conversely, asking every adapter to reverse engineer checkpoint internals would make crash recovery untestable. Exposing a logical operation identity, an explicit waiting state, or a verifiable output receipt is worth the public API cost only when a real failure distinguishes it from an ordinary command and a caller-supplied key.
 
-## Experiments and checkpoints
+## Initial experiments and checkpoints
 
 | UTC | Engineering question | Acceptance evidence |
 | --- | --- | --- |
@@ -33,7 +33,7 @@ The important interface decision is what sqrlly promises between those steps. A 
 
 Each checkpoint can reject a proposed feature. A plain business key may be sufficient for a database import. A checksum file may be sufficient for a file handoff. A rejected design should record the command that settled the question, which guarantee the existing tool supplies, and the first case outside that guarantee.
 
-The fixed schedule uses this host's per-user systemd timer `sqrlly-engine-study-20261122.timer`. Each checkpoint works in a separate checkout, uses a second read-only review, and runs the offline suite before pushing any change to the experimental branch. A failed checkpoint retains its checkout and logs under `~/.local/state/sqrlly-engine-study-20261122/reports/`. The timer catches missed dates on the next user-manager start. The jobs require this host, an authenticated provider, and repository access. The project issue links the dated reports as they land. [Program checkpoints](https://github.com/christopherseaman/sqrlly/issues/55)
+The owner redirected the final three hours to shipping features. That window ends November 22 at 8:56 p.m. Pacific. The evidence review and baseline stress campaign stopped with their results retained. The feature work adds saved run status, explicit run selection, human approval, run history, and live node timing. [Feature checkpoints](https://github.com/christopherseaman/sqrlly/issues/55)
 
 ## Scope of the architectural decision
 
