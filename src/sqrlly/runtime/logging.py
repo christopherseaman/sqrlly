@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
+
+
+def node_start_event(node: str) -> dict[str, Any]:
+    return {"event": "node_started", "node": node, "_started_at": time.monotonic()}
 
 
 def failed_kinds_map(
@@ -106,6 +111,7 @@ class JsonlLogger:
 
     def __init__(self, dest: str | Path | IO[str], *, invocation_id: str | None = None) -> None:
         self._invocation_id = invocation_id
+        self._node_starts: dict[str, float] = {}
         if isinstance(dest, (str, Path)):
             self._file: IO[str] = open(dest, "a")
             self._owns_file = True
@@ -122,6 +128,16 @@ class JsonlLogger:
         record = {"ts": datetime.now(timezone.utc).isoformat(), **event}
         if self._invocation_id is not None:
             record["invocation_id"] = self._invocation_id
+        kind = event.get("event")
+        if kind in ("workflow_start", "workflow_end"):
+            self._node_starts.clear()
+        elif kind == "node_started":
+            started_at = record.pop("_started_at", None)
+            self._node_starts[event["node"]] = time.monotonic() if started_at is None else started_at
+        elif kind in ("node_completed", "node_failed"):
+            started_at = self._node_starts.pop(event["node"], None)
+            if started_at is not None:
+                record["duration_s"] = time.monotonic() - started_at
         self._file.write(json.dumps(record) + "\n")
         self._file.flush()
 
@@ -131,19 +147,11 @@ class JsonlLogger:
 
 
 class SubgraphLogger:
-    """Decorate a JsonlLogger with a node-id prefix for subgraph events.
+    """Prefix the node IDs on events from a child graph.
 
-    A subgraph wrapper streams its inner ``astream(stream_mode=
-    "updates")`` chunks through this decorator: events emitted from the
-    derived update get their ``node`` field rewritten with
-    ``{prefix}::`` before reaching the underlying JSONL, so subgraph-
-    internal events appear in the parent log keyed as
-    ``parent_node_id::inner_node_id``. Nested subgraphs compose
-    naturally by nesting the prefix (``paper::reconcile::step1``).
-
-    Stays langgraph-free; only consumes update dicts and delegates
-    writes via ``JsonlLogger.emit`` (or another wrapped SubgraphLogger),
-    preserving the runtime layer rule.
+    Child loggers compose their prefixes, for example
+    `paper::reconcile::step1`. They forward both direct events and
+    events derived from state updates.
     """
 
     def __init__(self, base: "JsonlLogger | SubgraphLogger", prefix: str) -> None:

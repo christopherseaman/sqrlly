@@ -63,8 +63,7 @@ class TestRendererStateModel:
         r = TerminalRenderer(_config([("a", []), ("b", ["a"])]))
         r.emit({"event": "node_completed", "node": "a"})
         assert r._node_status("a") == "passed"
-        # 'b' is now running because its dep 'a' is complete
-        assert r._node_status("b") == "running"
+        assert r._node_status("b") == "waiting"
 
     def test_node_failed_marks_failed_and_records_error(self):
         r = TerminalRenderer(_config([("a", [])]))
@@ -106,16 +105,21 @@ class TestRendererStatusDerivation:
         # Nothing emitted yet — b's dep 'a' not yet complete
         assert r._node_status("b") == "waiting"
 
-    def test_running_when_deps_met_no_completion_yet(self):
+    def test_running_when_node_starts(self):
         r = TerminalRenderer(_config([("a", []), ("b", ["a"])]))
-        r.emit({"event": "node_completed", "node": "a"})
-        # b's only dep is satisfied; b hasn't fired yet
+        r.emit({"event": "node_started", "node": "b"})
         assert r._node_status("b") == "running"
 
-    def test_root_node_is_running_at_start(self):
+    def test_root_node_waits_for_start(self):
         r = TerminalRenderer(_config([("a", [])]))
-        # No deps + not complete = running
-        assert r._node_status("a") == "running"
+        assert r._node_status("a") == "waiting"
+
+    def test_node_can_start_after_retry_or_completion(self):
+        r = TerminalRenderer(_config([("a", [])]))
+        for previous in ("node_retried", "node_completed"):
+            r.emit({"event": previous, "node": "a"})
+            r.emit({"event": "node_started", "node": "a"})
+            assert r._node_status("a") == "running"
 
 
 class TestLogUpdate:
@@ -181,7 +185,7 @@ class TestRenderingOutput:
         assert "alpha" in out
         assert "beta" in out
         assert "passed" in out
-        assert "running" in out  # beta after alpha completes
+        assert "waiting" in out
         assert "T" in out  # workflow name in header
 
 

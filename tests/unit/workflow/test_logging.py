@@ -343,8 +343,12 @@ class TestRunWorkflowLogging:
         records = [e for e in events if e["event"] == "gate_evaluated"]
         assert [e["attempt"] for e in records] == [1, 2, 3]
         assert all(e["result"]["exit_code"] == 7 for e in records)
-        assert event_types.count("node_retried") == 2
-        assert event_types[-1] == "node_failed"
+        assert event_types == [
+            "node_started", "gate_evaluated", "node_retried",
+            "node_started", "gate_evaluated", "node_retried",
+            "node_started", "gate_evaluated", "node_failed",
+        ]
+        assert events[-1]["duration_s"] > 0
 
     @pytest.mark.asyncio
     async def test_no_logger_no_side_effects(self, tmp_path):
