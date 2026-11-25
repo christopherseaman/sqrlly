@@ -49,6 +49,13 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
 
 
+def item_hash(item: Any) -> str:
+    try:
+        return hashlib.sha256(_canonical(item).encode("ascii")).hexdigest()
+    except (TypeError, ValueError) as exc:
+        raise ManifestError(f"Invalid for_each item: {exc}") from exc
+
+
 def _child_ids(parent: str, items: list) -> list[tuple[str, Any]]:
     branches = []
     seen = set()
@@ -59,7 +66,7 @@ def _child_ids(parent: str, items: list) -> list[tuple[str, Any]]:
             # Preserve ordinary string ids and reserve @ and ! for the other namespaces.
             key = quote(raw, safe="", errors="surrogatepass") if isinstance(raw, str) else "!" + quote(_canonical(raw), safe="")
         else:
-            digest = hashlib.sha256(_canonical(item).encode("ascii")).hexdigest()
+            digest = item_hash(item)
             ordinal = counts.get(digest, 0)
             counts[digest] = ordinal + 1
             key = f"@{digest}.{ordinal}"

@@ -110,6 +110,7 @@ outputs:
 - A failed `files` or `schema` check reruns the node with the miss as context, 3 attempts, then fails it. 0.10 fails the node at once.
 - A `for_each` node's output is a JSON list of child results in manifest order. `{{build.field}}` is a load error.
 - `for_each: plan.tasks` reads a schema field. `for_each: plan` reads the structured value when `plan` has a schema, which must be an array. Without a schema it parses the text as a JSON array or `{"items": [...]}`, as `_read_manifest` does. `for_each: {file: items.json}` reads a static file.
+- Decision 2026-11-21 (#65). `sqrlly run --refresh-items` opts into comparing top-level manifest values by canonical JSON hash. Each reused child keeps the hash of its producing input. A missing hash requires execution. Order changes rebuild the joined list. Select `--resume-from <producer>` with refresh to compare freshly generated items. Later route waves use normal full dispatch.
 - An edited id-less item hashes to a new id. The old id counts as dropped and trips `on_manifest_drift: fail`.
 - Load errors: `{{x}}` where `x` is no ancestor, `{{x.field}}` where `x` has no schema, a `route` predicate comparing the whole text of a schema-less `agent` or `llm`.
 

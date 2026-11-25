@@ -232,10 +232,7 @@ class TerminalRenderer:
 
     Construction is cheap and side-effect-free. The clock-driven tick
     task starts only on `emit(workflow_start)` and stops on
-    `emit(workflow_end)` (or `close()`). Per-node state is computed
-    from accumulated events plus the schema's `depends_on` graph
-    (a node whose deps are all complete and that hasn't completed or
-    failed itself is "running").
+    `emit(workflow_end)` (or `close()`). Node status follows execution events.
     """
 
     def __init__(self, config: Graph, stream: IO[str] | None = None) -> None:
@@ -245,12 +242,10 @@ class TerminalRenderer:
 
         # Schema-derived
         self._node_ids: list[str] = [n.id for n in config.nodes]
-        self._deps: dict[str, list[str]] = {
-            n.id: list(n.depends_on) for n in config.nodes
-        }
         self._id_width = max((len(i) for i in self._node_ids), default=10)
 
         # Accumulated state
+        self._running: set[str] = set()
         self._completed: set[str] = set()
         self._failed: set[str] = set()
         self._retrying: set[str] = set()
@@ -290,14 +285,23 @@ class TerminalRenderer:
             self._ended_at = time.monotonic()
             status = event.get("status", "failed" if event.get("failed", 0) else "succeeded")
             self._end_state = "done" if status == "succeeded" else status
+            self._running.clear()
             self._stop_tick()
             self._render()
+        elif et == "node_started":
+            node = event["node"]
+            self._running.add(node)
+            self._completed.discard(node)
+            self._retrying.discard(node)
         elif et == "node_completed":
             node = event["node"]
+            self._running.discard(node)
             self._completed.add(node)
             self._retrying.discard(node)
         elif et == "node_failed":
             node = event["node"]
+            self._running.discard(node)
+            self._retrying.discard(node)
             self._failed.add(node)
             self._errors[node] = event.get("error", "")
         elif et == "gate_evaluated":
@@ -316,6 +320,7 @@ class TerminalRenderer:
             )
         elif et == "node_retried":
             node = event["node"]
+            self._running.discard(node)
             self._retrying.add(node)
             self._attempts[node] = max(
                 self._attempts.get(node, 0), int(event.get("attempt", 0))
@@ -370,10 +375,7 @@ class TerminalRenderer:
             return "passed"
         if node_id in self._retrying:
             return "retrying"
-        # "running" = all deps complete + not yet finished. Approximate
-        # but accurate enough for visual feedback. Pure-waiting nodes
-        # (deps not yet satisfied) sit at "waiting".
-        if all(d in self._completed for d in self._deps.get(node_id, [])):
+        if node_id in self._running:
             return "running"
         return "waiting"
 

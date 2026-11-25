@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END
-from langgraph.types import Command
+from langgraph.types import Command, StreamWriter
 
 from sqrlly.compile.evaluation import select_case
 from sqrlly.compile.lint import iter_route_edges
@@ -16,6 +16,7 @@ from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.runtime.gates import build_eval_preamble
 from sqrlly.runtime.executor.prompt import RunVariables, retry_delay
 from sqrlly.runtime.gates import run_evaluation
+from sqrlly.runtime.logging import node_start_event
 from sqrlly.runtime.result import EvaluationBackendError, EvaluationError, ExecutionResult
 from sqrlly.runtime.state import WorkflowState
 from sqrlly.schema.models import Node, Settings, Graph
@@ -225,12 +226,16 @@ def make_failure_update(
     }
 
 
-def assemble_success_update(node: Node, result: ExecutionResult) -> dict[str, Any]:
+def assemble_success_update(
+    node: Node, result: ExecutionResult, state: WorkflowState | None = None,
+) -> dict[str, Any]:
     update: dict[str, Any] = {
         "node_outputs": {node.id: result.output},
     }
     if result.structured_output is not None or (node.outputs and node.outputs.schema_file):
         update["node_structured_outputs"] = {node.id: result.structured_output}
+    elif state and node.id in state.get("node_structured_outputs", {}):
+        update["node_structured_outputs"] = {node.id}
     if result.model is not None or result.provider is not None:
         update["node_models"] = {
             node.id: {"model": result.model, "provider": result.provider}
@@ -250,7 +255,7 @@ def _make_execution_node(
     settings = effective_settings or config.settings
     timeout = node.effective_timeout(settings)
 
-    async def node_fn(state: WorkflowState) -> dict[str, Any]:
+    async def node_fn(state: WorkflowState, writer: StreamWriter | None) -> dict[str, Any]:
         # Resume skip: a node frozen in the prior-run snapshot does not
         # re-execute. Its completed_nodes/node_outputs are already reseeded,
         # so downstream context and the deps join-barrier still see it.
@@ -278,6 +283,8 @@ def _make_execution_node(
             if delay > 0:
                 await asyncio.sleep(delay)
 
+        if writer is not None:
+            writer(node_start_event(node.id))
         exec_result, executions = await execute_with_outputs(
             lambda ctx: run_with_timeout(
                 executor.execute(node, ctx, settings_override=effective_settings), timeout,
@@ -291,7 +298,7 @@ def _make_execution_node(
             failure = make_failure_update(node.id, exec_result.error, kind=exec_result.error_kind or "node_error")
             return {**failure, "attempts": attempts}
 
-        update = assemble_success_update(node, exec_result)
+        update = assemble_success_update(node, exec_result, state)
         update["attempts"] = attempts
         if exec_result.worktree:
             update["node_worktrees"] = {node.id: exec_result.worktree}
@@ -315,8 +322,8 @@ def _make_execution_node(
 
 def count_attempts(node, body):
     """Count executed bodies, including failures resumed before measurement."""
-    async def counted(state):
-        update = await body(state)
+    async def counted(state, *, writer=None):
+        update = await body(state, writer)
         failed = node.id in update.get("failed_nodes", set())
         if node.id in update.get("node_outputs", {}) or (failed and all_deps_completed(node, state)):
             attempt = state.get("attempts", {}).get(node.id, 0) + 1

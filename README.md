@@ -80,7 +80,8 @@ uv run sqrlly run examples/jokes/workflow.yaml --log run.jsonl
 ```
 
 - `validate` — compiles the graph and reports the node count.
-- `run` — executes the workflow; with `--log`, writes a JSONL event stream (`workflow_start`, `node_model`, `node_completed`, `node_failed`, `gate_evaluated`, `node_retried`, `workflow_end`).
+- `run` executes the workflow. With `--log`, it writes `workflow_start`, `node_started`, `node_model`, `gate_evaluated`, `node_completed`, `node_failed`, `node_retried`, and `workflow_end` events. Outcomes with a matching `node_started` record include `duration_s`, which measures dispatch through settlement.
+  A route retry starts a new interval. Output validation retries count toward the same dispatch's elapsed time.
 
 ## How it works
 
@@ -130,6 +131,7 @@ nodes:
   If an isolated node stops before sqrlly records its result, inspect its retained worktree before starting a fresh run.
 - `--resume --run-id <id>` selects an earlier saved run in the same workflow and working directory.
 - `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
+- `--refresh-items` resumes a checkpoint and reruns children whose top-level manifest values changed. Unchanged completed siblings keep their results. For a manifest generated from changed files, use `--refresh-items --resume-from <producer>` to reread those files. Include external file hashes in the items when their contents affect a worker. A child workflow reruns as a unit.
 - `--rerun-all` with `--resume` replays every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
 - `--var NAME=VALUE` binds a string as `{{vars.NAME}}`. Repeat for multiple inputs. Resumes use the saved inputs.
