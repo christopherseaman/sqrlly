@@ -81,3 +81,30 @@ def test_fan_out_subgraph_events_use_full_node_ids(tmp_path):
         start, finish = [record for record in records if record.get("node") == node]
         assert (start["event"], finish["event"]) == ("node_started", "node_completed")
         assert finish["duration_s"] > 0
+
+
+def test_node_duration_includes_output_validation_retries(tmp_path):
+    log = tmp_path / "run.jsonl"
+    config = tmp_path / "workflow.yaml"
+    command = (
+        "from pathlib import Path\n"
+        "import time\n"
+        "attempt = Path('attempt')\n"
+        "if attempt.exists():\n"
+        "    Path('result.txt').write_text('ready')\n"
+        "else:\n"
+        "    attempt.touch()\n"
+        "    time.sleep(0.12)\n"
+    )
+    config.write_text(yaml.safe_dump({"nodes": [
+        {"id": "produce", "run": [sys.executable, "-c", command],
+         "outputs": {"files": ["result.txt"]}},
+    ]}))
+    result = CliRunner().invoke(cli, ["run", str(config), "-w", str(tmp_path), "--log", str(log)])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "result.txt").read_text() == "ready"
+
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    start, finish = [record for record in records if record.get("node") == "produce"]
+    assert (start["event"], finish["event"]) == ("node_started", "node_completed")
+    assert finish["duration_s"] >= 0.12

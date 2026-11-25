@@ -80,7 +80,8 @@ uv run sqrlly run examples/jokes/workflow.yaml --log run.jsonl
 ```
 
 - `validate` — compiles the graph and reports the node count.
-- `run` executes the workflow. With `--log`, it writes `workflow_start`, `node_started`, `node_model`, `gate_evaluated`, `node_completed`, `node_failed`, `node_retried`, and `workflow_end` events. Outcomes with a matching `node_started` record include `duration_s`, the elapsed seconds from the latest attempt's start through settlement.
+- `run` executes the workflow. With `--log`, it writes `workflow_start`, `node_started`, `node_model`, `gate_evaluated`, `node_completed`, `node_failed`, `node_retried`, and `workflow_end` events. Outcomes with a matching `node_started` record include `duration_s`, which measures dispatch through settlement.
+  A route retry starts a new interval. Output validation retries count toward the same dispatch's elapsed time.
 
 ## How it works
 
