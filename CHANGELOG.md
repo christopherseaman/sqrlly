@@ -5,6 +5,8 @@ All notable changes to sqrlly are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-25
+
 ### Added
 
 - Inspect saved workflow runs with `sqrlly status` and resume a specific run with `--run-id`.
@@ -16,19 +18,19 @@ All notable changes to sqrlly are documented here. Format follows
 ### Fixed
 
 - Concurrent processes cannot resume the same checkpoint at once.
-
 - A child workflow returns the output from its selected route when other destinations remain unvisited.
 - `sqrlly run` exits with status 130 on Ctrl-C. Cancellation stops subprocess groups even after their leaders exit.
 
 ### Migration
 
-- The 1.0 YAML grammar requires migrating 0.10 workflows. Use [SCHEMA.md](SCHEMA.md) for the new field names and value shapes.
-- Start a new run after migrating. The 1.0 CLI cannot resume a 0.10 checkpoint.
+- Convert 0.10 workflow YAML with the [migration guide](docs/reference/migrate-1.0.md). It covers node kinds, presets, gates, routing, and fan-out.
+- Finish existing runs with the version that created their checkpoints. Start a new run after migrating.
 
 ### Changed
 
 - Put `for_each` on the node that repeats. Children keep stable identities across resume, and dependents receive their results in manifest order.
 - Isolated nodes start from a snapshot of the current files and promote at settlement. A changed base path fails promotion by default.
+- Sqrlly retains Git snapshot refs for historical resume. Saved runs can accumulate snapshot storage.
 - Declare result files and JSON Schema with `outputs`. Both provider CLIs return structured results.
 - Workflows measure output with `eval`. Ordered `route` cases handle retries, escalation and failure.
 - Workflow nodes select `agent`, `llm`, `run` or `workflow` explicitly.

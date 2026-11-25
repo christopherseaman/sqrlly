@@ -13,10 +13,9 @@ Ordered route cases handle branching, retries, and escalation.
 
 ## Prerequisites
 
-This guide requires the 1.0 grammar. Before the 1.0 release, run
-`uv run --project /path/to/sqrlly sqrlly` in place of `sqrlly` in the
-commands below. Use the [0.10.0 guide](https://github.com/christopherseaman/sqrlly/blob/v0.10.0/SKILLS.md)
-for the PyPI 0.10.0 release.
+This guide requires sqrlly 1.0. Run `sqrlly --version` before authoring.
+To update an existing 0.10 workflow, follow the [migration guide](https://github.com/christopherseaman/sqrlly/blob/v1.0.0/docs/reference/migrate-1.0.md).
+From a source checkout, use `uv run --project /path/to/sqrlly sqrlly`.
 
 LLM nodes drive a local agent CLI, so the chosen backend must be installed
 and authenticated — auth is per-CLI, not sqrlly's job:

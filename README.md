@@ -10,9 +10,9 @@
 
 ## Install
 
-This checkout documents the unreleased 1.0 grammar. Run the commands in
-this guide from the checkout with `uv run sqrlly`. For the PyPI release,
-use the [0.10.0 guide](https://github.com/christopherseaman/sqrlly/blob/v0.10.0/README.md).
+This guide covers sqrlly 1.0. To upgrade from 0.10, convert your workflow YAML
+and start a new run. Use sqrlly 0.10 to resume its saved checkpoints.
+See the [migration guide](https://github.com/christopherseaman/sqrlly/blob/v1.0.0/docs/reference/migrate-1.0.md).
 
 To install the published CLI in an isolated environment:
 
@@ -38,20 +38,23 @@ LLM dispatch uses a local authenticated agent CLI. Codex is the default:
 handles its own credentials independently. Authenticate Codex or Claude
 with that CLI's normal login flow; sqrlly never reads or stores API keys.
 
-Python 3.11+. From source: `git clone` then `uv sync`.
+Sqrlly requires Python 3.11 or newer. From a source checkout, run
+`uv sync` and substitute `uv run sqrlly` for `sqrlly` in the examples.
 
 **Using sqrlly from a coding agent?** Use
-`uv run sqrlly init --skill /path/to/your-repo` from this checkout.
+`sqrlly init --skill /path/to/your-repo`.
 The command installs the skill at `.agents/skills/sqrlly/SKILL.md` in the
 target repository.
 
 ## Quickstart
 
-Create and run a workflow with one command node:
+Create, validate, and run a workflow with one command node.
 
 ```bash
-uv run sqrlly init my-workflow
-uv run sqrlly run my-workflow/workflow.yaml --workdir my-workflow
+sqrlly init my-workflow
+cd my-workflow
+sqrlly validate workflow.yaml
+sqrlly run workflow.yaml
 ```
 
 `sqrlly init` writes a workflow with one `run` node that prints a greeting.
@@ -75,8 +78,9 @@ nodes:
 ```
 
 ```bash
-uv run sqrlly validate examples/jokes/workflow.yaml
-uv run sqrlly run examples/jokes/workflow.yaml --log run.jsonl
+sqrlly init --example jokes
+sqrlly validate jokes/workflow.yaml
+sqrlly run jokes/workflow.yaml --workdir jokes --log run.jsonl
 ```
 
 - `validate` — compiles the graph and reports the node count.
@@ -155,7 +159,7 @@ crash during resume can interrupt checkpoint reseeding.
 
 ## Examples
 
-Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an example.
+Run `sqrlly view <workflow.yaml>` to render an interactive view of an example.
 `examples/regenerate_views.sh` rebuilds selected views and captures logs for two deterministic debug views.
 
 | Workflow | What it shows |
@@ -166,14 +170,14 @@ Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an exa
 | [`examples/agent_recovery/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/agent_recovery/README.md) | A Codex agent edits an isolated worktree. A dependent reads the promoted file, then `status` identifies the run to resume. |
 | [`examples/run_command/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/run_command/workflow.yaml) | A command runs a Python script through `uv` without a prompt backend. |
 | [`examples/pipeline_style/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/pipeline_style/workflow.yaml) | `route: [{then: <next>}]` forward-edge authoring; a linear pipeline. |
-| [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Prompts, multi-dimension evals, a child workflow, and a rendered PDF. Scaffold it with `uv run sqrlly init --example absurd-paper`. |
+| [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Prompts, multi-dimension evals, a child workflow, and a rendered PDF. Scaffold it with `sqrlly init --example absurd-paper`. |
 | [`examples/wave_planner/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/wave_planner/workflow.yaml) | Wave-driven dynamic-task pattern — a bounded route back to a producer that discovers more items. |
 | [`examples/smoke_test.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/smoke_test.yaml) | One prompt checks the local provider connection. |
 | [`examples/run_all_examples.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/run_all_examples.yaml) | Runs seven examples as child workflows. The wave planner and agent recovery walkthroughs use separate working directories. |
 
 ## Documentation
 
-- [SCHEMA.md](SCHEMA.md) documents the four kinds, settings, route predicates and quality gates.
+- [SCHEMA.md](https://github.com/christopherseaman/sqrlly/blob/v1.0.0/SCHEMA.md) documents the four kinds, settings, route predicates and quality gates.
 - **[SKILLS.md](https://github.com/christopherseaman/sqrlly/blob/main/SKILLS.md)** — agent skill doc: instructions for an AI coding agent authoring and running sqrlly workflows.
 
 ## Contributing
