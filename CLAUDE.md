@@ -94,11 +94,12 @@ uv run sqrlly run config.yaml --resume    # resume from checkpoint
 uv run sqrlly run config.yaml --entry <node>  # cold-start: run <node> + downstream, no checkpoint
 uv run sqrlly run config.yaml --safe-mode  # Claude-only clean mode; no effect on Codex
 uv run sqrlly run config.yaml --log out.jsonl
+uv run sqrlly status config.yaml           # inspect a saved checkpoint
 uv run sqrlly graph config.yaml           # Mermaid topology
 uv run sqrlly view config.yaml            # self-contained HTML viewer
 ```
 
-CLI commands: `init`, `validate`, `run`, `graph`, `view`. There is no
+CLI commands: `init`, `validate`, `run`, `status`, `graph`, `view`. There is no
 `migrate` subcommand — the pre-Stage-4 legacy-YAML migrator was removed
 entirely (no published release ever accepted the legacy shapes; recover
 via `git show <pre-cutover-sha>:src/sqrlly/cli/migrate.py` if ever needed).
@@ -237,7 +238,7 @@ without supplying fake provider responses.
   parses as subtraction; use underscores. `validate`/`run` emit an
   advisory warning (`compile/lint.py`).
 - `graph` and `view` render authored dependencies and routes. A ×N stand-in beside each repeating node shows where its workers run. Realized child ids appear in the run log.
-- Successful isolated worktrees are removed after their output ref is captured. Failed trees stay available. A clean run prunes earlier inactive runs’ refs for that workflow.
+- Successful isolated worktrees are removed after their output ref is captured. Failed trees stay available. The CLI keeps snapshot refs for earlier saved runs.
 - **`--resume` skips completed nodes (0.6.0)** — bare `--resume` reseeds
   the prior checkpoint and skips nodes that completed cleanly and aren't
   downstream of a failure (`compile/resume.py::compute_skip_set` → the

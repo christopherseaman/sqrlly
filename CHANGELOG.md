@@ -5,7 +5,15 @@ All notable changes to sqrlly are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- Inspect saved workflow runs with `sqrlly status` and resume a specific run with `--run-id`.
+- Supply reusable workflow inputs with `sqrlly run --var NAME=VALUE`.
+- Correlate JSONL events by invocation ID and read each invocation's outcome.
+
 ### Fixed
+
+- Concurrent processes cannot resume the same checkpoint at once.
 
 - A child workflow returns the output from its selected route when other destinations remain unvisited.
 - `sqrlly run` exits with status 130 on Ctrl-C. Cancellation stops subprocess groups even after their leaders exit.

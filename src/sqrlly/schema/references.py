@@ -93,10 +93,11 @@ def _templates(step, graph):
 
 def validate_references(graph: Graph, inputs: frozenset[str] | None) -> None:
     input_names = inputs or frozenset()
+    run_names = {"vars"} if inputs is None else set()
     by_id = {node.id: node for node in graph.nodes}
     for node in graph.nodes:
         upstream = set(node._ancestors)
-        allowed = _BUILTINS | input_names | {
+        allowed = _BUILTINS | input_names | run_names | {
             f"{dep}_{suffix}" for dep in upstream
             for suffix in ("structured", "worktree")
         }
@@ -155,7 +156,7 @@ def validate_references(graph: Graph, inputs: frozenset[str] | None) -> None:
             if not case.when:
                 continue
             tree = ast.parse(case.when, mode="eval")
-            route_scope = input_names | upstream | own_output | _ROUTE_NAMES
+            route_scope = input_names | run_names | upstream | own_output | _ROUTE_NAMES
             for expr in ast.walk(tree):
                 if isinstance(expr, ast.Name):
                     check(expr.id, route_scope, upstream | own_output)

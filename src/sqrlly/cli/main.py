@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import sqlite3
 import uuid
+from contextlib import AsyncExitStack, closing
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,7 @@ from sqrlly.compile.lint import collect_warnings
 from sqrlly.runtime.executor.dispatch import DispatchExecutor
 from sqrlly.runtime.gates import matching_output_files
 from sqrlly.runtime.foreman import ForemanExecutor
+from sqrlly.runtime.lease import acquire_sqlite_lease
 from sqrlly.runtime.runner import run_workflow
 from sqrlly.runtime.state import make_initial_state
 from sqrlly.schema.models import Graph, Settings, load_workflow
@@ -64,6 +68,18 @@ def _db_path(workdir: str) -> str:
     return str(Path(workdir) / CHECKPOINT_DB)
 
 
+async def _latest_run_id(conn: Any, workflow_key: str) -> str | None:
+    async with conn.execute(
+        "SELECT run FROM sqrlly_runs WHERE workflow = ?", (workflow_key,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def _run_thread_id(workflow_key: str, run_id: str) -> str:
+    return f"{workflow_key}:{run_id}"
+
+
 def _run_artifact_summary(
     config: Graph, workdir: str, log_file: str | None,
 ) -> list[str]:
@@ -74,8 +90,7 @@ def _run_artifact_summary(
     - output: promoted files declared via top-level `outputs`s that
       actually exist on disk; otherwise a pointer to run state + `--log`.
     - log: the resolved `--log` path, or how to capture one.
-    - artifacts: the checkpoint DB and the foreman worktree pool, each
-      listed only when present (a pure non-git script run has neither).
+    - artifacts: the checkpoint database and sqrlly's run files, when present.
     """
     wd = Path(workdir)
     label_w = 12
@@ -110,14 +125,13 @@ def _run_artifact_summary(
     else:
         lines.append(row("log:", "not captured — re-run with --log run.jsonl"))
 
-    # artifacts — checkpoint DB + worktree pool, only if present
     artifacts: list[str] = []
     db = (wd / CHECKPOINT_DB).resolve()
     if db.exists():
         artifacts.append(f"checkpoint {db}")
-    pool = (wd / ".sqrlly").resolve()
-    if pool.exists():
-        artifacts.append(f"worktrees {pool}/")
+    run_files = (wd / ".sqrlly").resolve()
+    if run_files.exists():
+        artifacts.append(f"run files {run_files}/")
     if artifacts:
         lines.append(row("artifacts:", "; ".join(artifacts)))
     return lines
@@ -189,6 +203,134 @@ def validate(config_file: str):
     click.echo(
         f"Valid: {config.name} ({len(config.nodes)} nodes)"
     )
+
+
+def _checkpoint_status(run_id: str, checkpoint: dict, *, details: bool) -> dict[str, Any]:
+    channels = checkpoint["channel_values"]
+    if not isinstance(channels, dict):
+        raise ValueError("Invalid checkpoint state")
+    report = {
+        "run_id": run_id,
+        "checkpoint_id": checkpoint["id"],
+        "saved_at": checkpoint["ts"],
+        "completed_nodes": sorted(channels.get("completed_nodes", ())),
+        "failed_nodes": sorted(channels.get("failed_nodes", ())),
+    }
+    if details:
+        report.update(
+            retries=channels.get("retries", {}),
+            evaluations=channels.get("evaluations", {}),
+            errors=channels.get("errors", []),
+        )
+    return report
+
+
+async def _read_saved_status(
+    config: Graph, workdir: str, selected_run_id: str | None = None, history: int | None = None,
+) -> dict[str, Any]:
+    import aiosqlite
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    path = Path(_db_path(workdir)).resolve()
+    missing = f"no checkpoint for this workflow at {path}"
+    if not path.exists():
+        raise click.ClickException(missing)
+
+    workflow_key = _thread_id_for(config, workdir)
+    async with aiosqlite.connect(f"{path.as_uri()}?mode=ro", uri=True) as conn:
+        await conn.execute("BEGIN")
+        tables = await conn.execute_fetchall(
+            "SELECT name FROM sqlite_schema "
+            "WHERE type = 'table' AND name IN ('sqrlly_runs', 'checkpoints')",
+        )
+        if len(tables) != 2:
+            raise click.ClickException(missing)
+        latest_run_id = await _latest_run_id(conn, workflow_key)
+        run_id = selected_run_id or latest_run_id
+        if history is not None:
+            rows = await conn.execute_fetchall(
+                """WITH recent AS (
+                    SELECT thread_id, MAX(checkpoint_id) AS last_id
+                    FROM checkpoints
+                    WHERE thread_id GLOB ? AND checkpoint_ns = ''
+                    GROUP BY thread_id
+                    ORDER BY last_id DESC LIMIT ?
+                )
+                SELECT checkpoint.thread_id, checkpoint.type, checkpoint.checkpoint
+                FROM recent
+                JOIN checkpoints AS checkpoint ON checkpoint.thread_id = recent.thread_id
+                    AND checkpoint.checkpoint_ns = '' AND checkpoint.checkpoint_id = recent.last_id
+                ORDER BY recent.last_id DESC""",
+                (f"{workflow_key}:*", history),
+            )
+        elif run_id is not None:
+            # The saver runs schema setup before reading. Select its latest root checkpoint directly.
+            rows = await conn.execute_fetchall(
+                "SELECT thread_id, type, checkpoint FROM checkpoints "
+                "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id DESC LIMIT 1",
+                (_run_thread_id(workflow_key, run_id),),
+            )
+        else:
+            raise click.ClickException(missing)
+    if not rows:
+        raise click.ClickException(missing)
+
+    serializer = JsonPlusSerializer(allowed_msgpack_modules=None)
+    runs = [
+        _checkpoint_status(thread_id.partition(":")[2], serializer.loads_typed((kind, data)),
+                           details=history is None)
+        for thread_id, kind, data in rows
+    ]
+    if history is None:
+        return {"workflow": config.name, **runs[0]}
+    return {"workflow": config.name, "latest_run_id": latest_run_id, "runs": runs}
+
+
+@cli.command()
+@click.argument("config_file", type=click.Path())
+@click.option("--workdir", "-w", default=".", help="Working directory used by run.")
+@click.option("--json", "json_output", is_flag=True, help="Print the saved status as JSON.")
+@click.option("--run-id", "selected_run_id", type=click.UUID, help="Select an earlier saved run.")
+@click.option("--history", type=click.IntRange(1, 100), metavar="LIMIT", help="List recent saved runs.")
+def status(
+    config_file: str, workdir: str, json_output: bool, selected_run_id: uuid.UUID | None, history: int | None,
+) -> None:
+    """Show saved checkpoints for a workflow."""
+    if history is not None and selected_run_id is not None:
+        raise click.UsageError("--history and --run-id cannot be combined.")
+    config = load_config(config_file)
+    try:
+        run_id = selected_run_id.hex if selected_run_id is not None else None
+        report = asyncio.run(_read_saved_status(config, workdir, run_id, history))
+    except (sqlite3.DatabaseError, ValueError, TypeError, KeyError, NotImplementedError) as exc:
+        raise click.ClickException(f"Cannot read checkpoint at {_db_path(workdir)}: {exc}") from exc
+
+    if json_output:
+        click.echo(json.dumps(report, sort_keys=True))
+        return
+
+    if history is not None:
+        click.echo(f"Saved runs for {report['workflow']}")
+        if report["latest_run_id"]:
+            click.echo(f"Default resume target: {report['latest_run_id']}")
+        for item in report["runs"]:
+            complete = len(item["completed_nodes"])
+            failed = len(item["failed_nodes"])
+            click.echo(f"{item['run_id']}  {item['saved_at']}  {complete} completed, {failed} failed")
+        return
+
+    click.echo(f"Saved checkpoint for {report['workflow']} (run {report['run_id']})")
+    click.echo(f"Saved at {report['saved_at']}")
+    click.echo(f"Completed: {', '.join(report['completed_nodes']) or '(none)'}")
+    click.echo(f"Failed: {', '.join(report['failed_nodes']) or '(none)'}")
+    for node, count in sorted(report["retries"].items()):
+        click.echo(f"Retries for {node}: {count}")
+    for node, records in sorted(report["evaluations"].items()):
+        for record in records:
+            result = json.dumps(record["result"], sort_keys=True)
+            click.echo(f"Gate for {node}, attempt {record['attempt']}: {result}")
+    for error in report["errors"]:
+        click.echo(f"Error in {error['node']} ({error.get('kind', 'node_error')}): {error['error']}")
 
 
 @cli.command()
@@ -277,6 +419,8 @@ async def _run_async(
     quiet: bool = False,
     entry: str | None = None,
     safe_mode: bool | None = None,
+    run_vars: dict[str, str] | None = None,
+    selected_run_id: str | None = None,
 ) -> dict:
     """Inner async runner — wires checkpointer, executor, and state.
 
@@ -301,7 +445,7 @@ async def _run_async(
     subs: list[Any] = []
     jsonl: JsonlLogger | None = None
     if log_file is not None:
-        jsonl = JsonlLogger(log_file)
+        jsonl = JsonlLogger(log_file, invocation_id=uuid.uuid4().hex)
         subs.append(jsonl)
     if not quiet and not dry_run and sys.stdout.isatty():
         subs.append(TerminalRenderer(config))
@@ -318,23 +462,28 @@ async def _run_async(
         logger.emit({
             "event": "workflow_start",
             "workflow": config.name,
+            "dry_run": dry_run,
         })
 
     result: dict = {}
+    status = "failed"
     try:
         result = await _execute_workflow(
             config, workdir, dry_run, resume, resume_from, rerun_all,
             thread_id=thread_id, logger=logger, entry=entry, safe_mode=safe_mode, log_file=log_file,
+            run_vars=run_vars, selected_run_id=selected_run_id,
         )
+        status = "failed" if result.get("failed_nodes") else "succeeded"
         return result
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        status = "interrupted"
+        raise
     finally:
         if logger is not None:
-            # `result` stays {} if _execute_workflow raised before
-            # returning; workflow_end then logs zeros. The detailed
-            # error surfaces via Click already.
             from sqrlly.runtime.logging import failed_kinds_map
             logger.emit({
                 "event": "workflow_end",
+                "status": status,
                 "completed": len(result.get("completed_nodes", set())),
                 "failed": len(result.get("failed_nodes", set())),
                 "failed_kinds": failed_kinds_map(
@@ -355,6 +504,7 @@ async def _seed_state(
     rerun_all: bool,
     entry: str | None,
     thread_id: str,
+    run_vars: dict[str, str] | None = None,
 ) -> dict:
     """Seed the initial WorkflowState for a run and wipe the checkpoint
     thread (so reducers don't merge with stale state). Three modes:
@@ -406,6 +556,7 @@ async def _seed_state(
             "completed_nodes": skip,
             "failed_nodes": set(), "retries": {}, "errors": [],
             "workdir": workdir, "dry_run": False, "_resume_skip": skip,
+            "run_vars": old.get("run_vars", {}),
             "_fan_prior_children": fan_prior,
             "_fan_resume_attempts": {node.id: old.get("attempts", {}).get(node.id, 0)
                                      for node in config.nodes if node.for_each},
@@ -418,6 +569,10 @@ async def _seed_state(
         await cp.adelete_thread(thread_id)
         return state
 
+    await cp.adelete_thread(thread_id)
+    state = make_initial_state(
+        workflow_name=config.name, workdir=workdir, dry_run=False, run_vars=run_vars or {},
+    )
     if entry is not None:
         # Cold start at `entry`: NO checkpoint read. Seed FRESH state, then
         # compute the skip set as if every top-level node had already
@@ -432,10 +587,6 @@ async def _seed_state(
         from sqrlly.compile.resume import compute_skip_set
         all_ids = {n.id for n in config.nodes}
         skip = compute_skip_set(config, all_ids, set(), {entry})
-        await cp.adelete_thread(thread_id)
-        state = make_initial_state(
-            workflow_name=config.name, workdir=workdir, dry_run=False,
-        )
         state["completed_nodes"] = set(skip)
         state["_resume_skip"] = set(skip)
         state["_cold_entry"] = entry
@@ -444,12 +595,7 @@ async def _seed_state(
             f"{len(all_ids - skip)} node(s) ({entry} + downstream); "
             f"freezing {len(skip)} upstream (trusting on-disk artifacts)."
         )
-        return state
-
-    await cp.adelete_thread(thread_id)
-    return make_initial_state(
-        workflow_name=config.name, workdir=workdir, dry_run=False,
-    )
+    return state
 
 
 async def _execute_workflow(
@@ -465,11 +611,13 @@ async def _execute_workflow(
     entry: str | None = None,
     safe_mode: bool | None = None,
     log_file: str | None = None,
+    run_vars: dict[str, str] | None = None,
+    selected_run_id: str | None = None,
 ) -> dict:
     if dry_run:
         compiled = build_workflow_graph(config, None, logger=logger, entry=entry)
         state = make_initial_state(
-            workflow_name=config.name, workdir=workdir, dry_run=True,
+            workflow_name=config.name, workdir=workdir, dry_run=True, run_vars=run_vars or {},
         )
         if entry is not None:
             from sqrlly.compile.resume import compute_skip_set
@@ -485,28 +633,39 @@ async def _execute_workflow(
         safe_mode=_effective_safe_mode(safe_mode, config.settings),
     )
 
-    async with AsyncSqliteSaver.from_conn_string(_db_path(workdir)) as cp:
+    if selected_run_id is not None and not Path(_db_path(workdir)).exists():
+        raise click.ClickException(f"No saved run {selected_run_id} at {_db_path(workdir)}")
+
+    async with AsyncExitStack() as resources, AsyncSqliteSaver.from_conn_string(_db_path(workdir)) as cp:
         await cp.setup()
         # Fresh invocations have independent checkpoints even when their workflow and workdir match.
         workflow_key = thread_id
         await cp.conn.execute(
             "CREATE TABLE IF NOT EXISTS sqrlly_runs (workflow TEXT PRIMARY KEY, run TEXT NOT NULL)"
         )
-        if resume:
-            async with cp.conn.execute(
-                "SELECT run FROM sqrlly_runs WHERE workflow = ?", (workflow_key,)
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row is None:
+        if selected_run_id is not None:
+            run_id = selected_run_id
+        elif resume:
+            run_id = await _latest_run_id(cp.conn, workflow_key)
+            if run_id is None:
                 raise click.ClickException(f"No saved state for this workflow at {_db_path(workdir)}")
-            run_id = row[0]
         else:
             run_id = uuid.uuid4().hex
+        thread_id = _run_thread_id(workflow_key, run_id)
+        lease_dir = Path(workdir) / ".sqrlly" / "run-locks"
+        lease_dir.mkdir(parents=True, exist_ok=True)
+        lease_key = hashlib.sha256(thread_id.encode()).hexdigest()
+        # Claim the run before publishing it or touching its checkpoints.
+        resources.enter_context(closing(acquire_sqlite_lease(lease_dir / lease_key, timeout=0)))
+        run_config = {"configurable": {"thread_id": thread_id}}
+        previous = await cp.aget_tuple(run_config) if resume else None
+        if selected_run_id is not None and previous is None:
+            raise click.ClickException(f"No saved run {selected_run_id} for this workflow and workdir")
+        if not resume:
             await cp.conn.execute(
                 "INSERT OR REPLACE INTO sqrlly_runs VALUES (?, ?)", (workflow_key, run_id)
             )
             await cp.conn.commit()
-        thread_id = f"{workflow_key}:{run_id}"
         if _is_git_repo(workdir):
             executor_obj = ForemanExecutor(
                 inner=dispatch,
@@ -529,12 +688,11 @@ async def _execute_workflow(
                 )
             executor_obj = dispatch
 
-        clean = False
         try:
             state = await _seed_state(
                 cp, config, workdir,
                 resume=resume, resume_from=resume_from, rerun_all=rerun_all,
-                entry=entry, thread_id=thread_id,
+                entry=entry, thread_id=thread_id, run_vars=run_vars,
             )
 
             if isinstance(executor_obj, ForemanExecutor):
@@ -546,16 +704,27 @@ async def _execute_workflow(
                 compiled, state, config,
                 thread_id=thread_id, logger=logger,
             )
-            for ref in sorted(result.get("retained_refs", set())):
-                click.echo(f"Retained snapshot: {ref}")
-            clean = not result.get("failed_nodes")
-        finally:
             if isinstance(executor_obj, ForemanExecutor):
-                await executor_obj.close(clean=clean)
-            else:
-                await executor_obj.close()
+                refs = executor_obj.snapshots.existing_refs(result.get("retained_refs", set()))
+                for ref in sorted(refs):
+                    click.echo(f"Retained snapshot: {ref}")
+        finally:
+            # Older checkpoints remain selectable and may need their input refs.
+            await executor_obj.close()
 
         return result
+
+
+def _parse_run_vars(values: tuple[str, ...]) -> dict[str, str]:
+    variables = {}
+    for value in values:
+        name, separator, text = value.partition("=")
+        if not separator or not name.isidentifier():
+            raise click.BadParameter("expected NAME=VALUE with an identifier as NAME", param_hint="--var")
+        if name in variables:
+            raise click.BadParameter(f"duplicate variable {name!r}", param_hint="--var")
+        variables[name] = text
+    return variables
 
 
 @cli.command()
@@ -567,6 +736,7 @@ async def _execute_workflow(
 @click.option(
     "--resume", is_flag=True, help="Resume from the last checkpoint"
 )
+@click.option("--run-id", "selected_run_id", type=click.UUID, help="Select a saved run to resume by ID.")
 @click.option(
     "--resume-from", "resume_from", multiple=True,
     help="Re-run this node and everything downstream; freeze upstream. "
@@ -587,6 +757,10 @@ async def _execute_workflow(
          "--rerun-all.",
 )
 @click.option("--log", "log_file", type=click.Path(), help="JSONL log output file")
+@click.option(
+    "--var", "variables", multiple=True, metavar="NAME=VALUE",
+    help="Set a top-level template variable (repeatable). Resumes use saved values.",
+)
 @click.option(
     "--quiet", "-q", is_flag=True,
     help="Suppress the live terminal renderer (useful in CI/piped runs).",
@@ -609,11 +783,18 @@ def run(
     log_file: str | None,
     quiet: bool,
     safe_mode: bool | None,
+    variables: tuple[str, ...],
+    selected_run_id: uuid.UUID | None,
 ):
     """Run a workflow from a configuration file."""
     config = load_config(config_file)
 
     resume = resume or bool(resume_from)
+    if selected_run_id is not None and (not resume or dry_run):
+        raise click.UsageError("--run-id requires --resume or --resume-from and cannot trace a dry run.")
+    if resume and variables:
+        raise click.UsageError("--var cannot be used with --resume or --resume-from. Start a fresh run to change inputs.")
+    run_vars = _parse_run_vars(variables)
     if rerun_all and resume_from:
         raise click.ClickException(
             "--rerun-all and --resume-from are mutually exclusive"
@@ -654,7 +835,9 @@ def run(
     from sqrlly.runtime.result import EvaluationError, ManifestError, RouteError
     try:
         result = asyncio.run(
-            _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file, quiet, entry, safe_mode)
+            _run_async(config, workdir, dry_run, resume, resume_from, rerun_all, log_file,
+                       quiet, entry, safe_mode, run_vars=run_vars,
+                       selected_run_id=selected_run_id.hex if selected_run_id else None)
         )
     except KeyboardInterrupt:
         click.echo("Interrupted.", err=True)

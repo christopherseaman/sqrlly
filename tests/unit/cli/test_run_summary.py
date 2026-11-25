@@ -81,19 +81,18 @@ def test_log_path_surfaced_when_given(tmp_path):
     assert "--log" not in log_row
 
 
-def test_checkpoint_and_worktree_pool_listed(tmp_path):
+def test_checkpoint_and_run_files_listed(tmp_path):
     (tmp_path / CHECKPOINT_DB).write_text("")  # AsyncSqliteSaver leaves this
-    (tmp_path / ".sqrlly").mkdir()              # foreman worktree pool
+    (tmp_path / ".sqrlly" / "run-locks").mkdir(parents=True)
     g = _graph([Node(id="a", name="A", agent={"text": "test"})])
     lines = _run_artifact_summary(g, str(tmp_path), None)
     art_row = next(l for l in lines if l.lstrip().startswith("artifacts"))
     assert str((tmp_path / CHECKPOINT_DB).resolve()) in art_row
-    assert str((tmp_path / ".sqrlly").resolve()) in art_row
+    assert f"run files {(tmp_path / '.sqrlly').resolve()}/" in art_row
 
 
 def test_no_artifacts_row_when_none_exist(tmp_path):
-    """A pure non-git script run leaves no checkpoint/worktree pool → no
-    artifacts row (don't point at paths that don't exist)."""
+    """The summary omits artifact paths that do not exist."""
     g = _graph([Node(id="a", name="A", agent={"text": "test"})])
     lines = _run_artifact_summary(g, str(tmp_path), None)
     assert not any(l.lstrip().startswith("artifacts") for l in lines)

@@ -118,6 +118,7 @@ nodes:
 | `sqrlly init [<dir>] --example <name>` | Scaffold a bundled example into `<dir>` (default `./<name>`). Use `sqrlly init --list-examples` to see the catalog. |
 | `sqrlly validate <config>` | Compile the workflow; report node count and lint warnings. |
 | `sqrlly run <config>` | Execute the workflow. |
+| `sqrlly status <config>` | Inspect a saved checkpoint or list recent runs with `--history <limit>`. |
 | `sqrlly graph <config>` | Print the topology as a Mermaid diagram. |
 | `sqrlly view <config>` | Render a self-contained interactive HTML viewer. |
 
@@ -127,14 +128,28 @@ nodes:
 - `--dry-run` traces topology without running commands or prompts. Items from producer nodes are unavailable during a dry run.
 - `--resume` seeds from the prior run's state and retries failures. It skips completed nodes by default.
   If an isolated node stops before sqrlly records its result, inspect its retained worktree before starting a fresh run.
+- `--resume --run-id <id>` selects an earlier saved run in the same workflow and working directory.
 - `--resume-from <node>` reruns the specified node and its downstream nodes. Repeat the flag to select multiple nodes. It implies `--resume`.
 - `--rerun-all` with `--resume` replays every node.
 - `--entry <node>` — cold-start at `<node>`: run it and everything downstream WITHOUT a checkpoint (the upstream artifacts must already be on disk). Mutually exclusive with `--resume` / `--resume-from` / `--rerun-all`.
-- `--log <path>` — write a JSONL event log.
+- `--var NAME=VALUE` binds a string as `{{vars.NAME}}`. Repeat for multiple inputs. Resumes use the saved inputs.
+- `--log <path>` appends JSONL events. Group records by `invocation_id` and read `workflow_end.status` for each outcome.
 - `--quiet / -q` — suppress the live terminal renderer (use in CI / piped runs).
 - `--safe-mode / --no-safe-mode` — run Anthropic's CLI provider with Claude operator customizations (output styles, CLAUDE.md, skills, MCP, hooks) disabled. It has no effect on Codex. Overrides `settings.safe_mode`; absent, the setting applies.
 
-`run` shows a live per-node status grid + a clock-driven aliveness spinner when stdout is a TTY. Non-TTY runs (piped, redirected, CI) fall through to the plain summary output automatically. Workflow events only — no LLM-token streaming. On completion `run` prints a `where to find things` summary — the produced output files, the log path (or how to capture one with `--log`), and run artifacts (checkpoint DB + worktree pool); `--quiet` suppresses it.
+`run` shows a live per-node status grid + a clock-driven aliveness spinner when stdout is a TTY. Non-TTY runs (piped, redirected, CI) fall through to the plain summary output automatically. Workflow events only — no LLM-token streaming. On completion `run` prints a `where to find things` summary — the produced output files, the log path (or how to capture one with `--log`), and run artifacts such as the checkpoint database and worktrees; `--quiet` suppresses it.
+
+With `status`, use the same workflow YAML and `--workdir` as the run. Use
+`--json` for machine-readable output, `--history <limit>` to order runs by
+their last saved checkpoint, and `--run-id <id>` to inspect one run. History
+shows which run bare `--resume` selects. Git snapshot refs are kept for
+saved runs. Checkpoints created before this change may reference snapshots
+that were already pruned.
+
+Only one process can run or resume a given checkpoint at a time. Fresh runs
+get separate leases. Sqrlly writes each outer graph step before starting the
+next. External actions may still need idempotency keys after interruption. A
+crash during resume can interrupt checkpoint reseeding.
 
 ## Examples
 
@@ -146,7 +161,7 @@ Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an exa
 | [`examples/jokes/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/jokes/workflow.yaml) | Minimal: prompt + script gate + select. Start here. |
 | [`examples/route_classify/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/route_classify/workflow.yaml) | An LLM classifies a ticket against a JSON schema; route cases read its category. |
 | [`examples/explicit_join.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/explicit_join.yaml) | A join waits for three parallel commands. |
-| [`examples/agent_recovery/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/agent_recovery/README.md) | A Codex agent edits an isolated worktree. A dependent reads the promoted file, then a bare `--resume` retries a failed child. |
+| [`examples/agent_recovery/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/agent_recovery/README.md) | A Codex agent edits an isolated worktree. A dependent reads the promoted file, then `status` identifies the run to resume. |
 | [`examples/run_command/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/run_command/workflow.yaml) | A command runs a Python script through `uv` without a prompt backend. |
 | [`examples/pipeline_style/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/pipeline_style/workflow.yaml) | `route: [{then: <next>}]` forward-edge authoring; a linear pipeline. |
 | [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Prompts, multi-dimension evals, a child workflow, and a rendered PDF. Scaffold it with `uv run sqrlly init --example absurd-paper`. |

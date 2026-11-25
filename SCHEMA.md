@@ -63,7 +63,7 @@ Inside a Git repository, agents and repeated commands start in an isolated workt
 
 The engine snapshots the base workdir, including uncommitted files, before an isolated node starts. At settlement its committed and uncommitted changes become visible to dependents. A fan-out promotes its successful children together after all children succeed. The real Git index stays intact. `outputs.files` limits the promotion footprint when declared.
 
-A successful tree is removed after capture. With `promote: false`, the run reports the output ref for inspection. Failed worktrees remain available for recovery. A clean run prunes refs from earlier inactive runs of the same workflow.
+A successful tree is removed after capture. With `promote: false`, the run reports the output ref for inspection. Failed worktrees remain available for recovery. The CLI retains Git snapshot refs so older saved runs remain resumable.
 
 ## Node
 
@@ -119,6 +119,14 @@ A child template reads caller inputs through `{{workflow_inputs.source}}` or the
 The qualified form lets `sqrlly validate child.yaml` check the child independently.
 Validating the parent also checks literal input keys against its `workflow.with` mapping.
 At the top level, `workflow_inputs` is an empty mapping. An ancestor named `workflow_inputs` binds its output under that name.
+
+### Run variables
+
+Pass `--var NAME=VALUE` to `sqrlly run` once per input. Names must be identifiers, and values are strings. A value may be empty or contain additional equals signs. Quote arguments according to your shell.
+
+At the top level, `{{vars.NAME}}` works in prompts, command arguments, command environments, eval templates, and `workflow.with`. Use `{{vars.NAME | default('value')}}` for an optional template input. A route can test `vars['NAME'] == 'value'`. An ancestor named `vars` continues to bind its output under that name.
+
+Pass the inputs a child needs through `workflow.with`. Checkpoints store the original run variables, and every resume mode reuses them. Start a fresh run to change them. Use environment variables or your existing secret store for credentials because command lines and checkpoints can expose values.
 
 The parent receives the output of the terminal node reached in the child workflow. If several terminals produce output, the last one in YAML declaration order wins, even when its output is empty.
 
@@ -226,11 +234,15 @@ consumer maps `kind` → retry over this stable vocabulary.
 repeated workflow fails, its child reports `upstream_failed`. Look for the
 inner failure in the `node_failed` event under `<parent>::<item>::<inner>`.
 
-A reused `--log <path>` appends a separate `workflow_start` and
-`workflow_end` for each invocation. Read the last `workflow_end.failed_kinds`
-for the current invocation's failures. Resume clears prior failures while
-restoring checkpointed outputs, attempt counts, and evaluation history.
+When the CLI opens `--log`, it tags every record with a new `invocation_id`.
+Group records by that ID when a file contains several runs or resumes.
+Use a separate log file for each concurrently executing process.
+`workflow_start.dry_run` distinguishes a trace from actual execution.
+`workflow_end.status` is `succeeded`, `failed`, or `interrupted`.
+Read `workflow_end.failed_kinds` for failures recorded on individual nodes.
+A run can fail before any node executes and still emit `status: failed`.
+Check the process exit code when validation fails before the log opens.
+A process killed without cleanup may leave a start event without an end.
 
-Use the CLI exit code to detect a failed invocation. A run-level error can
-abort execution before any `node_failed` event and leave zero counts in
-`workflow_end`.
+Resume clears prior failures while restoring checkpointed outputs, attempt
+counts, and evaluation history. Each resume has its own invocation ID.
