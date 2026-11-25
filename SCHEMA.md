@@ -1,7 +1,8 @@
 # sqrlly — Workflow Schema Reference
 
 The complete field-by-field reference for a sqrlly workflow YAML. For an
-orientation and quickstart, see the [README](README.md).
+orientation and quickstart, see the [README](README.md). For upgrades from
+0.10, see the [migration guide](docs/reference/migrate-1.0.md).
 
 ---
 

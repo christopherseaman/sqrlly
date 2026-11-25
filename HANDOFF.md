@@ -1,6 +1,6 @@
 # Handoff
 
-The seven grammar roadmap issues (#36 through #42) are complete on `main`. The 1.0 grammar is available from this checkout with `uv run sqrlly`. Publishing a major release requires the owner's approval.
+The 1.0 grammar roadmap (#36 through #42) and the two promotion batches (#64 and #65) are complete on `main`. Issue #66 tracks the approved 1.0.0 release. The [migration guide](docs/reference/migrate-1.0.md) explains how to upgrade from 0.10.
 
 - `SCHEMA.md` is the field reference. `SKILLS.md` is the authoring guide installed by `sqrlly init --skill`.
 - `docs/reference/grammar-1.0.md` records the design decisions and the scope of future extensions.

@@ -10,9 +10,9 @@
 
 ## Install
 
-This checkout documents the unreleased 1.0 grammar. Run the commands in
-this guide from the checkout with `uv run sqrlly`. For the PyPI release,
-use the [0.10.0 guide](https://github.com/christopherseaman/sqrlly/blob/v0.10.0/README.md).
+This guide covers sqrlly 1.0. Migrating from 0.10? Convert your workflow YAML and start
+a new run. Existing checkpoints require the version that created them.
+See the [migration guide](https://github.com/christopherseaman/sqrlly/blob/v1.0.0/docs/reference/migrate-1.0.md).
 
 To install the published CLI in an isolated environment:
 
@@ -38,20 +38,23 @@ LLM dispatch uses a local authenticated agent CLI. Codex is the default:
 handles its own credentials independently. Authenticate Codex or Claude
 with that CLI's normal login flow; sqrlly never reads or stores API keys.
 
-Python 3.11+. From source: `git clone` then `uv sync`.
+Sqrlly requires Python 3.11 or newer. From a source checkout, run
+`uv sync` and substitute `uv run sqrlly` for `sqrlly` in the examples.
 
 **Using sqrlly from a coding agent?** Use
-`uv run sqrlly init --skill /path/to/your-repo` from this checkout.
+`sqrlly init --skill /path/to/your-repo`.
 The command installs the skill at `.agents/skills/sqrlly/SKILL.md` in the
 target repository.
 
 ## Quickstart
 
-Create and run a workflow with one command node:
+Create, validate, and run a workflow with one command node.
 
 ```bash
-uv run sqrlly init my-workflow
-uv run sqrlly run my-workflow/workflow.yaml --workdir my-workflow
+sqrlly init my-workflow
+cd my-workflow
+sqrlly validate workflow.yaml
+sqrlly run workflow.yaml
 ```
 
 `sqrlly init` writes a workflow with one `run` node that prints a greeting.
@@ -75,8 +78,9 @@ nodes:
 ```
 
 ```bash
-uv run sqrlly validate examples/jokes/workflow.yaml
-uv run sqrlly run examples/jokes/workflow.yaml --log run.jsonl
+sqrlly init --example jokes
+sqrlly validate jokes/workflow.yaml
+sqrlly run jokes/workflow.yaml --workdir jokes --log run.jsonl
 ```
 
 - `validate` — compiles the graph and reports the node count.
@@ -173,7 +177,7 @@ Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an exa
 
 ## Documentation
 
-- [SCHEMA.md](SCHEMA.md) documents the four kinds, settings, route predicates and quality gates.
+- [SCHEMA.md](https://github.com/christopherseaman/sqrlly/blob/v1.0.0/SCHEMA.md) documents the four kinds, settings, route predicates and quality gates.
 - **[SKILLS.md](https://github.com/christopherseaman/sqrlly/blob/main/SKILLS.md)** — agent skill doc: instructions for an AI coding agent authoring and running sqrlly workflows.
 
 ## Contributing
