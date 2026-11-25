@@ -142,7 +142,9 @@ nodes:
 With `status`, use the same workflow YAML and `--workdir` as the run. Use
 `--json` for machine-readable output, `--history <limit>` to order runs by
 their last saved checkpoint, and `--run-id <id>` to inspect one run. History
-shows which run bare `--resume` selects.
+shows which run bare `--resume` selects. Git snapshot refs are kept for
+saved runs. Checkpoints created before this change may reference snapshots
+that were already pruned.
 
 Only one process can run or resume a given checkpoint at a time. Fresh runs
 get separate leases. Sqrlly writes each outer graph step before starting the

@@ -103,6 +103,8 @@ class ForemanExecutor:
             commit = self.snapshots.capture_in(key, exclude_paths=self._shares(settings))
             _git(self._root, "worktree", "add", "--detach", "--no-checkout", "-q", str(tree), commit)
             self._owner(tree).write_text(ref)
+        elif not _git(self._root, "rev-parse", "--revs-only", ref):
+            raise RuntimeError(f"Missing input snapshot {ref} for retained worktree {tree}")
         owner = self._owner(tree)
         if owner.read_text() != ref:
             raise RuntimeError(f"Snapshot owner differs for {tree}")

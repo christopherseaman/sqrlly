@@ -238,7 +238,7 @@ without supplying fake provider responses.
   parses as subtraction; use underscores. `validate`/`run` emit an
   advisory warning (`compile/lint.py`).
 - `graph` and `view` render authored dependencies and routes. A ×N stand-in beside each repeating node shows where its workers run. Realized child ids appear in the run log.
-- Successful isolated worktrees are removed after their output ref is captured. Failed trees stay available. A clean run prunes earlier inactive runs’ refs for that workflow.
+- Successful isolated worktrees are removed after their output ref is captured. Failed trees stay available. The CLI keeps snapshot refs for earlier saved runs.
 - **`--resume` skips completed nodes (0.6.0)** — bare `--resume` reseeds
   the prior checkpoint and skips nodes that completed cleanly and aren't
   downstream of a failure (`compile/resume.py::compute_skip_set` → the

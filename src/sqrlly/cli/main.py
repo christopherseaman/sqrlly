@@ -688,7 +688,6 @@ async def _execute_workflow(
                 )
             executor_obj = dispatch
 
-        clean = False
         try:
             state = await _seed_state(
                 cp, config, workdir,
@@ -705,14 +704,13 @@ async def _execute_workflow(
                 compiled, state, config,
                 thread_id=thread_id, logger=logger,
             )
-            for ref in sorted(result.get("retained_refs", set())):
-                click.echo(f"Retained snapshot: {ref}")
-            clean = not result.get("failed_nodes")
-        finally:
             if isinstance(executor_obj, ForemanExecutor):
-                await executor_obj.close(clean=clean and selected_run_id is None)
-            else:
-                await executor_obj.close()
+                refs = executor_obj.snapshots.existing_refs(result.get("retained_refs", set()))
+                for ref in sorted(refs):
+                    click.echo(f"Retained snapshot: {ref}")
+        finally:
+            # Older checkpoints remain selectable and may need their input refs.
+            await executor_obj.close()
 
         return result
 

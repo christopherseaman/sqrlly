@@ -63,7 +63,7 @@ Inside a Git repository, agents and repeated commands start in an isolated workt
 
 The engine snapshots the base workdir, including uncommitted files, before an isolated node starts. At settlement its committed and uncommitted changes become visible to dependents. A fan-out promotes its successful children together after all children succeed. The real Git index stays intact. `outputs.files` limits the promotion footprint when declared.
 
-A successful tree is removed after capture. With `promote: false`, the run reports the output ref for inspection. Failed worktrees remain available for recovery. A clean run prunes refs from earlier inactive runs of the same workflow.
+A successful tree is removed after capture. With `promote: false`, the run reports the output ref for inspection. Failed worktrees remain available for recovery. The CLI retains Git snapshot refs so older saved runs remain resumable.
 
 ## Node
 

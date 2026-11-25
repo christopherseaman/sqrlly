@@ -130,7 +130,7 @@ def test_concurrent_workflow_runs_keep_both_snapshots(repo, tmp_path):
     assert snapshots() == {"first", "second"}
     third = subprocess.run(cli, env=os.environ | {"RUN": "third"}, capture_output=True, text=True)
     assert third.returncode == 0, third.stderr
-    assert snapshots() == {"third"}
+    assert snapshots() == {"first", "second", "third"}
 
 
 def test_eval_runs_in_isolated_tree_before_promotion(repo, tmp_path):

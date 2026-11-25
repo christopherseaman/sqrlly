@@ -171,6 +171,9 @@ class SnapshotRun:
     def _refs(self, prefix):
         return _git(self.base, "for-each-ref", "--format=%(refname)", prefix).decode().splitlines()
 
+    def existing_refs(self, refs: set[str]) -> set[str]:
+        return refs.intersection(self._refs(self.prefix)) if refs else set()
+
     def ref(self, node_id, phase):
         if phase not in ("in", "out"):
             raise ValueError(f"Unknown snapshot phase {phase!r}")

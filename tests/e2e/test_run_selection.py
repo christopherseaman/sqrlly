@@ -109,6 +109,7 @@ nodes:
 
     result = runner.invoke(cli, args + ["--var", "label=first"])
     assert result.exit_code == 0, result.output
+    earlier_ref = next(line.split()[-1] for line in result.output.splitlines() if line.startswith("Retained snapshot:"))
     result = runner.invoke(cli, status)
     assert result.exit_code == 0, result.output
     first = json.loads(result.output)["run_id"]
@@ -120,4 +121,44 @@ nodes:
 
     result = runner.invoke(cli, args + ["--resume", "--run-id", first])
     assert result.exit_code == 0, result.output
+    assert earlier_ref in result.output
+    assert git("show", f"{earlier_ref}:result.txt") == "first"
     assert git("show", f"{newer_ref}:result.txt") == "second"
+
+
+def test_resume_earlier_failed_git_run_can_promote(tmp_path):
+    workdir = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(workdir)], check=True)
+    subprocess.run(
+        ["git", "-C", str(workdir), "-c", "user.name=Workflow Test", "-c",
+         "user.email=workflow@example.test", "commit", "--allow-empty", "-qm", "Base"],
+        check=True,
+    )
+    config = tmp_path / "workflow.yaml"
+    config.write_text("""
+nodes:
+  - id: output
+    worktree: isolated
+    outputs: {files: ["*.result"]}
+    run:
+      - sh
+      - -ec
+      - 'test "$1" != first || test -e "$2"; printf %s "$1" > "$1.result"'
+      - publish
+      - "{{ vars.label }}"
+      - "{{ workflow_dir }}/allow"
+""")
+    runner = CliRunner()
+    args = ["run", str(config), "--workdir", str(workdir), "--quiet"]
+    status = ["status", str(config), "--workdir", str(workdir), "--json"]
+    failed = runner.invoke(cli, args + ["--var", "label=first"])
+    assert failed.exit_code == 1 and "Failed: output" in failed.output
+    first = json.loads(runner.invoke(cli, status).output)["run_id"]
+    newer = runner.invoke(cli, args + ["--var", "label=second"])
+    assert newer.exit_code == 0, newer.output
+
+    (tmp_path / "allow").touch()
+    resumed = runner.invoke(cli, args + ["--resume", "--run-id", first])
+    assert resumed.exit_code == 0, resumed.output
+    assert (workdir / "first.result").read_text() == "first"
+    assert (workdir / "second.result").read_text() == "second"

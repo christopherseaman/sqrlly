@@ -165,7 +165,8 @@ Kept (8): node `worktree: isolated|off`, node `promote`, `on_promote_conflict`, 
 3. At node end the tree is committed to `.../<node>/out`. A node may commit, which removes `PromoteHeadMovedError`.
 4. When the node or the whole fan-out settles, the engine compares each path's current base blob with its `in` blob. A mismatch is a conflict under `on_promote_conflict`, like two nodes writing one path. The engine then applies `in..out` to the base, so the next node sees the merged tree. 0.10 checks only node-versus-node overlap (`plan_promotions`) and promotes at end of run.
 5. A promoted tree is removed and its ref stays. A succeeded tree with `promote: false` is removed too, and its `out` ref is listed at end of run. A failed tree stays.
-6. A run that ends clean deletes the refs of earlier runs of the same workflow.
+6. Decision 2026-11-24 (#64). The CLI retains refs of earlier runs for resume
+   by ID. Each snapshot describes its original run and can outlive its worktree.
 
 `validate` gains 2 warnings. The first fires when two `agent` or `run` nodes with `worktree: off` have no dependency path between them. The second fires on `worktree_setup` without `promote_exclude`, because `in..out` would commit generator output that 0.10 kept out through `info/exclude`.
 
