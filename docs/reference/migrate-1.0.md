@@ -1,7 +1,7 @@
 # Migrate a workflow from 0.10 to 1.0
 
-Finish any in-progress runs with 0.10. The 1.0 CLI uses a new checkpoint
-format. Keep the original workflow path, working directory, and checkpoint
+Use sqrlly 0.10 to resume its saved checkpoints. Keep the original
+workflow path, working directory, and checkpoint
 database together if you need to finish a saved run.
 
 ```bash
@@ -29,13 +29,17 @@ promote when the node settles unless you set `promote: false`.
 A command and its unconditional route in 0.10:
 
 ```yaml
+name: Greeting
+version: "0.1.0"
 nodes:
   - id: build
+    name: Build greeting
     execute:
       url: /bin/sh
       params: {args: [-c, "printf hello > greeting.txt; cat greeting.txt"]}
     route: {goto: report}
   - id: report
+    name: Report greeting
     execute:
       url: /usr/bin/printf
       params: {args: ["%s\\n", "{{build}}"]}

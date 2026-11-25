@@ -10,8 +10,8 @@
 
 ## Install
 
-This guide covers sqrlly 1.0. Migrating from 0.10? Convert your workflow YAML and start
-a new run. Existing checkpoints require the version that created them.
+This guide covers sqrlly 1.0. To upgrade from 0.10, convert your workflow YAML
+and start a new run. Use sqrlly 0.10 to resume its saved checkpoints.
 See the [migration guide](https://github.com/christopherseaman/sqrlly/blob/v1.0.0/docs/reference/migrate-1.0.md).
 
 To install the published CLI in an isolated environment:
