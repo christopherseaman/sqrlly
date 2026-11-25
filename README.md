@@ -159,7 +159,7 @@ crash during resume can interrupt checkpoint reseeding.
 
 ## Examples
 
-Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an example.
+Run `sqrlly view <workflow.yaml>` to render an interactive view of an example.
 `examples/regenerate_views.sh` rebuilds selected views and captures logs for two deterministic debug views.
 
 | Workflow | What it shows |
@@ -170,7 +170,7 @@ Run `uv run sqrlly view <workflow.yaml>` to render an interactive view of an exa
 | [`examples/agent_recovery/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/agent_recovery/README.md) | A Codex agent edits an isolated worktree. A dependent reads the promoted file, then `status` identifies the run to resume. |
 | [`examples/run_command/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/run_command/workflow.yaml) | A command runs a Python script through `uv` without a prompt backend. |
 | [`examples/pipeline_style/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/pipeline_style/workflow.yaml) | `route: [{then: <next>}]` forward-edge authoring; a linear pipeline. |
-| [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Prompts, multi-dimension evals, a child workflow, and a rendered PDF. Scaffold it with `uv run sqrlly init --example absurd-paper`. |
+| [`examples/absurd-paper/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/absurd-paper/workflow.yaml) | Prompts, multi-dimension evals, a child workflow, and a rendered PDF. Scaffold it with `sqrlly init --example absurd-paper`. |
 | [`examples/wave_planner/`](https://github.com/christopherseaman/sqrlly/blob/main/examples/wave_planner/workflow.yaml) | Wave-driven dynamic-task pattern — a bounded route back to a producer that discovers more items. |
 | [`examples/smoke_test.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/smoke_test.yaml) | One prompt checks the local provider connection. |
 | [`examples/run_all_examples.yaml`](https://github.com/christopherseaman/sqrlly/blob/main/examples/run_all_examples.yaml) | Runs seven examples as child workflows. The wave planner and agent recovery walkthroughs use separate working directories. |

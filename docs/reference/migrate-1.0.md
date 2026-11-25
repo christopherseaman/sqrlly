@@ -18,6 +18,7 @@ Convert a copy of the workflow and validate it with 1.0.
 | `execute: {type: join}` | Keep the node's `id` and `depends_on`. |
 | `settings.presets`, `params.preset`, and `--preset` | Move model defaults to `settings.model` or `settings.defaults.agent` and `settings.defaults.llm`. Use a node's `model` or `provider` to override its defaults. |
 | `evaluation` | Use `eval.run` or `eval.llm` to measure output. Use `route` to define thresholds, retries, and failure. |
+| `output_contract.required_files` | Use `outputs.files`. Prefix each path or glob with the old `output_contract.base_directory`. |
 | `route: {goto: next}` | Use `route: [{then: next}]` for an unconditional destination. Use `when` for a condition and `else` for a fallback. |
 | `fan_out` | Put `for_each` on the repeating node. Reference a producer or use `{file: items.json}` for a static manifest. |
 
