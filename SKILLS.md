@@ -137,10 +137,15 @@ Use `settings.worktree_share` for shared dependency directories and `settings.wo
 `run` flags: `--workdir/-w <dir>`, `--dry-run` (trace topology without
 executing),
 `--resume` (skip completed nodes, retry failed ones — see Debug),
+`--resume --run-id <id>` (resume a specific checkpoint),
 `--rerun-all` (full replay of every node), `--resume-from <node>`
 (re-run node + downstream; implies `--resume`),
+`--var NAME=VALUE` (repeatable string inputs for `{{vars.NAME}}`),
 `--entry <node>` (cold-start: run `<node>` + downstream, no checkpoint —
 see below), `--log <path>`.
+
+Use `sqrlly status <config> --history 10` to find run IDs. Match the
+original `--workdir`. Add `--run-id <id> --json` to inspect one saved run.
 
 Use `sqrlly run path/to/workflow.yaml --entry <node>` to run a workflow tail against
 a hand-prepared workdir with NO prior checkpoint: it freezes everything

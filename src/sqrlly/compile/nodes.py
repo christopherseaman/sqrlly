@@ -14,7 +14,7 @@ from sqrlly.compile.evaluation import select_case
 from sqrlly.compile.lint import iter_route_edges
 from sqrlly.compile.outputs import execute_with_outputs
 from sqrlly.runtime.gates import build_eval_preamble
-from sqrlly.runtime.executor.prompt import retry_delay
+from sqrlly.runtime.executor.prompt import RunVariables, retry_delay
 from sqrlly.runtime.gates import run_evaluation
 from sqrlly.runtime.result import EvaluationBackendError, EvaluationError, ExecutionResult
 from sqrlly.runtime.state import WorkflowState
@@ -117,6 +117,8 @@ def build_context(node: Node, state: WorkflowState) -> dict[str, Any]:
     import json as _json
 
     context: dict[str, Any] = {}
+    if "run_vars" in state and "node_inputs" not in state:
+        context["vars"] = RunVariables(state["run_vars"])
     outputs = state.get("node_outputs", {})
     structured = state.get("node_structured_outputs", {})
     worktrees = state.get("node_worktrees", {})

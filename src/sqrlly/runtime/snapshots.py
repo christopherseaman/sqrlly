@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -13,6 +12,7 @@ from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
 
+from sqrlly.runtime.lease import acquire_sqlite_lease
 from sqrlly.runtime.promote import PromoteConflictError, plan_promotions
 
 
@@ -144,19 +144,6 @@ def _apply(base, current_tree, current, updates):
             _git(base, "apply", "--binary", "--whitespace=nowarn", "-", data=patch)
 
 
-def _lease(path, timeout):
-    # An empty SQLite write transaction is an OS-backed, process-lifetime lock.
-    connection = sqlite3.connect(path, timeout=timeout, check_same_thread=False)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-    except sqlite3.OperationalError as exc:
-        connection.close()
-        if exc.sqlite_errorcode == sqlite3.SQLITE_BUSY:
-            raise BlockingIOError(f"Snapshot lock is held: {path}") from exc
-        raise
-    return connection
-
-
 class SnapshotRun:
     def __init__(self, base: str, workflow: str, run: str, exclude_paths=()):
         self.base = str(Path(base).resolve())
@@ -172,14 +159,14 @@ class SnapshotRun:
         with self._lock():
             self.earlier = {ref[len(self.workflow):].split("/")[0] for ref in self._refs(self.workflow)}
             self.earlier.discard(self.run)
-            self.lease = _lease(self._lease_path(self.run), 0)
+            self.lease = acquire_sqlite_lease(self._lease_path(self.run), timeout=0)
 
     def _lease_path(self, run):
         key = hashlib.sha256((self.workflow + run).encode()).hexdigest()
         return self.locks / key
 
     def _lock(self):
-        return closing(_lease(self.locks / "promotion.lock", 60))
+        return closing(acquire_sqlite_lease(self.locks / "promotion.lock", timeout=60))
 
     def _refs(self, prefix):
         return _git(self.base, "for-each-ref", "--format=%(refname)", prefix).decode().splitlines()
@@ -300,7 +287,7 @@ class SnapshotRun:
                     for run in self.earlier:
                         path = self._lease_path(run)
                         try:
-                            lease = _lease(path, 0)
+                            lease = acquire_sqlite_lease(path, timeout=0)
                         except BlockingIOError:
                             continue
                         with closing(lease):

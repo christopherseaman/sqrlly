@@ -98,6 +98,7 @@ class WorkflowState(TypedDict):
     # nodes. Set by the subgraph wrapper before subgraph invocation; not
     # populated at the top level. Merged into build_context output.
     node_inputs: NotRequired[dict[str, str]]
+    run_vars: NotRequired[dict[str, str]]
     _cold_entry: NotRequired[str]
     settled_attempts: Annotated[dict[str, int], REDUCERS["settled_attempts"]]
     required_attempts: Annotated[dict[str, int], REDUCERS["required_attempts"]]

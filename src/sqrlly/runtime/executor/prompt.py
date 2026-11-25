@@ -39,11 +39,22 @@ def retry_delay(attempt: int, backoff: list[float]) -> float:
     return backoff[idx]
 
 
+class RunVariables(dict[str, str]):
+    """A template namespace with key-only lookup."""
+
+
 class _WorkflowEnvironment(Environment):
     def getattr(self, obj, attribute):
         if isinstance(obj, dict) and attribute in obj:
             return obj[attribute]
+        if isinstance(obj, RunVariables):
+            return self.undefined(obj=obj, name=attribute)
         return super().getattr(obj, attribute)
+
+    def getitem(self, obj, argument):
+        if isinstance(obj, RunVariables) and isinstance(argument, str):
+            return self.getattr(obj, argument)
+        return super().getitem(obj, argument)
 
 
 _TEMPLATES = _WorkflowEnvironment(keep_trailing_newline=True)

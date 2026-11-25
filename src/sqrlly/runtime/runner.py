@@ -37,9 +37,12 @@ async def run_workflow(
     #     events derive from the partial update directly (no diffing).
     #   - ``("values", cumulative_state_dict)`` snapshots; tracked here
     #     only to capture the final state for the run summary.
+    # Persist the preceding state before a new step can dispatch an external action.
+    # LangGraph's synchronous barrier requires an active checkpointer.
     async for chunk_type, payload in compiled_graph.astream(
         initial_state, config=run_config,
         stream_mode=["updates", "values"],
+        durability="sync" if compiled_graph.checkpointer else None,
     ):
         if chunk_type == "values":
             last_state = payload

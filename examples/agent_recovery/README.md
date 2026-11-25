@@ -39,12 +39,15 @@ cat "$repo/message.txt"    # release notes ready
 test ! -e "$repo/report.json"
 ```
 
-Create Beta's missing destination file in the same repository. Resume
-with the same workflow path and workdir to reuse the checkpoint.
+Inspect the saved run, then create Beta's destination file. Resume by ID
+using the same workflow path and working directory.
 
 ```bash
+sqrlly status workflow.yaml --workdir "$repo" --history 5
+run_id=$(sqrlly status workflow.yaml --workdir "$repo" --json |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["run_id"])')
 printf '%s\n' Beta > "$repo/beta.txt"
-sqrlly run workflow.yaml --workdir "$repo" --log "$scratch/resume.jsonl" --resume
+sqrlly run workflow.yaml --workdir "$repo" --log "$scratch/resume.jsonl" --resume --run-id "$run_id"
 cat "$repo/report.json"
 ```
 
