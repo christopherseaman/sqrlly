@@ -138,6 +138,7 @@ Use `settings.worktree_share` for shared dependency directories and `settings.wo
 executing),
 `--resume` (skip completed nodes, retry failed ones — see Debug),
 `--resume --run-id <id>` (resume a specific checkpoint),
+`--refresh-items` (rerun changed manifest items),
 `--rerun-all` (full replay of every node), `--resume-from <node>`
 (re-run node + downstream; implies `--resume`),
 `--var NAME=VALUE` (repeatable string inputs for `{{vars.NAME}}`),
@@ -218,8 +219,11 @@ before recording a measurement.
   caller-supplied inputs so the child can validate standalone.
 - A stable `item.id` preserves child identity when the object changes.
   Resume rereads a static manifest or uses the producer's saved output.
-  Use `--resume-from <producer>` to refresh a producer from changed inputs.
-  New items run and completed children keep their results. Editing an item
+  Use `--refresh-items` for revisions under stable IDs. Use
+  `--refresh-items --resume-from <producer>` when the producer must read
+  changed inputs. Include every input that determines a reusable result
+  in the item, such as a file's content hash. A checkpoint without item
+  hashes reruns its children on the first refresh. Editing an item
   without an explicit id drops its old value-based id. The default drift
   policy fails when an id disappears. Set `settings.on_manifest_drift: warn`
   to accept removals.

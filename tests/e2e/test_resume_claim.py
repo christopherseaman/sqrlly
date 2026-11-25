@@ -82,7 +82,7 @@ if attempt == "finish":
         assert ready.exists()
         expected = [] if interrupt else [("finish",)]
         assert effects() == expected
-        for flags in (("--resume",), ("--resume-from", "write"), ("--resume", "--rerun-all")):
+        for flags in (("--resume",), ("--resume-from", "write"), ("--refresh-items",), ("--resume", "--rerun-all")):
             contender = run("contender", *flags)
             assert contender.returncode == 1, contender.stdout + contender.stderr
             assert "This workflow run is already active" in contender.stderr

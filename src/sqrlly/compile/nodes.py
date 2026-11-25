@@ -226,12 +226,16 @@ def make_failure_update(
     }
 
 
-def assemble_success_update(node: Node, result: ExecutionResult) -> dict[str, Any]:
+def assemble_success_update(
+    node: Node, result: ExecutionResult, state: WorkflowState | None = None,
+) -> dict[str, Any]:
     update: dict[str, Any] = {
         "node_outputs": {node.id: result.output},
     }
     if result.structured_output is not None or (node.outputs and node.outputs.schema_file):
         update["node_structured_outputs"] = {node.id: result.structured_output}
+    elif state and node.id in state.get("node_structured_outputs", {}):
+        update["node_structured_outputs"] = {node.id}
     if result.model is not None or result.provider is not None:
         update["node_models"] = {
             node.id: {"model": result.model, "provider": result.provider}
@@ -294,7 +298,7 @@ def _make_execution_node(
             failure = make_failure_update(node.id, exec_result.error, kind=exec_result.error_kind or "node_error")
             return {**failure, "attempts": attempts}
 
-        update = assemble_success_update(node, exec_result)
+        update = assemble_success_update(node, exec_result, state)
         update["attempts"] = attempts
         if exec_result.worktree:
             update["node_worktrees"] = {node.id: exec_result.worktree}

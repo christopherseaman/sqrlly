@@ -50,6 +50,9 @@ def make_item_worker(prototype: Node, config: Graph, executor, settings: Setting
         while True:
             current = _merge_updates(state, update)
             execution = await body(current, writer=writer)
+            if "node_structured_outputs" in execution:
+                # One worker owns one output. Its last write must reach the checkpoint intact.
+                update.pop("node_structured_outputs", None)
             update = _merge_updates(update, execution)
             if child_id in execution.get("failed_nodes", set()):
                 return update

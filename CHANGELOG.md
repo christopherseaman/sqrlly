@@ -10,6 +10,8 @@ All notable changes to sqrlly are documented here. Format follows
 - Inspect saved workflow runs with `sqrlly status` and resume a specific run with `--run-id`.
 - Supply reusable workflow inputs with `sqrlly run --var NAME=VALUE`.
 - Correlate JSONL events by invocation ID and read each invocation's outcome.
+- Follow node starts and elapsed time through the terminal and JSONL log.
+- Use `--refresh-items` to rerun changed fan-out items while reusing completed siblings.
 
 ### Fixed
 
