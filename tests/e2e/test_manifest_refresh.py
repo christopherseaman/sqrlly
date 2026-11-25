@@ -78,6 +78,25 @@ def test_file_refresh_compares_to_producing_inputs_after_plain_resume(work):
     assert calls(work) == {"a:1": 1, "b:2": 1, "c:3": 1, "a:11": 1}
 
 
+def test_refresh_by_run_id_reuses_the_selected_checkpoint(work):
+    args = workflow(work)
+    status = ["status", args[1], "--workdir", str(work), "--json"]
+    write_items(work, row("a", 1), row("b", 2))
+    invoke(args)
+    first = json.loads(invoke(status))["run_id"]
+
+    write_items(work, row("a", 11), row("b", 22))
+    invoke(args)
+    second = json.loads(invoke(status))["run_id"]
+    assert first != second
+
+    write_items(work, row("b", 22), row("a", 1))
+    invoke(args, "--refresh-items", "--run-id", first)
+    assert calls(work) == {"a:1": 1, "a:11": 1, "b:2": 1, "b:22": 2}
+    assert summaries(work)[-1] == ["22", "1"]
+    assert json.loads(invoke(status))["run_id"] == second
+
+
 def test_refresh_uses_producer_output_from_this_invocation(work):
     args = workflow(work, producer=True)
     write_items(work, row("a", 1), row("b", 2))
